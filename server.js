@@ -1,27 +1,90 @@
-// server.js
+// // server.js
+// const express = require("express");
+// const bodyParser = require("body-parser");
+// const cors = require("cors");
+// const helmet = require("helmet");
+// const morgan = require("morgan");
+// const db = require("./config/db");
+
+// const app = express();
+
+// // Aumentar el límite del body-parser
+// app.use(bodyParser.json({ limit: "50mb" }));
+// app.use(bodyParser.urlencoded({ limit: "50mb", extended: true }));
+
+// // Middlewares
+// app.use(helmet());
+// app.use(cors());
+// app.use(morgan("dev"));
+// app.use(express.json());
+
+// const authRoutes = require("./routes/authRoutes");
+// const userRoutes = require("./routes/userRoutes");
+// const roleRoutes = require("./routes/roleRoutes");
+// const permissionRoutes = require("./routes/permissionRoutes");
+// const empresaRoutes = require("./routes/empresaRoutes");
+
+// app.use("/api/auth", authRoutes);
+// app.use("/api/users", userRoutes);
+// app.use("/api/roles", roleRoutes);
+// app.use("/api/permissions", permissionRoutes);
+// app.use("/api/empresas", empresaRoutes);
+
+// // Ruta de prueba
+// app.get("/", (req, res) => {
+//   res.send("Backend funcionando!");
+// });
+
+// // Iniciar servidor
+// const PORT = process.env.PORT || 3001;
+// app.listen(PORT, () => {
+//   console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`);
+// });
+
 const express = require("express");
+const bodyParser = require("body-parser");
 const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
+const path = require("path");
 const db = require("./config/db");
 
 const app = express();
 
+// Aumentar el límite del body-parser
+app.use(bodyParser.json({ limit: "50mb" }));
+app.use(bodyParser.urlencoded({ limit: "50mb", extended: true }));
+
 // Middlewares
-app.use(helmet());
+app.use(
+  helmet({
+    crossOriginResourcePolicy: false, // Permite cargar imágenes desde el mismo servidor
+  })
+);
 app.use(cors());
 app.use(morgan("dev"));
 app.use(express.json());
 
-const authRoutes = require("./routes/authRoutes");
-app.use("/api/auth", authRoutes);
+// HACER PÚBLICA LA CARPETA DE IMÁGENES
+app.use("/assets/img", express.static(path.join(__dirname, "src/assets/img")));
 
-// Ruta de prueba
+// Rutas
+const authRoutes = require("./routes/authRoutes");
+const userRoutes = require("./routes/userRoutes");
+const roleRoutes = require("./routes/roleRoutes");
+const permissionRoutes = require("./routes/permissionRoutes");
+const empresaRoutes = require("./routes/empresaRoutes");
+
+app.use("/api/auth", authRoutes);
+app.use("/api/users", userRoutes);
+app.use("/api/roles", roleRoutes);
+app.use("/api/permissions", permissionRoutes);
+app.use("/api/empresas", empresaRoutes);
+
 app.get("/", (req, res) => {
   res.send("Backend funcionando!");
 });
 
-// Iniciar servidor
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`);

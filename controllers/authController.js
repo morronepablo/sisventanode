@@ -2,6 +2,7 @@
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
+const Role = require("../models/Role");
 require("dotenv").config();
 
 const login = async (req, res) => {
@@ -9,20 +10,32 @@ const login = async (req, res) => {
 
   try {
     const user = await User.findByEmail(email);
-    if (!user)
+    if (!user) {
       return res.status(401).json({ message: "Credenciales inválidas" });
+    }
 
     const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch)
+    if (!isMatch) {
       return res.status(401).json({ message: "Credenciales inválidas" });
+    }
 
-    // Construye el token con los datos reales del usuario
+    // Obtener roles del usuario
+    const roles = await Role.findByUserId(user.id);
+    let allPermisos = new Set();
+
+    // Obtener permisos de cada rol
+    for (const role of roles) {
+      const permisos = await Role.getPermissionsByRole(role.id);
+      permisos.forEach((p) => allPermisos.add(p));
+    }
+
     const token = jwt.sign(
       {
         id: user.id,
-        name: user.name, // ← ¡Aquí usas el nombre real de la base de datos!
+        name: user.name,
         email: user.email,
         empresa_id: user.empresa_id,
+        permisos: Array.from(allPermisos),
       },
       process.env.JWT_SECRET,
       { expiresIn: "7d" }
@@ -32,12 +45,14 @@ const login = async (req, res) => {
       token,
       user: {
         id: user.id,
-        name: user.name, // ← ¡Nombre real!
+        name: user.name,
         email: user.email,
         empresa_id: user.empresa_id,
+        permisos: Array.from(allPermisos),
       },
     });
   } catch (error) {
+    console.error("Error en login:", error);
     res
       .status(500)
       .json({ message: "Error en el servidor", error: error.message });
