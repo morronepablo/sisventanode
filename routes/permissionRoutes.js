@@ -7,10 +7,12 @@ const {
   createPermission,
   updatePermission,
   deletePermission,
+  countPermissions,
 } = require("../controllers/permissionController");
 
 const router = express.Router();
 
+router.get("/count", countPermissions);
 router.get("/", getAllPermissions);
 router.get("/:id", getPermissionById);
 router.get("/:id/detalles", getPermissionWithDetails);

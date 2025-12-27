@@ -9,9 +9,12 @@ const {
   createRole,
   updateRole,
   deleteRole,
+  countRoles,
 } = require("../controllers/roleController");
 
 const router = express.Router();
+
+router.get("/count", countRoles);
 
 router.get("/", getAllRoles);
 router.get("/:id", getRoleById);

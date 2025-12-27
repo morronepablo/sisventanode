@@ -1,6 +1,7 @@
 // controllers/userController.js
 const User = require("../models/User");
 const bcrypt = require("bcryptjs");
+const db = require("../config/db");
 
 const getAllUsers = async (req, res) => {
   try {
@@ -152,10 +153,34 @@ const deleteUser = async (req, res) => {
   }
 };
 
+// const countUsers = async (req, res) => {
+//   try {
+//     const [rows] = await db.execute("SELECT COUNT(*) AS total FROM users");
+//     res.json({ total: rows[0].total });
+//     console.log("Totales usuarios...", res.json({ total: rows[0].total }));
+//   } catch (error) {
+//     console.error("Error al contar usuarios:", error);
+//     res.status(500).json({ total: 0 });
+//   }
+// };
+
+const countUsers = async (req, res) => {
+  try {
+    const [rows] = await db.execute("SELECT COUNT(*) AS total FROM users");
+    const total = rows[0].total;
+    console.log("Total de usuarios:", total);
+    res.json({ total });
+  } catch (error) {
+    console.error("Error al contar usuarios:", error);
+    res.status(500).json({ total: 0 });
+  }
+};
+
 module.exports = {
   getAllUsers,
   getUserById,
   createUser,
   updateUser,
   deleteUser,
+  countUsers,
 };

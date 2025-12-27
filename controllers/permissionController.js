@@ -65,12 +65,10 @@ const getPermissionWithDetails = async (req, res) => {
     });
   } catch (error) {
     console.error("Error al obtener detalles del permiso:", error);
-    res
-      .status(500)
-      .json({
-        message: "Error al obtener detalles del permiso",
-        error: error.message,
-      });
+    res.status(500).json({
+      message: "Error al obtener detalles del permiso",
+      error: error.message,
+    });
   }
 };
 
@@ -169,6 +167,18 @@ const deletePermission = async (req, res) => {
   }
 };
 
+const countPermissions = async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      "SELECT COUNT(*) AS total FROM permissions"
+    );
+    res.json({ total: rows[0].total });
+  } catch (error) {
+    console.error("Error al contar permisos:", error);
+    res.status(500).json({ total: 0 });
+  }
+};
+
 module.exports = {
   getAllPermissions,
   getPermissionById,
@@ -176,4 +186,5 @@ module.exports = {
   createPermission,
   updatePermission,
   deletePermission,
+  countPermissions,
 };

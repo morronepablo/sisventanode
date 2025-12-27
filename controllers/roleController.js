@@ -196,12 +196,10 @@ const assignPermissionsToRole = async (req, res) => {
     res.json({ message: "Permisos asignados exitosamente" });
   } catch (error) {
     console.error("Error al asignar permisos al rol:", error);
-    res
-      .status(500)
-      .json({
-        message: "Error al asignar permisos al rol",
-        error: error.message,
-      });
+    res.status(500).json({
+      message: "Error al asignar permisos al rol",
+      error: error.message,
+    });
   }
 };
 
@@ -303,6 +301,16 @@ const deleteRole = async (req, res) => {
   }
 };
 
+const countRoles = async (req, res) => {
+  try {
+    const [rows] = await db.execute("SELECT COUNT(*) AS total FROM roles");
+    res.json({ total: rows[0].total });
+  } catch (error) {
+    console.error("Error al contar roles:", error);
+    res.status(500).json({ total: 0 });
+  }
+};
+
 module.exports = {
   getAllRoles,
   getRoleById,
@@ -312,4 +320,5 @@ module.exports = {
   createRole,
   updateRole,
   deleteRole,
+  countRoles,
 };
