@@ -1,0 +1,4 @@
+"codigo","nombre","nombre_corto","stock","stock_minimo","stock_maximo","precio_compra","precio_venta","aplicar_porcentaje","valor_porcentaje","Categoria","Unidad"
+"7501054550563","Curitas Transpiel 40","CURITA-TRANS-40","20","10","100","500","1000","1","100","Perfumeria","Unidad"
+"7790520014214","Lysoform Desinfectante 360 cm3","LYSO-DESIN-360","20","10","100","1500","3000","1","100","Perfumeria","Unidad"
+"7791600065478","Caro Cuore Desodorante 123 ml","CARO-CUORE-123","20","10","100","2000","4000","1","100","Perfumeria","Unidad"

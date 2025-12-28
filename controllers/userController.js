@@ -153,17 +153,6 @@ const deleteUser = async (req, res) => {
   }
 };
 
-// const countUsers = async (req, res) => {
-//   try {
-//     const [rows] = await db.execute("SELECT COUNT(*) AS total FROM users");
-//     res.json({ total: rows[0].total });
-//     console.log("Totales usuarios...", res.json({ total: rows[0].total }));
-//   } catch (error) {
-//     console.error("Error al contar usuarios:", error);
-//     res.status(500).json({ total: 0 });
-//   }
-// };
-
 const countUsers = async (req, res) => {
   try {
     const [rows] = await db.execute("SELECT COUNT(*) AS total FROM users");
