@@ -5,9 +5,11 @@ const {
   getProveedorById,
   createProveedor,
   updateProveedor,
+  countProveedores,
 } = require("../controllers/proveedorController");
 const router = express.Router();
 
+router.get("/count", countProveedores);
 router.get("/", getListadoProveedores);
 router.get("/:id", getProveedorById);
 router.post("/", createProveedor);

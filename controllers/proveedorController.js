@@ -1,5 +1,6 @@
 // controllers/proveedorController.js
 const Proveedor = require("../models/Proveedor");
+const db = require("../config/db");
 
 const getListadoProveedores = async (req, res) => {
   try {
@@ -73,12 +74,20 @@ const updateProveedor = async (req, res) => {
     }
     res.json({ message: "Proveedor actualizado con éxito" });
   } catch (error) {
-    res
-      .status(500)
-      .json({
-        message: "Error al actualizar el proveedor",
-        error: error.message,
-      });
+    res.status(500).json({
+      message: "Error al actualizar el proveedor",
+      error: error.message,
+    });
+  }
+};
+
+const countProveedores = async (req, res) => {
+  try {
+    const [rows] = await db.execute("SELECT COUNT(*) AS total FROM proveedors");
+    res.json({ total: rows[0].total });
+  } catch (error) {
+    console.error("Error al contar proveedores:", error);
+    res.status(500).json({ total: 0 });
   }
 };
 
@@ -87,4 +96,5 @@ module.exports = {
   getProveedorById,
   createProveedor,
   updateProveedor,
+  countProveedores,
 };

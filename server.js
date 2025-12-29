@@ -42,6 +42,7 @@ const categoriaRoutes = require("./routes/categoriaRoutes");
 const unidadRoutes = require("./routes/unidadRoutes");
 const productoRoutes = require("./routes/productoRoutes");
 const proveedorRoutes = require("./routes/proveedorRoutes");
+const arqueoRoutes = require("./routes/arqueoRoutes");
 
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
@@ -52,6 +53,7 @@ app.use("/api/categorias", categoriaRoutes);
 app.use("/api/unidades", unidadRoutes);
 app.use("/api/productos", productoRoutes);
 app.use("/api/proveedores", proveedorRoutes);
+app.use("/api/arqueos", arqueoRoutes);
 
 app.get("/", (req, res) => {
   res.send("Backend funcionando!");
