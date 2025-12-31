@@ -5,14 +5,24 @@ const {
   getProveedorById,
   createProveedor,
   updateProveedor,
+  getGestionPagos,
+  postRegistrarPago,
+  getProveedoresConDeuda,
+  getMovimientos,
   countProveedores,
+  getProveedoresSummary,
 } = require("../controllers/proveedorController");
 const router = express.Router();
 
 router.get("/count", countProveedores);
+router.get("/summary", getProveedoresSummary);
 router.get("/", getListadoProveedores);
+router.get("/con-deuda", getProveedoresConDeuda);
 router.get("/:id", getProveedorById);
+router.get("/:id/pagos", getGestionPagos);
+router.get("/:id/movimientos", getMovimientos);
 router.post("/", createProveedor);
+router.post("/:id/pagos", postRegistrarPago);
 router.put("/:id", updateProveedor);
 
 module.exports = router;

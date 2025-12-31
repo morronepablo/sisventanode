@@ -34,15 +34,31 @@ const verificarEstado = async (req, res) => {
 
 const checkArqueoAbierto = async (req, res) => {
   try {
-    // Buscamos si existe al menos un arqueo que no tenga fecha de cierre
-    const [rows] = await db.execute(
-      "SELECT id FROM arqueos WHERE fecha_cierre IS NULL LIMIT 1"
+    // Obtenemos la empresa del usuario desde el token (middleware)
+    const empresa_id = req.user.empresa_id;
+
+    // Buscamos un arqueo que NO tenga fecha de cierre
+    // IMPORTANTE: Chequeamos NULL, vacío y '0000-00-00' por compatibilidad
+    const query = `
+      SELECT id FROM arqueos 
+      WHERE empresa_id = ? 
+      AND (fecha_cierre IS NULL OR fecha_cierre = '' OR fecha_cierre = '0000-00-00 00:00:00') 
+      LIMIT 1`;
+
+    const [rows] = await db.execute(query, [empresa_id]);
+
+    console.log(
+      `[DEBUG] Arqueo abierto para empresa ${empresa_id}:`,
+      rows.length > 0
     );
 
-    // Si rows tiene algo, es que hay un arqueo abierto
-    res.json({ arqueoAbierto: rows.length > 0 });
+    res.json({
+      arqueoAbierto: rows.length > 0,
+      id_arqueo: rows.length > 0 ? rows[0].id : null,
+    });
   } catch (error) {
-    res.status(500).json({ arqueoAbierto: false, error: error.message });
+    console.error("Error en checkArqueoAbierto:", error);
+    res.status(500).json({ arqueoAbierto: false, id_arqueo: null });
   }
 };
 
