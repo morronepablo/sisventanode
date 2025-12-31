@@ -9,6 +9,13 @@ const {
   updatePrecioCompra,
   storeCompra,
   getCompraById,
+  generarReporte,
+  getInformeProductos,
+  generarInformeProductosPDF,
+  getInformeProveedores,
+  generarInformeProveedoresPDF,
+  getInformeNoPagadas,
+  generarInformeNoPagadasPDF,
   countCompras,
   getComprasSummary,
 } = require("../controllers/compraController");
@@ -17,6 +24,13 @@ const router = express.Router();
 
 router.get("/count", countCompras);
 router.get("/summary", getComprasSummary);
+router.get("/reporte", generarReporte);
+router.get("/informes/productos", getInformeProductos);
+router.get("/informes/productos-pdf", generarInformeProductosPDF);
+router.get("/informes/proveedores", getInformeProveedores);
+router.get("/informes/proveedores-pdf", generarInformeProveedoresPDF);
+router.get("/informes/no-pagadas", getInformeNoPagadas);
+router.get("/informes/no-pagadas-pdf", generarInformeNoPagadasPDF);
 
 // 1. RUTAS FIJAS (Deben ir primero)
 router.get("/tmp", getTmpCompras);
