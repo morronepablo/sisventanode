@@ -108,6 +108,8 @@ const generarReporte = async (req, res) => {
     // 1. Obtener datos de empresa y compras
     const [empresaRows] = await db.execute("SELECT * FROM empresas LIMIT 1");
     const empresa = empresaRows[0];
+
+    // Obtenemos las compras (Asegúrate de que traiga el nombre del proveedor)
     const compras = await Compra.getAll();
 
     if (!empresa)
@@ -116,56 +118,68 @@ const generarReporte = async (req, res) => {
     // 2. Preparar el Logo en Base64
     let logoBase64 = "";
     try {
-      // Ajusta esta ruta a donde realmente guardas el logo de la empresa
       const logoPath = path.join(__dirname, "../src/assets/img", empresa.logo);
       if (fs.existsSync(logoPath)) {
         const bitmap = fs.readFileSync(logoPath);
-        logoBase64 = `data:image/png;base64,${new Buffer.from(bitmap).toString(
-          "base64"
-        )}`;
+        logoBase64 = `data:image/png;base64,${bitmap.toString("base64")}`;
       }
     } catch (e) {
       console.error("Error al cargar logo:", e);
     }
 
-    // 3. Construir las filas de la tabla
+    // 3. Construir las filas de la tabla y calcular total
     let tablaFilas = "";
+    let totalGeneral = 0;
+
     compras.forEach((c, index) => {
       const fecha = new Date(c.fecha).toLocaleDateString("es-AR");
-      const precio = parseFloat(c.precio_total).toLocaleString("es-AR", {
-        minimumFractionDigits: 2,
-      });
+      const precioTotal = parseFloat(c.precio_total);
+      totalGeneral += precioTotal;
+
       tablaFilas += `
                 <tr>
-                    <td style="text-align: center; border-bottom: 1px solid #eee;">${
-                      index + 1
+                    <td style="text-align: center;">${index + 1}</td>
+                    <td style="text-align: center;">${fecha}</td>
+                    <td style="text-align: left;">${c.comprobante}</td>
+                    <td style="text-align: left;">${
+                      c.proveedor_nombre || "N/A"
                     }</td>
-                    <td style="text-align: center; border-bottom: 1px solid #eee;">${fecha}</td>
-                    <td style="text-align: left; border-bottom: 1px solid #eee;">${
-                      c.comprobante
-                    }</td>
-                    <td style="text-align: right; border-bottom: 1px solid #eee;">$ ${precio}</td>
+                    <td style="text-align: right;">$ ${precioTotal.toLocaleString(
+                      "es-AR",
+                      { minimumFractionDigits: 2 }
+                    )}</td>
                 </tr>
             `;
     });
 
-    // 4. HTML Completo (Basado en tu diseño de Laravel)
+    // 4. HTML del Reporte (Estilo sincronizado con Ventas)
     const htmlContent = `
         <!DOCTYPE html>
         <html>
         <head>
             <meta charset="UTF-8">
             <style>
-                body { font-family: 'Helvetica', 'Arial', sans-serif; color: #333; margin: 0; }
+                body { font-family: 'Helvetica', Arial, sans-serif; color: #333; margin: 0; }
                 .header { background-color: #f8f9fa; padding: 20px; border-bottom: 2px solid #007bff; }
                 .header table { width: 100%; }
-                .content { padding: 20px; }
+                .content { padding: 20px; padding-bottom: 60px; }
                 h1 { color: #333; margin: 0; font-size: 24px; }
                 h2 { color: #666; font-size: 18px; margin-bottom: 10px; }
                 .table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-                .table th { background-color: #e9ecef; color: #495057; padding: 10px; text-align: center; font-size: 12px; border: 1px solid #dee2e6; }
+                .table th { background-color: #343a40; color: #fff; padding: 10px; text-align: center; font-size: 12px; border: 1px solid #dee2e6; }
                 .table td { padding: 10px; font-size: 11px; border: 1px solid #dee2e6; }
-                .footer { position: fixed; bottom: 0; width: 100%; text-align: center; font-size: 10px; color: #999; padding: 10px 0; }
+                .total-box { text-align: right; margin-top: 20px; font-size: 14px; font-weight: bold; border-top: 2px solid #333; padding-top: 10px; }
+                
+                .footer { 
+                    position: fixed; 
+                    bottom: 0; 
+                    width: 100%; 
+                    text-align: center; 
+                    font-size: 9px; 
+                    color: #777; 
+                    padding-top: 35px; 
+                    border-top: 1px solid #eee;
+                }
             </style>
         </head>
         <body>
@@ -174,9 +188,9 @@ const generarReporte = async (req, res) => {
                     <tr>
                         <td style="width: 30%; font-size: 10px;">
                             <strong>${empresa.nombre_empresa}</strong><br>
-                            ${empresa.tipo_empresa || ""}<br>
-                            ${empresa.correo || ""}<br>
-                            ${empresa.telefono || ""}
+                            CUIT: ${empresa.cuit}<br>
+                            ${empresa.correo}<br>
+                            ${empresa.telefono}
                         </td>
                         <td style="text-align: center; width: 40%;">
                             <h1>SISTEMA DE VENTAS</h1>
@@ -193,21 +207,29 @@ const generarReporte = async (req, res) => {
             </div>
 
             <div class="content">
-                <h2>Reporte de compras</h2>
+                <h2>Reporte General de Compras</h2>
                 <hr style="border: 0; border-top: 1px solid #eee;">
                 <table class="table">
                     <thead>
                         <tr>
                             <th width="40">Nro</th>
-                            <th width="100">Fecha</th>
-                            <th>Comprobante</th>
-                            <th width="120">Precio Total</th>
+                            <th width="90">Fecha</th>
+                            <th width="150">Comprobante</th>
+                            <th>Proveedor</th>
+                            <th width="120">Monto Total</th>
                         </tr>
                     </thead>
                     <tbody>
                         ${tablaFilas}
                     </tbody>
                 </table>
+                
+                <div class="total-box">
+                    TOTAL GENERAL COMPRADO: $ ${totalGeneral.toLocaleString(
+                      "es-AR",
+                      { minimumFractionDigits: 2 }
+                    )}
+                </div>
             </div>
 
             <div class="footer">
@@ -219,24 +241,22 @@ const generarReporte = async (req, res) => {
         </html>
         `;
 
-    // 5. Configuración de generación
     const options = {
       format: "A4",
       orientation: "portrait",
-      border: { top: "10mm", right: "10mm", bottom: "10mm", left: "10mm" },
+      border: { top: "10mm", right: "10mm", bottom: "15mm", left: "10mm" },
     };
 
-    // 6. Crear el PDF y enviarlo
     pdf.create(htmlContent, options).toBuffer((err, buffer) => {
       if (err) {
-        console.error("Error html-pdf:", err);
+        console.error(err);
         return res.status(500).send("Error al generar el PDF");
       }
       res.setHeader("Content-Type", "application/pdf");
       res.send(buffer);
     });
   } catch (error) {
-    console.error("Error en reporte:", error);
+    console.error("Error en reporte compras:", error);
     res.status(500).send("Error interno");
   }
 };

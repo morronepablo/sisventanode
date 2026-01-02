@@ -43,6 +43,9 @@ const unidadRoutes = require("./routes/unidadRoutes");
 const productoRoutes = require("./routes/productoRoutes");
 const proveedorRoutes = require("./routes/proveedorRoutes");
 const compraRoutes = require("./routes/compraRoutes");
+const clienteRoutes = require("./routes/clienteRoutes");
+const ventaRoutes = require("./routes/ventaRoutes");
+const comboRoutes = require("./routes/comboRoutes");
 const arqueoRoutes = require("./routes/arqueoRoutes");
 
 app.use("/api/auth", authRoutes);
@@ -55,6 +58,9 @@ app.use("/api/unidades", unidadRoutes);
 app.use("/api/productos", productoRoutes);
 app.use("/api/proveedores", proveedorRoutes);
 app.use("/api/compras", compraRoutes);
+app.use("/api/clientes", clienteRoutes);
+app.use("/api/ventas", ventaRoutes);
+app.use("/api/combos", comboRoutes);
 app.use("/api/arqueos", arqueoRoutes);
 
 app.get("/", (req, res) => {

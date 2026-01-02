@@ -93,36 +93,251 @@ const createArqueo = async (req, res) => {
   }
 };
 
+// const getArqueoById = async (req, res) => {
+//   try {
+//     const { id } = req.params; // ID del Arqueo
+
+//     const [arqueoRows] = await db.execute(
+//       `SELECT a.*, u.name as usuario_nombre FROM arqueos a
+//        INNER JOIN users u ON a.usuario_id = u.id WHERE a.id = ?`,
+//       [id]
+//     );
+
+//     if (arqueoRows.length === 0)
+//       return res.status(404).json({ message: "Arqueo no encontrado" });
+//     const arqueo = arqueoRows[0];
+
+//     // SUMAR VENTAS VINCULADAS A ESTE ARQUEO_ID (Infallible)
+//     const [ventasTotals] = await db.execute(
+//       `
+//       SELECT
+//         IFNULL(SUM(tarjeta), 0) as total_tarjeta_sistema,
+//         IFNULL(SUM(mercadopago), 0) as total_mp_sistema,
+//         IFNULL(SUM(efectivo), 0) as total_efectivo_sistema
+//       FROM ventas
+//       WHERE arqueo_id = ?`,
+//       [id]
+//     );
+
+//     const [movimientos] = await db.execute(
+//       "SELECT * FROM movimiento_cajas WHERE arqueo_id = ? ORDER BY created_at ASC",
+//       [id]
+//     );
+
+//     res.json({
+//       arqueo,
+//       movimientos,
+//       totales_sistema: ventasTotals[0],
+//     });
+//   } catch (error) {
+//     res.status(500).json({ message: "Error al obtener arqueo" });
+//   }
+// };
+
+// const getArqueoById = async (req, res) => {
+//   try {
+//     const { id } = req.params;
+
+//     const [arqueoRows] = await db.execute(
+//       `SELECT a.*, u.name as usuario_nombre FROM arqueos a
+//        INNER JOIN users u ON a.usuario_id = u.id WHERE a.id = ?`,
+//       [id]
+//     );
+
+//     if (arqueoRows.length === 0)
+//       return res.status(404).json({ message: "Arqueo no encontrado" });
+//     const arqueo = arqueoRows[0];
+
+//     // SUMAR VENTAS VINCULADAS (Incluyendo Transferencia)
+//     const [ventasTotals] = await db.execute(
+//       `
+//       SELECT
+//         IFNULL(SUM(efectivo), 0) as total_efectivo_sistema,
+//         IFNULL(SUM(tarjeta), 0) as total_tarjeta_sistema,
+//         IFNULL(SUM(mercadopago), 0) as total_mp_sistema,
+//         IFNULL(SUM(transferencia), 0) as total_transf_sistema
+//       FROM ventas
+//       WHERE arqueo_id = ?`,
+//       [id]
+//     );
+
+//     const [movimientos] = await db.execute(
+//       "SELECT * FROM movimiento_cajas WHERE arqueo_id = ? ORDER BY created_at ASC",
+//       [id]
+//     );
+
+//     res.json({
+//       arqueo,
+//       movimientos,
+//       totales_sistema: ventasTotals[0],
+//     });
+//   } catch (error) {
+//     res.status(500).json({ message: "Error al obtener arqueo" });
+//   }
+// };
+
+// const getArqueoById = async (req, res) => {
+//   const { id } = req.params;
+//   try {
+//     const [arqueo] = await db.execute("SELECT * FROM arqueos WHERE id = ?", [
+//       id,
+//     ]);
+
+//     // CONSULTA DE TOTALES (Ventas + Pagos Cta Cte)
+//     const queryTotales = `
+//             SELECT
+//                 /* Suma de Ventas */
+//                 IFNULL((SELECT SUM(precio_total) FROM ventas WHERE arqueo_id = ? AND metodo_pago = 'tarjeta'), 0) +
+//                 IFNULL((SELECT SUM(monto) FROM pagos WHERE arqueo_id = ? AND metodo_pago = 'tarjeta'), 0) as total_tarjeta_sistema,
+
+//                 IFNULL((SELECT SUM(precio_total) FROM ventas WHERE arqueo_id = ? AND metodo_pago = 'mercadopago'), 0) +
+//                 IFNULL((SELECT SUM(monto) FROM pagos WHERE arqueo_id = ? AND metodo_pago = 'mercadopago'), 0) as total_mp_sistema,
+
+//                 IFNULL((SELECT SUM(precio_total) FROM ventas WHERE arqueo_id = ? AND metodo_pago = 'transferencia'), 0) +
+//                 IFNULL((SELECT SUM(monto) FROM pagos WHERE arqueo_id = ? AND metodo_pago = 'transferencia'), 0) as total_transf_sistema
+//         `;
+
+//     const [totales] = await db.execute(queryTotales, [id, id, id, id, id, id]);
+
+//     res.json({
+//       arqueo: arqueo[0],
+//       totales_sistema: totales[0],
+//     });
+//   } catch (error) {
+//     res.status(500).json({ message: error.message });
+//   }
+// };
+
+// const getArqueoById = async (req, res) => {
+//   const { id } = req.params;
+//   try {
+//     const [arqueo] = await db.execute("SELECT * FROM arqueos WHERE id = ?", [
+//       id,
+//     ]);
+
+//     if (arqueo.length === 0) {
+//       return res.status(404).json({ message: "Arqueo no encontrado" });
+//     }
+
+//     // Esta consulta suma Ventas + Pagos de clientes para cada método
+//     const queryTotales = `
+//             SELECT
+//                 (IFNULL((SELECT SUM(precio_total) FROM ventas WHERE arqueo_id = ? AND metodo_pago = 'tarjeta'), 0) +
+//                  IFNULL((SELECT SUM(monto) FROM pagos WHERE arqueo_id = ? AND metodo_pago = 'tarjeta'), 0)) as total_tarjeta_sistema,
+
+//                 (IFNULL((SELECT SUM(precio_total) FROM ventas WHERE arqueo_id = ? AND metodo_pago = 'mercadopago'), 0) +
+//                  IFNULL((SELECT SUM(monto) FROM pagos WHERE arqueo_id = ? AND metodo_pago = 'mercadopago'), 0)) as total_mp_sistema,
+
+//                 (IFNULL((SELECT SUM(precio_total) FROM ventas WHERE arqueo_id = ? AND metodo_pago = 'transferencia'), 0) +
+//                  IFNULL((SELECT SUM(monto) FROM pagos WHERE arqueo_id = ? AND metodo_pago = 'transferencia'), 0)) as total_transf_sistema
+//         `;
+
+//     // Pasamos el ID 6 veces porque hay 6 signos de interrogación (?) en la consulta
+//     const [totales] = await db.execute(queryTotales, [id, id, id, id, id, id]);
+
+//     res.json({
+//       arqueo: arqueo[0],
+//       totales_sistema: totales[0],
+//     });
+//   } catch (error) {
+//     console.error("Error en getArqueoById:", error); // Esto saldrá en tu consola de Node (terminal)
+//     res.status(500).json({ message: error.message });
+//   }
+// };
+
+// const getArqueoById = async (req, res) => {
+//   const { id } = req.params;
+//   try {
+//     const [arqueo] = await db.execute("SELECT * FROM arqueos WHERE id = ?", [
+//       id,
+//     ]);
+
+//     if (arqueo.length === 0) {
+//       return res.status(404).json({ message: "Arqueo no encontrado" });
+//     }
+
+//     // CONSULTA CORREGIDA:
+//     // Para 'ventas' sumamos directamente la columna (tarjeta, mercadopago, etc.)
+//     // Para 'pagos' sumamos la columna 'monto' filtrando por el texto en 'metodo_pago'
+//     const queryTotales = `
+//             SELECT
+//                 (
+//                     IFNULL((SELECT SUM(tarjeta) FROM ventas WHERE arqueo_id = ?), 0) +
+//                     IFNULL((SELECT SUM(monto) FROM pagos WHERE arqueo_id = ? AND metodo_pago = 'tarjeta'), 0)
+//                 ) as total_tarjeta_sistema,
+
+//                 (
+//                     IFNULL((SELECT SUM(mercadopago) FROM ventas WHERE arqueo_id = ?), 0) +
+//                     IFNULL((SELECT SUM(monto) FROM pagos WHERE arqueo_id = ? AND metodo_pago = 'mercadopago'), 0)
+//                 ) as total_mp_sistema,
+
+//                 (
+//                     IFNULL((SELECT SUM(transferencia) FROM ventas WHERE arqueo_id = ?), 0) +
+//                     IFNULL((SELECT SUM(monto) FROM pagos WHERE arqueo_id = ? AND metodo_pago = 'transferencia'), 0)
+//                 ) as total_transf_sistema
+//         `;
+
+//     // Pasamos el ID 6 veces para completar los signos de interrogación (?)
+//     const [totales] = await db.execute(queryTotales, [id, id, id, id, id, id]);
+
+//     res.json({
+//       arqueo: arqueo[0],
+//       totales_sistema: totales[0],
+//     });
+//   } catch (error) {
+//     console.error("Error en getArqueoById:", error);
+//     res.status(500).json({ message: error.message });
+//   }
+// };
+
 const getArqueoById = async (req, res) => {
+  const { id } = req.params;
   try {
-    const { id } = req.params;
+    // 1. Obtener datos básicos del arqueo
+    const [arqueo] = await db.execute("SELECT * FROM arqueos WHERE id = ?", [
+      id,
+    ]);
 
-    // 1. Obtener el arqueo con el nombre del usuario
-    const [arqueoRows] = await db.execute(
-      `
-      SELECT a.*, u.name as usuario_nombre 
-      FROM arqueos a 
-      INNER JOIN users u ON a.usuario_id = u.id 
-      WHERE a.id = ?`,
-      [id]
-    );
-
-    if (arqueoRows.length === 0) {
+    if (arqueo.length === 0) {
       return res.status(404).json({ message: "Arqueo no encontrado" });
     }
 
-    const arqueo = arqueoRows[0];
-
-    // 2. Obtener los movimientos de este arqueo
+    // 2. OBTENER LOS MOVIMIENTOS (Esto es lo que faltaba y causaba el error .filter)
     const [movimientos] = await db.execute(
-      "SELECT * FROM movimiento_cajas WHERE arqueo_id = ? ORDER BY created_at ASC",
+      "SELECT * FROM movimiento_cajas WHERE arqueo_id = ? ORDER BY id DESC",
       [id]
     );
 
-    res.json({ arqueo, movimientos });
+    // 3. Obtener Totales del Sistema (Ventas + Pagos de Deuda)
+    const queryTotales = `
+            SELECT 
+                (
+                    IFNULL((SELECT SUM(tarjeta) FROM ventas WHERE arqueo_id = ?), 0) + 
+                    IFNULL((SELECT SUM(monto) FROM pagos WHERE arqueo_id = ? AND metodo_pago = 'tarjeta'), 0)
+                ) as total_tarjeta_sistema,
+                
+                (
+                    IFNULL((SELECT SUM(mercadopago) FROM ventas WHERE arqueo_id = ?), 0) + 
+                    IFNULL((SELECT SUM(monto) FROM pagos WHERE arqueo_id = ? AND metodo_pago = 'mercadopago'), 0)
+                ) as total_mp_sistema,
+                
+                (
+                    IFNULL((SELECT SUM(transferencia) FROM ventas WHERE arqueo_id = ?), 0) + 
+                    IFNULL((SELECT SUM(monto) FROM pagos WHERE arqueo_id = ? AND metodo_pago = 'transferencia'), 0)
+                ) as total_transf_sistema
+        `;
+
+    const [totales] = await db.execute(queryTotales, [id, id, id, id, id, id]);
+
+    // 4. Enviar la respuesta completa al frontend
+    res.json({
+      arqueo: arqueo[0],
+      movimientos: movimientos, // <--- Ahora el frontend podrá hacer el .filter()
+      totales_sistema: totales[0],
+    });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: "Error al obtener el detalle del arqueo" });
+    console.error("Error en getArqueoById:", error);
+    res.status(500).json({ message: error.message });
   }
 };
 
@@ -172,6 +387,34 @@ const storeMovimiento = async (req, res) => {
   }
 };
 
+// const closeArqueo = async (req, res) => {
+//   try {
+//     const { id } = req.params;
+//     const {
+//       fecha_cierre,
+//       monto_final,
+//       ventas_efectivo,
+//       ventas_tarjeta,
+//       ventas_mercadopago,
+//     } = req.body;
+
+//     const cerrado = await Arqueo.close(id, {
+//       fecha_cierre,
+//       monto_final,
+//       ventas_efectivo,
+//       ventas_tarjeta,
+//       ventas_mercadopago,
+//     });
+
+//     if (!cerrado)
+//       return res.status(404).json({ message: "No se pudo cerrar el arqueo" });
+
+//     res.json({ message: "Arqueo cerrado exitosamente" });
+//   } catch (error) {
+//     res.status(500).json({ message: "Error al cerrar arqueo" });
+//   }
+// };
+
 const closeArqueo = async (req, res) => {
   try {
     const { id } = req.params;
@@ -181,6 +424,7 @@ const closeArqueo = async (req, res) => {
       ventas_efectivo,
       ventas_tarjeta,
       ventas_mercadopago,
+      ventas_transferencia, // 👈 Recibimos transferencia
     } = req.body;
 
     const cerrado = await Arqueo.close(id, {
@@ -189,10 +433,10 @@ const closeArqueo = async (req, res) => {
       ventas_efectivo,
       ventas_tarjeta,
       ventas_mercadopago,
+      ventas_transferencia, // 👈 Lo pasamos al modelo
     });
 
-    if (!cerrado)
-      return res.status(404).json({ message: "No se pudo cerrar el arqueo" });
+    if (!cerrado) return res.status(404).json({ message: "No se pudo cerrar" });
 
     res.json({ message: "Arqueo cerrado exitosamente" });
   } catch (error) {
