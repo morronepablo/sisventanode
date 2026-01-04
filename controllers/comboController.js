@@ -161,10 +161,12 @@ const deleteCombo = async (req, res) => {
 
 const countCombos = async (req, res) => {
   try {
-    const [rows] = await db.execute("SELECT COUNT(*) AS total FROM combos");
-    const total = rows[0].total;
-    console.log("Total de combos:", total);
-    res.json({ total });
+    const empresa_id = req.user.empresa_id; // Obtenido del token
+    const [rows] = await db.execute(
+      "SELECT COUNT(*) AS total FROM combos WHERE empresa_id = ?",
+      [empresa_id]
+    );
+    res.json({ total: rows[0].total });
   } catch (error) {
     console.error("Error al contar combos:", error);
     res.status(500).json({ total: 0 });
