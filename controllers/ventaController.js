@@ -301,66 +301,201 @@ const generarReporte = async (req, res) => {
 const getInformeProductos = async (req, res) => {
   try {
     const { fecha_inicio, fecha_fin } = req.query;
-    // Agregamos un fallback por si req.user no está (aunque aquí debería estar por el middleware)
     const empresa_id = req.user ? req.user.empresa_id : 1;
 
     const query = `
-            SELECT 
-                p.codigo, 
-                p.nombre, 
-                SUM(dv.cantidad) as cantidad, 
-                u.nombre as unidad, 
-                p.precio_compra as costo, 
-                p.precio_venta as venta,
-                SUM(dv.cantidad * (p.precio_venta - p.precio_compra)) as ganancia,
-                SUM(dv.cantidad * p.precio_venta) as total
-            FROM detalle_ventas dv
-            JOIN ventas v ON dv.venta_id = v.id
-            JOIN productos p ON dv.producto_id = p.id
-            LEFT JOIN unidads u ON p.unidad_id = u.id
-            WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
-            GROUP BY p.id
-            ORDER BY total DESC
-        `;
+      SELECT 
+          codigo, nombre, unidad,
+          SUM(cantidad_neta) as cantidad,
+          costo_unitario as costo,
+          precio_venta_unitario as venta,
+          SUM(ganancia_neta) as ganancia,
+          SUM(total_neto) as total
+      FROM (
+          -- 1. PRODUCTOS VENDIDOS INDIVIDUALMENTE
+          SELECT 
+              p.codigo, p.nombre, IFNULL(u.nombre, 'Unidad') as unidad,
+              dv.cantidad as cantidad_neta,
+              p.precio_compra as costo_unitario,
+              p.precio_venta as precio_venta_unitario,
+              (dv.cantidad * (p.precio_venta - p.precio_compra)) as ganancia_neta,
+              (dv.cantidad * p.precio_venta) as total_neto
+          FROM detalle_ventas dv
+          JOIN ventas v ON dv.venta_id = v.id
+          JOIN productos p ON dv.producto_id = p.id
+          LEFT JOIN unidads u ON p.unidad_id = u.id
+          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
+
+          UNION ALL
+
+          -- 2. COMBOS VENDIDOS (Tratados como un solo producto)
+          SELECT 
+              c.codigo, c.nombre, 'Combo' as unidad,
+              dv.cantidad as cantidad_neta,
+              -- El costo del combo es la suma del costo de sus componentes
+              (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id) as costo_unitario,
+              c.precio_venta as precio_venta_unitario,
+              (dv.cantidad * (c.precio_venta - (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id))) as ganancia_neta,
+              (dv.cantidad * c.precio_venta) as total_neto
+          FROM detalle_ventas dv
+          JOIN ventas v ON dv.venta_id = v.id
+          JOIN combos c ON dv.combo_id = c.id
+          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
+
+          UNION ALL
+
+          -- 3. DEVOLUCIONES DE PRODUCTOS (RESTAN)
+          SELECT 
+              p.codigo, p.nombre, IFNULL(u.nombre, 'Unidad') as unidad,
+              (dd.cantidad * -1) as cantidad_neta,
+              p.precio_compra as costo_unitario,
+              p.precio_venta as precio_venta_unitario,
+              (dd.cantidad * (p.precio_venta - p.precio_compra) * -1) as ganancia_neta,
+              (dd.cantidad * p.precio_venta * -1) as total_neto
+          FROM detalle_devoluciones dd
+          JOIN devoluciones dev ON dd.devolucion_id = dev.id
+          JOIN productos p ON dd.producto_id = p.id
+          LEFT JOIN unidads u ON p.unidad_id = u.id
+          WHERE dev.empresa_id = ? AND dev.fecha BETWEEN ? AND ?
+
+          UNION ALL
+
+          -- 4. DEVOLUCIONES DE COMBOS (RESTAN)
+          SELECT 
+              c.codigo, c.nombre, 'Combo' as unidad,
+              (dd.cantidad * -1) as cantidad_neta,
+              (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id) as costo_unitario,
+              c.precio_venta as precio_venta_unitario,
+              (dd.cantidad * (c.precio_venta - (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id)) * -1) as ganancia_neta,
+              (dd.cantidad * c.precio_venta * -1) as total_neto
+          FROM detalle_devoluciones dd
+          JOIN devoluciones dev ON dd.devolucion_id = dev.id
+          JOIN combos c ON dd.combo_id = c.id
+          WHERE dev.empresa_id = ? AND dev.fecha BETWEEN ? AND ?
+      ) as t
+      GROUP BY codigo, nombre, unidad, costo_unitario, precio_venta_unitario
+      HAVING total <> 0
+      ORDER BY total DESC
+    `;
 
     const [rows] = await db.execute(query, [
       empresa_id,
       fecha_inicio,
-      fecha_fin,
+      fecha_fin, // Ventas Prods
+      empresa_id,
+      fecha_inicio,
+      fecha_fin, // Ventas Combos
+      empresa_id,
+      fecha_inicio,
+      fecha_fin, // Dev Prods
+      empresa_id,
+      fecha_inicio,
+      fecha_fin, // Dev Combos
     ]);
+
     res.json(rows);
   } catch (error) {
-    console.error("ERROR EN getInformeProductos Ventas:", error.message);
-    res.status(500).json({ message: "Error al procesar el informe" });
+    console.error("ERROR INFORME PRODUCTOS:", error);
+    res.status(500).json({ message: "Error en informe" });
   }
 };
 
 const generarInformeProductosPDF = async (req, res) => {
   try {
     const { fecha_inicio, fecha_fin } = req.query;
-    const empresa_id = req.query.empresa_id || 1; // Ajustar según manejo de sesión
+    const empresa_id = req.query.empresa_id || 1;
 
     const fInicio = fecha_inicio.split("-").reverse().join("/");
     const fFin = fecha_fin.split("-").reverse().join("/");
 
+    // MISMA QUERY QUE USAMOS EN EL DETALLE PARA QUE LOS DATOS SEAN IDÉNTICOS
     const query = `
-            SELECT 
-                p.codigo, p.nombre, SUM(dv.cantidad) as cantidad, u.nombre as unidad, 
-                p.precio_compra as costo, p.precio_venta as venta,
-                SUM(dv.cantidad * (p.precio_venta - p.precio_compra)) as ganancia_total,
-                SUM(dv.cantidad * p.precio_venta) as total
-            FROM detalle_ventas dv
-            JOIN ventas v ON dv.venta_id = v.id
-            JOIN productos p ON dv.producto_id = p.id
-            LEFT JOIN unidads u ON p.unidad_id = u.id
-            WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
-            GROUP BY p.id ORDER BY p.nombre ASC
-        `;
+      SELECT 
+          codigo, nombre, unidad,
+          SUM(cantidad_neta) as cantidad,
+          costo_unitario as costo,
+          precio_venta_unitario as venta,
+          SUM(ganancia_neta) as ganancia,
+          SUM(total_neto) as total
+      FROM (
+          -- 1. PRODUCTOS VENDIDOS INDIVIDUALMENTE
+          SELECT 
+              p.codigo, p.nombre, IFNULL(u.nombre, 'Unidad') as unidad,
+              dv.cantidad as cantidad_neta,
+              p.precio_compra as costo_unitario,
+              p.precio_venta as precio_venta_unitario,
+              (dv.cantidad * (p.precio_venta - p.precio_compra)) as ganancia_neta,
+              (dv.cantidad * p.precio_venta) as total_neto
+          FROM detalle_ventas dv
+          JOIN ventas v ON dv.venta_id = v.id
+          JOIN productos p ON dv.producto_id = p.id
+          LEFT JOIN unidads u ON p.unidad_id = u.id
+          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
+
+          UNION ALL
+
+          -- 2. COMBOS VENDIDOS (Tratados como un solo producto)
+          SELECT 
+              c.codigo, c.nombre, 'Combo' as unidad,
+              dv.cantidad as cantidad_neta,
+              (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id) as costo_unitario,
+              c.precio_venta as precio_venta_unitario,
+              (dv.cantidad * (c.precio_venta - (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id))) as ganancia_neta,
+              (dv.cantidad * c.precio_venta) as total_neto
+          FROM detalle_ventas dv
+          JOIN ventas v ON dv.venta_id = v.id
+          JOIN combos c ON dv.combo_id = c.id
+          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
+
+          UNION ALL
+
+          -- 3. DEVOLUCIONES DE PRODUCTOS (RESTAN)
+          SELECT 
+              p.codigo, p.nombre, IFNULL(u.nombre, 'Unidad') as unidad,
+              (dd.cantidad * -1) as cantidad_neta,
+              p.precio_compra as costo_unitario,
+              p.precio_venta as precio_venta_unitario,
+              (dd.cantidad * (p.precio_venta - p.precio_compra) * -1) as ganancia_neta,
+              (dd.cantidad * p.precio_venta * -1) as total_neto
+          FROM detalle_devoluciones dd
+          JOIN devoluciones dev ON dd.devolucion_id = dev.id
+          JOIN productos p ON dd.producto_id = p.id
+          LEFT JOIN unidads u ON p.unidad_id = u.id
+          WHERE dev.empresa_id = ? AND dev.fecha BETWEEN ? AND ?
+
+          UNION ALL
+
+          -- 4. DEVOLUCIONES DE COMBOS (RESTAN)
+          SELECT 
+              c.codigo, c.nombre, 'Combo' as unidad,
+              (dd.cantidad * -1) as cantidad_neta,
+              (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id) as costo_unitario,
+              c.precio_venta as precio_venta_unitario,
+              (dd.cantidad * (c.precio_venta - (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id)) * -1) as ganancia_neta,
+              (dd.cantidad * c.precio_venta * -1) as total_neto
+          FROM detalle_devoluciones dd
+          JOIN devoluciones dev ON dd.devolucion_id = dev.id
+          JOIN combos c ON dd.combo_id = c.id
+          WHERE dev.empresa_id = ? AND dev.fecha BETWEEN ? AND ?
+      ) as t
+      GROUP BY codigo, nombre, unidad, costo_unitario, precio_venta_unitario
+      HAVING total <> 0
+      ORDER BY total DESC
+    `;
 
     const [productos] = await db.execute(query, [
       empresa_id,
       fecha_inicio,
-      fecha_fin,
+      fecha_fin, // Ventas Prods
+      empresa_id,
+      fecha_inicio,
+      fecha_fin, // Ventas Combos
+      empresa_id,
+      fecha_inicio,
+      fecha_fin, // Dev Prods
+      empresa_id,
+      fecha_inicio,
+      fecha_fin, // Dev Combos
     ]);
 
     let filas = "";
@@ -370,78 +505,80 @@ const generarInformeProductosPDF = async (req, res) => {
 
     productos.forEach((p) => {
       totalCant += parseFloat(p.cantidad);
-      totalGanancia += parseFloat(p.ganancia_total);
+      totalGanancia += parseFloat(p.ganancia);
       totalGral += parseFloat(p.total);
 
       filas += `
-                <tr>
-                    <td style="text-align: center;">${p.codigo}</td>
-                    <td style="text-align: left;">${p.nombre}</td>
-                    <td style="text-align: center;">${p.cantidad}</td>
-                    <td style="text-align: center;">${p.unidad || "Unidad"}</td>
-                    <td style="text-align: right;">$ ${parseFloat(
-                      p.costo
-                    ).toLocaleString("es-AR")}</td>
-                    <td style="text-align: right;">$ ${parseFloat(
-                      p.venta
-                    ).toLocaleString("es-AR")}</td>
-                    <td style="text-align: right;">$ ${parseFloat(
-                      p.ganancia_total
-                    ).toLocaleString("es-AR")}</td>
-                    <td style="text-align: right;">$ ${parseFloat(
-                      p.total
-                    ).toLocaleString("es-AR")}</td>
-                </tr>`;
+        <tr>
+            <td style="text-align: center;">${p.codigo}</td>
+            <td style="text-align: left;">${p.nombre}</td>
+            <td style="text-align: center;">${p.cantidad}</td>
+            <td style="text-align: center;">${p.unidad}</td>
+            <td style="text-align: right;">$ ${parseFloat(
+              p.costo
+            ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
+            <td style="text-align: right;">$ ${parseFloat(
+              p.venta
+            ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
+            <td style="text-align: right;">$ ${parseFloat(
+              p.ganancia
+            ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
+            <td style="text-align: right;">$ ${parseFloat(
+              p.total
+            ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
+        </tr>`;
     });
 
     const html = `
-            <html>
-            <head>
-                <meta charset="UTF-8">
-                <style>
-                    body { font-family: sans-serif; font-size: 11px; }
-                    .header { text-align: center; color: #1a73e8; }
-                    .table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-                    .table th { background-color: #1a73e8; color: white; padding: 8px; }
-                    .table td { padding: 8px; border-bottom: 1px solid #eee; }
-                    .total-row { font-weight: bold; background-color: #f1f1f1; }
-                </style>
-            </head>
-            <body>
-                <div class="header">
-                    <h1>Informe de Ventas por Productos</h1>
-                    <p>Período: ${fInicio} - ${fFin}</p>
-                </div>
-                <table class="table">
-                    <thead>
-                        <tr>
-                            <th>CÓDIGO</th>
-                            <th>PRODUCTO</th>
-                            <th>CANT.</th>
-                            <th>UNIDAD</th>
-                            <th>COSTO</th>
-                            <th>VENTA</th>
-                            <th>GANANCIA</th>
-                            <th>TOTAL</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${filas}
-                        <tr class="total-row">
-                            <td colspan="2" style="text-align: center;">TOTALES</td>
-                            <td style="text-align: center;">${totalCant}</td>
-                            <td colspan="3"></td>
-                            <td style="text-align: right;">$ ${totalGanancia.toLocaleString(
-                              "es-AR"
-                            )}</td>
-                            <td style="text-align: right;">$ ${totalGral.toLocaleString(
-                              "es-AR"
-                            )}</td>
-                        </tr>
-                    </tbody>
-                </table>
-            </body>
-            </html>`;
+      <html>
+      <head>
+          <meta charset="UTF-8">
+          <style>
+              body { font-family: sans-serif; font-size: 11px; }
+              .header { text-align: center; color: #1a73e8; }
+              .table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+              .table th { background-color: #1a73e8; color: white; padding: 8px; border: 1px solid #1a73e8; }
+              .table td { padding: 8px; border: 1px solid #eee; }
+              .total-row { font-weight: bold; background-color: #f1f1f1; }
+          </style>
+      </head>
+      <body>
+          <div class="header">
+              <h1>Informe de Ventas por Productos</h1>
+              <p>Período: ${fInicio} - ${fFin}</p>
+          </div>
+          <table class="table">
+              <thead>
+                  <tr>
+                      <th>CÓDIGO</th>
+                      <th>PRODUCTO</th>
+                      <th>CANT.</th>
+                      <th>UNIDAD</th>
+                      <th>COSTO</th>
+                      <th>VENTA</th>
+                      <th>GANANCIA</th>
+                      <th>TOTAL</th>
+                  </tr>
+              </thead>
+              <tbody>
+                  ${filas}
+                  <tr class="total-row">
+                      <td colspan="2" style="text-align: center;">TOTALES</td>
+                      <td style="text-align: center;">${totalCant}</td>
+                      <td colspan="3"></td>
+                      <td style="text-align: right;">$ ${totalGanancia.toLocaleString(
+                        "es-AR",
+                        { minimumFractionDigits: 2 }
+                      )}</td>
+                      <td style="text-align: right;">$ ${totalGral.toLocaleString(
+                        "es-AR",
+                        { minimumFractionDigits: 2 }
+                      )}</td>
+                  </tr>
+              </tbody>
+          </table>
+      </body>
+      </html>`;
 
     const options = { format: "A4", orientation: "landscape", border: "10mm" };
     pdf.create(html, options).toBuffer((err, buffer) => {
@@ -450,6 +587,7 @@ const generarInformeProductosPDF = async (req, res) => {
       res.send(buffer);
     });
   } catch (error) {
+    console.error("ERROR PDF:", error);
     res.status(500).send(error.message);
   }
 };
@@ -457,64 +595,183 @@ const generarInformeProductosPDF = async (req, res) => {
 const getInformeClientes = async (req, res) => {
   try {
     const { fecha_inicio, fecha_fin } = req.query;
-    // Verificación de seguridad para req.user
     const empresa_id = req.user ? req.user.empresa_id : 1;
 
     const query = `
-            SELECT 
-                IFNULL(cl.nombre_cliente, 'Consumidor Final') as nombre,
-                SUM(dv.cantidad * IFNULL(p.precio_compra, 0)) as costo,
-                SUM(dv.cantidad * IFNULL(p.precio_venta, 0)) as total,
-                (SUM(dv.cantidad * IFNULL(p.precio_venta, 0)) - SUM(dv.cantidad * IFNULL(p.precio_compra, 0))) as ganancia
-            FROM detalle_ventas dv
-            JOIN ventas v ON dv.venta_id = v.id
-            LEFT JOIN productos p ON dv.producto_id = p.id
-            LEFT JOIN clientes cl ON v.cliente_id = cl.id
-            WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
-            GROUP BY v.cliente_id, cl.nombre_cliente
-            ORDER BY total DESC
-        `;
+      SELECT 
+          nombre,
+          SUM(costo_total) as costo,
+          SUM(total_neto) as total,
+          (SUM(total_neto) - SUM(costo_total)) as ganancia
+      FROM (
+          -- 1. VENTAS DE PRODUCTOS INDIVIDUALES
+          SELECT 
+              IFNULL(cl.nombre_cliente, 'Consumidor Final') as nombre,
+              v.cliente_id,
+              (dv.cantidad * p.precio_compra) as costo_total,
+              (dv.cantidad * p.precio_venta) as total_neto
+          FROM detalle_ventas dv
+          JOIN ventas v ON dv.venta_id = v.id
+          JOIN productos p ON dv.producto_id = p.id
+          LEFT JOIN clientes cl ON v.cliente_id = cl.id
+          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
+
+          UNION ALL
+
+          -- 2. VENTAS DE COMBOS
+          SELECT 
+              IFNULL(cl.nombre_cliente, 'Consumidor Final') as nombre,
+              v.cliente_id,
+              (dv.cantidad * (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id)) as costo_total,
+              (dv.cantidad * c.precio_venta) as total_neto
+          FROM detalle_ventas dv
+          JOIN ventas v ON dv.venta_id = v.id
+          JOIN combos c ON dv.combo_id = c.id
+          LEFT JOIN clientes cl ON v.cliente_id = cl.id
+          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
+
+          UNION ALL
+
+          -- 3. DEVOLUCIONES DE PRODUCTOS (RESTAN)
+          SELECT 
+              IFNULL(cl.nombre_cliente, 'Consumidor Final') as nombre,
+              dev.cliente_id,
+              (dd.cantidad * p.precio_compra * -1) as costo_total,
+              (dd.cantidad * p.precio_venta * -1) as total_neto
+          FROM detalle_devoluciones dd
+          JOIN devoluciones dev ON dd.devolucion_id = dev.id
+          JOIN productos p ON dd.producto_id = p.id
+          LEFT JOIN clientes cl ON dev.cliente_id = cl.id
+          WHERE dev.empresa_id = ? AND dev.fecha BETWEEN ? AND ?
+
+          UNION ALL
+
+          -- 4. DEVOLUCIONES DE COMBOS (RESTAN)
+          SELECT 
+              IFNULL(cl.nombre_cliente, 'Consumidor Final') as nombre,
+              dev.cliente_id,
+              (dd.cantidad * (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id) * -1) as costo_total,
+              (dd.cantidad * c.precio_venta * -1) as total_neto
+          FROM detalle_devoluciones dd
+          JOIN devoluciones dev ON dd.devolucion_id = dev.id
+          JOIN combos c ON dd.combo_id = c.id
+          LEFT JOIN clientes cl ON dev.cliente_id = cl.id
+          WHERE dev.empresa_id = ? AND dev.fecha BETWEEN ? AND ?
+      ) as t
+      GROUP BY cliente_id, nombre
+      ORDER BY total DESC
+    `;
 
     const [rows] = await db.execute(query, [
       empresa_id,
       fecha_inicio,
-      fecha_fin,
+      fecha_fin, // Ventas Prods
+      empresa_id,
+      fecha_inicio,
+      fecha_fin, // Ventas Combos
+      empresa_id,
+      fecha_inicio,
+      fecha_fin, // Dev Prods
+      empresa_id,
+      fecha_inicio,
+      fecha_fin, // Dev Combos
     ]);
+
     res.json(rows);
   } catch (error) {
-    console.error("ERROR EN getInformeClientes:", error);
-    res.status(500).json({
-      message: "Error al procesar el informe",
-      error: error.message,
-    });
+    console.error("ERROR INFORME CLIENTES:", error);
+    res.status(500).json({ message: "Error al procesar el informe" });
   }
 };
 
 const generarInformeClientesPDF = async (req, res) => {
   try {
     const { fecha_inicio, fecha_fin } = req.query;
+    const empresa_id = req.query.empresa_id || 1;
 
-    // Formateo para el título
     const fInicio = fecha_inicio.split("-").reverse().join("/");
     const fFin = fecha_fin.split("-").reverse().join("/");
 
-    // Consulta simplificada (como en compras, sin requerir empresa_id forzosamente)
+    // REPLICAMOS LA QUERY EXACTA DEL DETALLE (4 BLOQUES: VENTAS + COMBOS - DEVOLUCIONES)
     const query = `
-            SELECT 
-                IFNULL(cl.nombre_cliente, 'Consumidor Final') as nombre,
-                SUM(dv.cantidad * IFNULL(p.precio_compra, 0)) as costo,
-                SUM(dv.cantidad * IFNULL(p.precio_venta, 0)) as total,
-                (SUM(dv.cantidad * IFNULL(p.precio_venta, 0)) - SUM(dv.cantidad * IFNULL(p.precio_compra, 0))) as ganancia
-            FROM detalle_ventas dv
-            JOIN ventas v ON dv.venta_id = v.id
-            LEFT JOIN productos p ON dv.producto_id = p.id
-            LEFT JOIN clientes cl ON v.cliente_id = cl.id
-            WHERE v.fecha BETWEEN ? AND ?
-            GROUP BY v.cliente_id, cl.nombre_cliente
-            ORDER BY nombre ASC
-        `;
+      SELECT 
+          nombre,
+          SUM(costo_total) as costo,
+          SUM(total_neto) as total,
+          (SUM(total_neto) - SUM(costo_total)) as ganancia
+      FROM (
+          -- 1. VENTAS DE PRODUCTOS INDIVIDUALES
+          SELECT 
+              IFNULL(cl.nombre_cliente, 'Consumidor Final') as nombre,
+              v.cliente_id,
+              (dv.cantidad * p.precio_compra) as costo_total,
+              (dv.cantidad * p.precio_venta) as total_neto
+          FROM detalle_ventas dv
+          JOIN ventas v ON dv.venta_id = v.id
+          JOIN productos p ON dv.producto_id = p.id
+          LEFT JOIN clientes cl ON v.cliente_id = cl.id
+          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
 
-    const [clientes] = await db.execute(query, [fecha_inicio, fecha_fin]);
+          UNION ALL
+
+          -- 2. VENTAS DE COMBOS
+          SELECT 
+              IFNULL(cl.nombre_cliente, 'Consumidor Final') as nombre,
+              v.cliente_id,
+              (dv.cantidad * (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id)) as costo_total,
+              (dv.cantidad * c.precio_venta) as total_neto
+          FROM detalle_ventas dv
+          JOIN ventas v ON dv.venta_id = v.id
+          JOIN combos c ON dv.combo_id = c.id
+          LEFT JOIN clientes cl ON v.cliente_id = cl.id
+          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
+
+          UNION ALL
+
+          -- 3. DEVOLUCIONES DE PRODUCTOS (RESTAN)
+          SELECT 
+              IFNULL(cl.nombre_cliente, 'Consumidor Final') as nombre,
+              dev.cliente_id,
+              (dd.cantidad * p.precio_compra * -1) as costo_total,
+              (dd.cantidad * p.precio_venta * -1) as total_neto
+          FROM detalle_devoluciones dd
+          JOIN devoluciones dev ON dd.devolucion_id = dev.id
+          JOIN productos p ON dd.producto_id = p.id
+          LEFT JOIN clientes cl ON dev.cliente_id = cl.id
+          WHERE dev.empresa_id = ? AND dev.fecha BETWEEN ? AND ?
+
+          UNION ALL
+
+          -- 4. DEVOLUCIONES DE COMBOS (RESTAN)
+          SELECT 
+              IFNULL(cl.nombre_cliente, 'Consumidor Final') as nombre,
+              dev.cliente_id,
+              (dd.cantidad * (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id) * -1) as costo_total,
+              (dd.cantidad * c.precio_venta * -1) as total_neto
+          FROM detalle_devoluciones dd
+          JOIN devoluciones dev ON dd.devolucion_id = dev.id
+          JOIN combos c ON dd.combo_id = c.id
+          LEFT JOIN clientes cl ON dev.cliente_id = cl.id
+          WHERE dev.empresa_id = ? AND dev.fecha BETWEEN ? AND ?
+      ) as t
+      GROUP BY cliente_id, nombre
+      ORDER BY total DESC
+    `;
+
+    const [clientes] = await db.execute(query, [
+      empresa_id,
+      fecha_inicio,
+      fecha_fin,
+      empresa_id,
+      fecha_inicio,
+      fecha_fin,
+      empresa_id,
+      fecha_inicio,
+      fecha_fin,
+      empresa_id,
+      fecha_inicio,
+      fecha_fin,
+    ]);
 
     let filas = "";
     let totalCosto = 0;
@@ -531,73 +788,70 @@ const generarInformeClientesPDF = async (req, res) => {
       totalGral += total;
 
       filas += `
-                <tr>
-                    <td style="text-align: left;">${c.nombre}</td>
-                    <td style="text-align: right;">$ ${costo.toLocaleString(
-                      "es-AR",
-                      { minimumFractionDigits: 2 }
-                    )}</td>
-                    <td style="text-align: right;">$ ${ganancia.toLocaleString(
-                      "es-AR",
-                      { minimumFractionDigits: 2 }
-                    )}</td>
-                    <td style="text-align: right;">$ ${total.toLocaleString(
-                      "es-AR",
-                      { minimumFractionDigits: 2 }
-                    )}</td>
-                </tr>`;
+        <tr>
+            <td style="text-align: left;">${c.nombre}</td>
+            <td style="text-align: right;">$ ${costo.toLocaleString("es-AR", {
+              minimumFractionDigits: 2,
+            })}</td>
+            <td style="text-align: right;">$ ${ganancia.toLocaleString(
+              "es-AR",
+              { minimumFractionDigits: 2 }
+            )}</td>
+            <td style="text-align: right;">$ ${total.toLocaleString("es-AR", {
+              minimumFractionDigits: 2,
+            })}</td>
+        </tr>`;
     });
 
     const html = `
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="UTF-8">
-                <style>
-                    body { font-family: 'Helvetica', Arial, sans-serif; color: #333; margin: 0; padding: 10px; }
-                    .header { text-align: center; margin-bottom: 20px; }
-                    .header h1 { color: #1a73e8; font-size: 22px; }
-                    .table { width: 100%; border-collapse: collapse; }
-                    .table thead th { background-color: #1a73e8; color: white; padding: 10px; font-size: 11px; text-transform: uppercase; }
-                    .table tbody td { padding: 8px; font-size: 11px; border-bottom: 1px solid #eee; }
-                    .total-row td { background-color: #e8f0fe; font-weight: bold; border-top: 2px solid #1a73e8; }
-                </style>
-            </head>
-            <body>
-                <div class="header">
-                    <h1>Informe de Ventas por Cliente</h1>
-                    <p>Período: ${fInicio} - ${fFin}</p>
-                </div>
-                <table class="table">
-                    <thead>
-                        <tr>
-                            <th style="text-align: left;">CLIENTE</th>
-                            <th style="text-align: right;">COSTO</th>
-                            <th style="text-align: right;">GANANCIA</th>
-                            <th style="text-align: right;">TOTAL</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${filas}
-                        <tr class="total-row">
-                            <td>TOTAL GENERAL</td>
-                            <td style="text-align: right;">$ ${totalCosto.toLocaleString(
-                              "es-AR",
-                              { minimumFractionDigits: 2 }
-                            )}</td>
-                            <td style="text-align: right;">$ ${totalGanancia.toLocaleString(
-                              "es-AR",
-                              { minimumFractionDigits: 2 }
-                            )}</td>
-                            <td style="text-align: right;">$ ${totalGral.toLocaleString(
-                              "es-AR",
-                              { minimumFractionDigits: 2 }
-                            )}</td>
-                        </tr>
-                    </tbody>
-                </table>
-            </body>
-            </html>`;
+      <html>
+      <head>
+          <meta charset="UTF-8">
+          <style>
+              body { font-family: sans-serif; font-size: 12px; padding: 20px; }
+              .header { text-align: center; margin-bottom: 30px; }
+              .header h1 { color: #1a73e8; margin-bottom: 5px; }
+              .table { width: 100%; border-collapse: collapse; }
+              .table th { background-color: #1a73e8; color: white; padding: 10px; text-align: center; }
+              .table td { padding: 10px; border-bottom: 1px solid #ddd; }
+              .total-row { font-weight: bold; background-color: #e8f0fe; }
+          </style>
+      </head>
+      <body>
+          <div class="header">
+              <h1>Informe de Ventas por Cliente</h1>
+              <p>Período: ${fInicio} - ${fFin}</p>
+          </div>
+          <table class="table">
+              <thead>
+                  <tr>
+                      <th style="text-align: left;">CLIENTE</th>
+                      <th style="text-align: right;">COSTO</th>
+                      <th style="text-align: right;">GANANCIA</th>
+                      <th style="text-align: right;">TOTAL</th>
+                  </tr>
+              </thead>
+              <tbody>
+                  ${filas}
+                  <tr class="total-row">
+                      <td>TOTAL GENERAL</td>
+                      <td style="text-align: right;">$ ${totalCosto.toLocaleString(
+                        "es-AR",
+                        { minimumFractionDigits: 2 }
+                      )}</td>
+                      <td style="text-align: right;">$ ${totalGanancia.toLocaleString(
+                        "es-AR",
+                        { minimumFractionDigits: 2 }
+                      )}</td>
+                      <td style="text-align: right;">$ ${totalGral.toLocaleString(
+                        "es-AR",
+                        { minimumFractionDigits: 2 }
+                      )}</td>
+                  </tr>
+              </tbody>
+          </table>
+      </body>
+      </html>`;
 
     const options = { format: "A4", orientation: "portrait", border: "10mm" };
     pdf.create(html, options).toBuffer((err, buffer) => {
@@ -606,7 +860,7 @@ const generarInformeClientesPDF = async (req, res) => {
       res.send(buffer);
     });
   } catch (error) {
-    console.error(error);
+    console.error("ERROR PDF CLIENTES:", error);
     res.status(500).send("Error interno");
   }
 };
@@ -614,57 +868,116 @@ const generarInformeClientesPDF = async (req, res) => {
 const getInformeMetodosPago = async (req, res) => {
   try {
     const { fecha_inicio, fecha_fin } = req.query;
-    // Si por algún motivo el middleware falla, evitamos el crash con un valor por defecto
     const empresa_id = req.user ? req.user.empresa_id : 1;
 
     const query = `
             SELECT 
-                DATE_FORMAT(fecha, '%Y-%m-%d') as fecha,
-                SUM(IFNULL(efectivo, 0)) as efectivo,
-                SUM(IFNULL(tarjeta, 0)) as tarjeta,
-                SUM(IFNULL(mercadopago, 0)) as mercadopago,
-                SUM(IFNULL(transferencia, 0)) as transferencia,
-                SUM(IFNULL(precio_total, 0)) as total
-            FROM ventas
-            WHERE empresa_id = ? AND fecha BETWEEN ? AND ?
-            GROUP BY DATE_FORMAT(fecha, '%Y-%m-%d')
+                fecha,
+                SUM(efectivo) as efectivo,
+                SUM(tarjeta) as tarjeta,
+                SUM(mercadopago) as mercadopago,
+                SUM(transferencia) as transferencia,
+                SUM(total) as total
+            FROM (
+                -- 1. SUMAR LAS VENTAS POR DÍA
+                SELECT 
+                    DATE(fecha) as fecha,
+                    IFNULL(efectivo, 0) as efectivo,
+                    IFNULL(tarjeta, 0) as tarjeta,
+                    IFNULL(mercadopago, 0) as mercadopago,
+                    IFNULL(transferencia, 0) as transferencia,
+                    IFNULL(precio_total, 0) as total
+                FROM ventas
+                WHERE empresa_id = ? AND fecha BETWEEN ? AND ?
+
+                UNION ALL
+
+                -- 2. RESTAR LAS DEVOLUCIONES (Siempre del efectivo)
+                SELECT 
+                    DATE(fecha) as fecha,
+                    (IFNULL(precio_total, 0) * -1) as efectivo,
+                    0 as tarjeta,
+                    0 as mercadopago,
+                    0 as transferencia,
+                    (IFNULL(precio_total, 0) * -1) as total
+                FROM devoluciones
+                WHERE empresa_id = ? AND fecha BETWEEN ? AND ?
+            ) as consolidado
+            GROUP BY fecha
             ORDER BY fecha ASC
         `;
 
     const [rows] = await db.execute(query, [
       empresa_id,
       fecha_inicio,
-      fecha_fin,
+      fecha_fin, // Parámetros para Ventas
+      empresa_id,
+      fecha_inicio,
+      fecha_fin, // Parámetros para Devoluciones
     ]);
+
     res.json(rows);
   } catch (error) {
     console.error("ERROR EN getInformeMetodosPago:", error);
-    res.status(500).json({ message: "Error interno", error: error.message });
+    res.status(500).json({ message: "Error al procesar el informe" });
   }
 };
 
 const generarInformeMetodosPagoPDF = async (req, res) => {
   try {
     const { fecha_inicio, fecha_fin } = req.query;
+    const empresa_id = req.query.empresa_id || 1;
 
+    // Formateo de fechas para el título
     const fInicio = fecha_inicio.split("-").reverse().join("/");
     const fFin = fecha_fin.split("-").reverse().join("/");
 
+    // QUERY CONSOLIDADA: Ventas (Suman) + Devoluciones (Restan del efectivo)
     const query = `
-            SELECT 
-                DATE_FORMAT(fecha, '%d/%m/%Y') as fecha_formateada,
-                SUM(IFNULL(efectivo, 0)) as efectivo,
-                SUM(IFNULL(tarjeta, 0)) as tarjeta,
-                SUM(IFNULL(mercadopago, 0)) as mercadopago,
-                SUM(IFNULL(transferencia, 0)) as transferencia,
-                SUM(IFNULL(precio_total, 0)) as total
-            FROM ventas
-            WHERE fecha BETWEEN ? AND ?
-            GROUP BY DATE_FORMAT(fecha, '%Y-%m-%d')
-            ORDER BY fecha ASC
-        `;
+      SELECT 
+          DATE_FORMAT(fecha, '%d/%m/%Y') as fecha_formateada,
+          SUM(efectivo) as efectivo,
+          SUM(tarjeta) as tarjeta,
+          SUM(mercadopago) as mercadopago,
+          SUM(transferencia) as transferencia,
+          SUM(total) as total
+      FROM (
+          -- 1. VENTAS (Valores positivos)
+          SELECT 
+              DATE(fecha) as fecha, 
+              IFNULL(efectivo, 0) as efectivo, 
+              IFNULL(tarjeta, 0) as tarjeta, 
+              IFNULL(mercadopago, 0) as mercadopago, 
+              IFNULL(transferencia, 0) as transferencia, 
+              IFNULL(precio_total, 0) as total
+          FROM ventas 
+          WHERE empresa_id = ? AND fecha BETWEEN ? AND ?
 
-    const [datos] = await db.execute(query, [fecha_inicio, fecha_fin]);
+          UNION ALL
+
+          -- 2. DEVOLUCIONES (Restan del efectivo y del total)
+          SELECT 
+              DATE(fecha) as fecha, 
+              (IFNULL(precio_total, 0) * -1) as efectivo, 
+              0 as tarjeta, 
+              0 as mercadopago, 
+              0 as transferencia, 
+              (IFNULL(precio_total, 0) * -1) as total
+          FROM devoluciones 
+          WHERE empresa_id = ? AND fecha BETWEEN ? AND ?
+      ) as consolidado
+      GROUP BY fecha
+      ORDER BY fecha ASC
+    `;
+
+    const [datos] = await db.execute(query, [
+      empresa_id,
+      fecha_inicio,
+      fecha_fin, // Paratemetros Ventas
+      empresa_id,
+      fecha_inicio,
+      fecha_fin, // Paratemetros Devoluciones
+    ]);
 
     let filas = "";
     let tEfe = 0,
@@ -674,270 +987,390 @@ const generarInformeMetodosPagoPDF = async (req, res) => {
       tGral = 0;
 
     datos.forEach((d) => {
-      tEfe += parseFloat(d.efectivo);
-      tTar += parseFloat(d.tarjeta);
-      tMP += parseFloat(d.mercadopago);
-      tTra += parseFloat(d.transferencia);
-      tGral += parseFloat(d.total);
+      const efe = parseFloat(d.efectivo) || 0;
+      const tar = parseFloat(d.tarjeta) || 0;
+      const mp = parseFloat(d.mercadopago) || 0;
+      const tra = parseFloat(d.transferencia) || 0;
+      const tot = parseFloat(d.total) || 0;
+
+      tEfe += efe;
+      tTar += tar;
+      tMP += mp;
+      tTra += tra;
+      tGral += tot;
 
       filas += `
-                <tr>
-                    <td style="text-align: left;">${d.fecha_formateada}</td>
-                    <td style="text-align: right;">$ ${parseFloat(
-                      d.efectivo
-                    ).toLocaleString("es-AR", {
-                      minimumFractionDigits: 2,
-                    })}</td>
-                    <td style="text-align: right;">$ ${parseFloat(
-                      d.tarjeta
-                    ).toLocaleString("es-AR", {
-                      minimumFractionDigits: 2,
-                    })}</td>
-                    <td style="text-align: right;">$ ${parseFloat(
-                      d.mercadopago
-                    ).toLocaleString("es-AR", {
-                      minimumFractionDigits: 2,
-                    })}</td>
-                    <td style="text-align: right;">$ ${parseFloat(
-                      d.transferencia
-                    ).toLocaleString("es-AR", {
-                      minimumFractionDigits: 2,
-                    })}</td>
-                    <td style="text-align: right;">$ ${parseFloat(
-                      d.total
-                    ).toLocaleString("es-AR", {
-                      minimumFractionDigits: 2,
-                    })}</td>
-                </tr>`;
+        <tr>
+            <td style="text-align: left;">${d.fecha_formateada}</td>
+            <td style="text-align: right;">$ ${efe.toLocaleString("es-AR", {
+              minimumFractionDigits: 2,
+            })}</td>
+            <td style="text-align: right;">$ ${tar.toLocaleString("es-AR", {
+              minimumFractionDigits: 2,
+            })}</td>
+            <td style="text-align: right;">$ ${mp.toLocaleString("es-AR", {
+              minimumFractionDigits: 2,
+            })}</td>
+            <td style="text-align: right;">$ ${tra.toLocaleString("es-AR", {
+              minimumFractionDigits: 2,
+            })}</td>
+            <td style="text-align: right; font-weight: bold;">$ ${tot.toLocaleString(
+              "es-AR",
+              { minimumFractionDigits: 2 }
+            )}</td>
+        </tr>`;
     });
 
     const html = `
-            <html>
-            <head>
-                <meta charset="UTF-8">
-                <style>
-                    body { font-family: sans-serif; font-size: 11px; }
-                    .header { text-align: center; margin-bottom: 20px; }
-                    .header h1 { color: #1a73e8; }
-                    .table { width: 100%; border-collapse: collapse; }
-                    .table th { background-color: #1a73e8; color: white; padding: 8px; }
-                    .table td { padding: 8px; border-bottom: 1px solid #eee; }
-                    .total-row { font-weight: bold; background-color: #f1f1f1; }
-                </style>
-            </head>
-            <body>
-                <div class="header">
-                    <h1>Informe de Ventas por Forma de Pago</h1>
-                    <p>Período: ${fInicio} - ${fFin}</p>
-                </div>
-                <table class="table">
-                    <thead>
-                        <tr>
-                            <th style="text-align: left;">FECHA</th>
-                            <th style="text-align: right;">EFECTIVO</th>
-                            <th style="text-align: right;">TARJETA</th>
-                            <th style="text-align: right;">M. PAGO</th>
-                            <th style="text-align: right;">TRANSF.</th>
-                            <th style="text-align: right;">TOTAL</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${filas}
-                        <tr class="total-row">
-                            <td>TOTALES</td>
-                            <td style="text-align: right;">$ ${tEfe.toLocaleString(
-                              "es-AR",
-                              { minimumFractionDigits: 2 }
-                            )}</td>
-                            <td style="text-align: right;">$ ${tTar.toLocaleString(
-                              "es-AR",
-                              { minimumFractionDigits: 2 }
-                            )}</td>
-                            <td style="text-align: right;">$ ${tMP.toLocaleString(
-                              "es-AR",
-                              { minimumFractionDigits: 2 }
-                            )}</td>
-                            <td style="text-align: right;">$ ${tTra.toLocaleString(
-                              "es-AR",
-                              { minimumFractionDigits: 2 }
-                            )}</td>
-                            <td style="text-align: right;">$ ${tGral.toLocaleString(
-                              "es-AR",
-                              { minimumFractionDigits: 2 }
-                            )}</td>
-                        </tr>
-                    </tbody>
-                </table>
-            </body>
-            </html>`;
+      <html>
+      <head>
+          <meta charset="UTF-8">
+          <style>
+              body { font-family: sans-serif; font-size: 11px; color: #333; }
+              .header { text-align: center; margin-bottom: 20px; }
+              .header h1 { color: #1a73e8; margin-bottom: 5px; }
+              .table { width: 100%; border-collapse: collapse; }
+              .table th { background-color: #1a73e8; color: white; padding: 8px; font-size: 10px; text-transform: uppercase; }
+              .table td { padding: 8px; border-bottom: 1px solid #eee; }
+              .total-row { font-weight: bold; background-color: #f1f1f1; border-top: 2px solid #1a73e8; }
+          </style>
+      </head>
+      <body>
+          <div class="header">
+              <h1>Informe de Ventas por Forma de Pago</h1>
+              <p>Período: ${fInicio} - ${fFin}</p>
+          </div>
+          <table class="table">
+              <thead>
+                  <tr>
+                      <th style="text-align: left;">FECHA</th>
+                      <th style="text-align: right;">EFECTIVO</th>
+                      <th style="text-align: right;">TARJETA</th>
+                      <th style="text-align: right;">M. PAGO</th>
+                      <th style="text-align: right;">TRANSF.</th>
+                      <th style="text-align: right;">TOTAL NETO</th>
+                  </tr>
+              </thead>
+              <tbody>
+                  ${
+                    filas ||
+                    '<tr><td colspan="6" style="text-align:center;">No hay movimientos en este período</td></tr>'
+                  }
+                  <tr class="total-row">
+                      <td style="text-align: left;">TOTALES</td>
+                      <td style="text-align: right;">$ ${tEfe.toLocaleString(
+                        "es-AR",
+                        { minimumFractionDigits: 2 }
+                      )}</td>
+                      <td style="text-align: right;">$ ${tTar.toLocaleString(
+                        "es-AR",
+                        { minimumFractionDigits: 2 }
+                      )}</td>
+                      <td style="text-align: right;">$ ${tMP.toLocaleString(
+                        "es-AR",
+                        { minimumFractionDigits: 2 }
+                      )}</td>
+                      <td style="text-align: right;">$ ${tTra.toLocaleString(
+                        "es-AR",
+                        { minimumFractionDigits: 2 }
+                      )}</td>
+                      <td style="text-align: right; color: #1a73e8;">$ ${tGral.toLocaleString(
+                        "es-AR",
+                        { minimumFractionDigits: 2 }
+                      )}</td>
+                  </tr>
+              </tbody>
+          </table>
+      </body>
+      </html>`;
 
     const options = { format: "A4", orientation: "landscape", border: "10mm" };
+
     pdf.create(html, options).toBuffer((err, buffer) => {
-      if (err) return res.status(500).send("Error");
+      if (err) {
+        console.error("ERROR CREANDO PDF:", err);
+        return res.status(500).send("Error al generar el PDF");
+      }
       res.setHeader("Content-Type", "application/pdf");
       res.send(buffer);
     });
   } catch (error) {
-    res.status(500).send(error.message);
+    console.error("ERROR GENERAL PDF:", error);
+    res.status(500).send("Error interno del servidor");
   }
 };
 
 const getInformeMovimientoStock = async (req, res) => {
   try {
     const { fecha_inicio, fecha_fin } = req.query;
-    // Blindaje de empresa_id
     const empresa_id = req.user ? req.user.empresa_id : 1;
 
-    // 1. Productos CON movimiento
+    // 1. OBTENER PRODUCTOS CON MOVIMIENTO (Ventas - Devoluciones, incluyendo combos)
     const queryCon = `
-            SELECT 
-                p.nombre, 
-                IFNULL(u.nombre, 'Unidad') as unidad, 
-                SUM(IFNULL(dv.cantidad, 0)) as cantidad_vendida, 
-                COUNT(DISTINCT v.id) as num_ventas
-            FROM detalle_ventas dv
-            JOIN ventas v ON dv.venta_id = v.id
-            JOIN productos p ON dv.producto_id = p.id
-            LEFT JOIN unidads u ON p.unidad_id = u.id
-            WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
-            GROUP BY p.id, p.nombre, u.nombre
-            ORDER BY cantidad_vendida DESC
-        `;
+      SELECT 
+          nombre, 
+          unidad, 
+          SUM(cantidad_neta) as cantidad_vendida, 
+          SUM(num_ventas_netas) as num_ventas
+      FROM (
+          -- PRODUCTOS VENDIDOS DIRECTAMENTE
+          SELECT p.id, p.nombre, IFNULL(u.nombre, 'Unid.') as unidad, 
+                 SUM(dv.cantidad) as cantidad_neta, 
+                 COUNT(DISTINCT v.id) as num_ventas_netas
+          FROM detalle_ventas dv
+          JOIN ventas v ON dv.venta_id = v.id
+          JOIN productos p ON dv.producto_id = p.id
+          LEFT JOIN unidads u ON p.unidad_id = u.id
+          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
+          GROUP BY p.id
 
-    // 2. Productos SIN movimiento (Subquery mejorada)
+          UNION ALL
+
+          -- PRODUCTOS VENDIDOS DENTRO DE COMBOS
+          SELECT p.id, p.nombre, IFNULL(u.nombre, 'Unid.') as unidad, 
+                 SUM(dv.cantidad * cp.cantidad) as cantidad_neta, 
+                 COUNT(DISTINCT v.id) as num_ventas_netas
+          FROM detalle_ventas dv
+          JOIN ventas v ON dv.venta_id = v.id
+          JOIN combo_producto cp ON dv.combo_id = cp.combo_id
+          JOIN productos p ON cp.producto_id = p.id
+          LEFT JOIN unidads u ON p.unidad_id = u.id
+          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
+          GROUP BY p.id
+
+          UNION ALL
+
+          -- PRODUCTOS DEVUELTOS DIRECTAMENTE (RESTAN)
+          SELECT p.id, p.nombre, IFNULL(u.nombre, 'Unid.') as unidad, 
+                 SUM(dd.cantidad * -1) as cantidad_neta, 
+                 SUM(0) as num_ventas_netas
+          FROM detalle_devoluciones dd
+          JOIN devoluciones dev ON dd.devolucion_id = dev.id
+          JOIN productos p ON dd.producto_id = p.id
+          LEFT JOIN unidads u ON p.unidad_id = u.id
+          WHERE dev.empresa_id = ? AND dev.fecha BETWEEN ? AND ?
+          GROUP BY p.id
+
+          UNION ALL
+
+          -- PRODUCTOS DEVUELTOS DENTRO DE COMBOS (RESTAN)
+          SELECT p.id, p.nombre, IFNULL(u.nombre, 'Unid.') as unidad, 
+                 SUM(dd.cantidad * cp.cantidad * -1) as cantidad_neta, 
+                 SUM(0) as num_ventas_netas
+          FROM detalle_devoluciones dd
+          JOIN devoluciones dev ON dd.devolucion_id = dev.id
+          JOIN combo_producto cp ON dd.combo_id = cp.combo_id
+          JOIN productos p ON cp.producto_id = p.id
+          LEFT JOIN unidads u ON p.unidad_id = u.id
+          WHERE dev.empresa_id = ? AND dev.fecha BETWEEN ? AND ?
+          GROUP BY p.id
+      ) as consolidado
+      GROUP BY id, nombre, unidad
+      HAVING cantidad_vendida > 0
+      ORDER BY cantidad_vendida DESC
+    `;
+
+    // 2. PRODUCTOS SIN MOVIMIENTO
     const querySin = `
-            SELECT p.nombre
-            FROM productos p
-            WHERE p.empresa_id = ? 
-            AND p.id NOT IN (
-                SELECT DISTINCT dv.producto_id 
-                FROM detalle_ventas dv
-                JOIN ventas v ON dv.venta_id = v.id
-                WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ? 
-                AND dv.producto_id IS NOT NULL
-            )
-            ORDER BY p.nombre ASC
-        `;
+      SELECT p.nombre
+      FROM productos p
+      WHERE p.empresa_id = ? 
+      AND p.id NOT IN (
+          SELECT DISTINCT dv.producto_id FROM detalle_ventas dv JOIN ventas v ON dv.venta_id = v.id WHERE v.fecha BETWEEN ? AND ? AND dv.producto_id IS NOT NULL
+          UNION
+          SELECT DISTINCT cp.producto_id FROM detalle_ventas dv JOIN ventas v ON dv.venta_id = v.id JOIN combo_producto cp ON dv.combo_id = cp.combo_id WHERE v.fecha BETWEEN ? AND ?
+      )
+      ORDER BY p.nombre ASC
+    `;
 
     const [conMovimiento] = await db.execute(queryCon, [
       empresa_id,
       fecha_inicio,
-      fecha_fin,
+      fecha_fin, // Bloque 1
+      empresa_id,
+      fecha_inicio,
+      fecha_fin, // Bloque 2
+      empresa_id,
+      fecha_inicio,
+      fecha_fin, // Bloque 3
+      empresa_id,
+      fecha_inicio,
+      fecha_fin, // Bloque 4
     ]);
+
     const [sinMovimiento] = await db.execute(querySin, [
       empresa_id,
-      empresa_id,
+      fecha_inicio,
+      fecha_fin,
       fecha_inicio,
       fecha_fin,
     ]);
 
     res.json({ conMovimiento, sinMovimiento });
   } catch (error) {
-    console.error("ERROR EN getInformeMovimientoStock:", error);
-    res.status(500).json({ message: "Error interno", error: error.message });
+    console.error("ERROR MOV STOCK:", error);
+    res.status(500).json({ message: "Error al procesar el informe" });
   }
 };
 
 const generarInformeMovimientoStockPDF = async (req, res) => {
   try {
     const { fecha_inicio, fecha_fin } = req.query;
+    const empresa_id = req.query.empresa_id || 1;
+
     const fInicio = fecha_inicio.split("-").reverse().join("/");
     const fFin = fecha_fin.split("-").reverse().join("/");
 
-    // Consultas simplificadas para el PDF (sin filtrar por empresa_id para evitar nulos en window.open)
-    const [conMovimiento] = await db.execute(
-      `
-            SELECT p.nombre, IFNULL(u.nombre, 'Unidad') as unidad, SUM(dv.cantidad) as cantidad_vendida, COUNT(DISTINCT v.id) as num_ventas
-            FROM detalle_ventas dv
-            JOIN ventas v ON dv.venta_id = v.id
-            JOIN productos p ON dv.producto_id = p.id
-            LEFT JOIN unidads u ON p.unidad_id = u.id
-            WHERE v.fecha BETWEEN ? AND ?
-            GROUP BY p.id, p.nombre, u.nombre
-            ORDER BY cantidad_vendida DESC
-        `,
-      [fecha_inicio, fecha_fin]
-    );
+    // 1. QUERY PRODUCTOS CON MOVIMIENTO (Suma ventas y combos, resta devoluciones)
+    const queryCon = `
+      SELECT 
+          nombre, unidad, 
+          SUM(cantidad_neta) as cantidad_vendida, 
+          SUM(num_ventas_netas) as num_ventas
+      FROM (
+          SELECT p.id, p.nombre, IFNULL(u.nombre, 'Unid.') as unidad, SUM(dv.cantidad) as cantidad_neta, COUNT(DISTINCT v.id) as num_ventas_netas
+          FROM detalle_ventas dv
+          JOIN ventas v ON dv.venta_id = v.id JOIN productos p ON dv.producto_id = p.id LEFT JOIN unidads u ON p.unidad_id = u.id
+          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ? GROUP BY p.id
+          UNION ALL
+          SELECT p.id, p.nombre, IFNULL(u.nombre, 'Unid.') as unidad, SUM(dv.cantidad * cp.cantidad) as cantidad_neta, COUNT(DISTINCT v.id) as num_ventas_netas
+          FROM detalle_ventas dv
+          JOIN ventas v ON dv.venta_id = v.id JOIN combo_producto cp ON dv.combo_id = cp.combo_id JOIN productos p ON cp.producto_id = p.id LEFT JOIN unidads u ON p.unidad_id = u.id
+          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ? GROUP BY p.id
+          UNION ALL
+          SELECT p.id, p.nombre, IFNULL(u.nombre, 'Unid.') as unidad, SUM(dd.cantidad * -1) as cantidad_neta, 0 as num_ventas_netas
+          FROM detalle_devoluciones dd
+          JOIN devoluciones dev ON dd.devolucion_id = dev.id JOIN productos p ON dd.producto_id = p.id LEFT JOIN unidads u ON p.unidad_id = u.id
+          WHERE dev.empresa_id = ? AND dev.fecha BETWEEN ? AND ? GROUP BY p.id
+          UNION ALL
+          SELECT p.id, p.nombre, IFNULL(u.nombre, 'Unid.') as unidad, SUM(dd.cantidad * cp.cantidad * -1) as cantidad_neta, 0 as num_ventas_netas
+          FROM detalle_devoluciones dd
+          JOIN devoluciones dev ON dd.devolucion_id = dev.id JOIN combo_producto cp ON dd.combo_id = cp.combo_id JOIN productos p ON cp.producto_id = p.id LEFT JOIN unidads u ON p.unidad_id = u.id
+          WHERE dev.empresa_id = ? AND dev.fecha BETWEEN ? AND ? GROUP BY p.id
+      ) as consolidado
+      GROUP BY id, nombre, unidad
+      HAVING cantidad_vendida > 0
+      ORDER BY cantidad_vendida DESC
+    `;
 
-    const [sinMovimiento] = await db.execute(
-      `
-            SELECT p.nombre FROM productos p
-            WHERE p.id NOT IN (
-                SELECT DISTINCT dv.producto_id FROM detalle_ventas dv
-                JOIN ventas v ON dv.venta_id = v.id
-                WHERE v.fecha BETWEEN ? AND ? AND dv.producto_id IS NOT NULL
-            ) ORDER BY p.nombre ASC
-        `,
-      [fecha_inicio, fecha_fin]
-    );
+    // 2. QUERY PRODUCTOS SIN MOVIMIENTO
+    const querySin = `
+      SELECT p.nombre
+      FROM productos p
+      WHERE p.empresa_id = ? 
+      AND p.id NOT IN (
+          SELECT DISTINCT dv.producto_id FROM detalle_ventas dv JOIN ventas v ON dv.venta_id = v.id WHERE v.fecha BETWEEN ? AND ? AND dv.producto_id IS NOT NULL
+          UNION
+          SELECT DISTINCT cp.producto_id FROM detalle_ventas dv JOIN ventas v ON dv.venta_id = v.id JOIN combo_producto cp ON dv.combo_id = cp.combo_id WHERE v.fecha BETWEEN ? AND ?
+      )
+      ORDER BY p.nombre ASC
+    `;
+
+    const [conMovimiento] = await db.execute(queryCon, [
+      empresa_id,
+      fecha_inicio,
+      fecha_fin,
+      empresa_id,
+      fecha_inicio,
+      fecha_fin,
+      empresa_id,
+      fecha_inicio,
+      fecha_fin,
+      empresa_id,
+      fecha_inicio,
+      fecha_fin,
+    ]);
+
+    const [sinMovimiento] = await db.execute(querySin, [
+      empresa_id,
+      fecha_inicio,
+      fecha_fin,
+      fecha_inicio,
+      fecha_fin,
+    ]);
 
     let filasCon = conMovimiento
       .map(
         (p, i) => `
-            <tr>
-                <td>${i + 1}</td>
-                <td style="text-align: left">${p.nombre}</td>
-                <td>${p.cantidad_vendida} ${p.unidad}</td>
-                <td>${p.num_ventas}</td>
-            </tr>`
+      <tr>
+          <td style="width: 40px;">${i + 1}</td>
+          <td style="text-align: left;">${p.nombre}</td>
+          <td style="width: 120px;">${p.cantidad_vendida} ${p.unidad}</td>
+          <td style="width: 80px;">${p.num_ventas}</td>
+      </tr>`
       )
       .join("");
 
     let filasSin = sinMovimiento
       .map(
         (p, i) => `
-            <tr>
-                <td>${i + 1}</td>
-                <td style="text-align: left">${p.nombre}</td>
-                <td>0</td>
-            </tr>`
+      <tr>
+          <td style="width: 40px;">${i + 1}</td>
+          <td style="text-align: left;">${p.nombre}</td>
+          <td style="width: 80px;">0</td>
+      </tr>`
       )
       .join("");
 
     const html = `
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="UTF-8">
-                <style>
-                    body { font-family: sans-serif; font-size: 11px; color: #333; }
-                    .header { text-align: center; margin-bottom: 20px; }
-                    .header h1 { color: #1a73e8; }
-                    .section-title { font-size: 13px; font-weight: bold; color: #1a73e8; margin-top: 20px; padding-bottom: 5px; border-bottom: 1px solid #1a73e8; }
-                    .table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-                    .table th { background-color: #1a73e8; color: white; padding: 8px; font-size: 10px; }
-                    .table td { padding: 6px; border-bottom: 1px solid #eee; text-align: center; }
-                </style>
-            </head>
-            <body>
-                <div class="header">
-                    <h1>Informe de Movimiento de Stock</h1>
-                    <p>Período: ${fInicio} - ${fFin}</p>
-                </div>
-                <div class="section-title">Movimientos Rápidos</div>
-                <table class="table">
-                    <thead><tr><th width="30">#</th><th style="text-align:left">Producto</th><th width="100">Cantidad</th><th width="80">Ventas</th></tr></thead>
-                    <tbody>${
-                      filasCon || '<tr><td colspan="4">No hay datos</td></tr>'
-                    }</tbody>
-                </table>
-                <div class="section-title">Sin Movimientos</div>
-                <table class="table">
-                    <thead><tr><th width="30">#</th><th style="text-align:left">Producto</th><th width="100">Ventas</th></tr></thead>
-                    <tbody>${
-                      filasSin || '<tr><td colspan="3">No hay datos</td></tr>'
-                    }</tbody>
-                </table>
-            </body>
-            </html>`;
+      <html>
+      <head>
+          <meta charset="UTF-8">
+          <style>
+              body { font-family: sans-serif; font-size: 11px; color: #333; padding: 10px; }
+              .header { text-align: center; margin-bottom: 20px; }
+              .header h1 { color: #1a73e8; margin-bottom: 5px; }
+              .section-title { font-size: 13px; font-weight: bold; color: #1a73e8; margin-top: 20px; padding-bottom: 5px; border-bottom: 1px solid #1a73e8; }
+              .table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+              .table th { background-color: #1a73e8; color: white; padding: 8px; font-size: 10px; text-transform: uppercase; }
+              .table td { padding: 6px; border-bottom: 1px solid #eee; text-align: center; }
+          </style>
+      </head>
+      <body>
+          <div class="header">
+              <h1>Informe de Movimiento de Stock</h1>
+              <p>Período: ${fInicio} - ${fFin}</p>
+          </div>
+
+          <div class="section-title">Movimientos Rápidos</div>
+          <table class="table">
+              <thead>
+                  <tr>
+                      <th>#</th>
+                      <th style="text-align: left;">Producto</th>
+                      <th>Cantidad Vendida</th>
+                      <th>Ventas</th>
+                  </tr>
+              </thead>
+              <tbody>${
+                filasCon || '<tr><td colspan="4">No hay datos</td></tr>'
+              }</tbody>
+          </table>
+
+          <div class="section-title">Sin Movimientos</div>
+          <table class="table">
+              <thead>
+                  <tr>
+                      <th>#</th>
+                      <th style="text-align: left;">Producto</th>
+                      <th>Ventas</th>
+                  </tr>
+              </thead>
+              <tbody>${
+                filasSin || '<tr><td colspan="3">No hay datos</td></tr>'
+              }</tbody>
+          </table>
+      </body>
+      </html>`;
 
     const options = { format: "A4", border: "10mm" };
     pdf.create(html, options).toBuffer((err, buffer) => {
-      if (err) return res.status(500).send("Error al crear PDF");
+      if (err) return res.status(500).send("Error");
       res.setHeader("Content-Type", "application/pdf");
       res.send(buffer);
     });
   } catch (error) {
+    console.error("ERROR PDF STOCK:", error);
     res.status(500).send(error.message);
   }
 };
@@ -1341,6 +1774,111 @@ const getVentasSummary = async (req, res) => {
   }
 };
 
+const getVentasDashboard = async (req, res) => {
+  try {
+    const empresa_id = req.user ? req.user.empresa_id : 1;
+
+    // --- CÁLCULO DE FECHA LOCAL ARGENTINA ---
+    const options = {
+      timeZone: "America/Argentina/Buenos_Aires",
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+    };
+    const formatter = new Intl.DateTimeFormat("en-CA", options);
+    const parts = formatter.formatToParts(new Date());
+    const dateParts = {};
+    parts.forEach((p) => (dateParts[p.type] = p.value));
+
+    const todayStr = `${dateParts.year}-${dateParts.month}-${dateParts.day}`;
+    const currentMonth = parseInt(dateParts.month);
+    const currentYear = parseInt(dateParts.year);
+
+    // 1. VENTAS Y DEVOLUCIONES (MONTO)
+    const [v] = await db.execute(
+      `
+      SELECT 
+        SUM(CASE WHEN DATE(fecha) = ? THEN precio_total ELSE 0 END) as v_dia,
+        SUM(CASE WHEN MONTH(fecha) = ? AND YEAR(fecha) = ? THEN precio_total ELSE 0 END) as v_mes,
+        SUM(CASE WHEN YEAR(fecha) = ? THEN precio_total ELSE 0 END) as v_anio
+      FROM ventas WHERE empresa_id = ?
+    `,
+      [todayStr, currentMonth, currentYear, currentYear, empresa_id]
+    );
+
+    const [d] = await db.execute(
+      `
+      SELECT 
+        SUM(CASE WHEN DATE(fecha) = ? THEN precio_total ELSE 0 END) as d_dia,
+        SUM(CASE WHEN MONTH(fecha) = ? AND YEAR(fecha) = ? THEN precio_total ELSE 0 END) as d_mes,
+        SUM(CASE WHEN YEAR(fecha) = ? THEN precio_total ELSE 0 END) as d_anio,
+        COUNT(id) as total_cantidad -- Total de devoluciones realizadas
+      FROM devoluciones WHERE empresa_id = ?
+    `,
+      [todayStr, currentMonth, currentYear, currentYear, empresa_id]
+    );
+
+    // 2. GANANCIAS (Ya lo teníamos)
+    const [g] = await db.execute(
+      `
+      SELECT 
+        SUM(CASE WHEN DATE(v.fecha) = ? THEN (dv.cantidad * (IFNULL(p.precio_venta, 0) - IFNULL(p.precio_compra, 0))) ELSE 0 END) as g_dia,
+        SUM(CASE WHEN MONTH(v.fecha) = ? AND YEAR(v.fecha) = ? THEN (dv.cantidad * (IFNULL(p.precio_venta, 0) - IFNULL(p.precio_compra, 0))) ELSE 0 END) as g_mes,
+        SUM(CASE WHEN YEAR(v.fecha) = ? THEN (dv.cantidad * (IFNULL(p.precio_venta, 0) - IFNULL(p.precio_compra, 0))) ELSE 0 END) as g_anio
+      FROM detalle_ventas dv
+      JOIN ventas v ON dv.venta_id = v.id
+      LEFT JOIN productos p ON dv.producto_id = p.id
+      WHERE v.empresa_id = ?
+    `,
+      [todayStr, currentMonth, currentYear, currentYear, empresa_id]
+    );
+
+    // 3. DEUDA GENERAL
+    const [deudaRows] = await db.execute(
+      `
+      SELECT IFNULL(SUM(CASE WHEN tipo = 'deuda' THEN importe ELSE 0 END), 0) - 
+             IFNULL(SUM(CASE WHEN tipo = 'pago' THEN importe ELSE 0 END), 0) as total 
+      FROM compras_cta_cte WHERE empresa_id = ?
+    `,
+      [empresa_id]
+    );
+
+    // 4. TOP PRODUCTOS
+    const [top] = await db.execute(
+      `
+      SELECT nombre, SUM(cant) as veces_vendido FROM (
+        SELECT p.nombre, SUM(dv.cantidad) as cant FROM detalle_ventas dv 
+        JOIN ventas v ON dv.venta_id = v.id JOIN productos p ON dv.producto_id = p.id
+        WHERE v.empresa_id = ? AND dv.producto_id IS NOT NULL GROUP BY p.id, p.nombre
+        UNION ALL
+        SELECT p.nombre, SUM(dv.cantidad * cp.cantidad) as cant FROM detalle_ventas dv
+        JOIN ventas v ON dv.venta_id = v.id JOIN combo_producto cp ON dv.combo_id = cp.combo_id
+        JOIN productos p ON cp.producto_id = p.id WHERE v.empresa_id = ? AND dv.combo_id IS NOT NULL GROUP BY p.id, p.nombre
+      ) t GROUP BY nombre ORDER BY veces_vendido DESC LIMIT 10
+    `,
+      [empresa_id, empresa_id]
+    );
+
+    res.json({
+      ventas_dia: Math.max(v[0].v_dia - d[0].d_dia, 0),
+      ventas_mes: Math.max(v[0].v_mes - d[0].d_mes, 0),
+      ventas_anio: Math.max(v[0].v_anio - d[0].d_anio, 0),
+      ganancia_dia: Math.max(g[0].g_dia, 0),
+      ganancia_mes: Math.max(g[0].g_mes, 0),
+      ganancia_anio: Math.max(g[0].g_anio, 0),
+      deuda_general: parseFloat(deudaRows[0].total || 0),
+      devoluciones_dia: d[0].d_dia,
+      devoluciones_mes: d[0].d_mes,
+      devoluciones_anio: d[0].d_anio,
+      devoluciones_total_cant: d[0].total_cantidad,
+      topProductos: top,
+    });
+  } catch (error) {
+    console.error("ERROR DASHBOARD:", error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
 module.exports = {
   getListadoVentas,
   getTmpVentas,
@@ -1361,4 +1899,5 @@ module.exports = {
   getVentaTicket,
   countVentas,
   getVentasSummary,
+  getVentasDashboard,
 };

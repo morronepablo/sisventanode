@@ -10,6 +10,7 @@ const {
   storeMovimiento,
   closeArqueo,
   countArqueos,
+  getArqueosSummary,
 } = require("../controllers/arqueoController");
 
 // Importamos el middleware que acabamos de crear
@@ -17,6 +18,7 @@ const authMiddleware = require("../middlewares/authMiddleware");
 
 // Rutas protegidas
 router.get("/count", countArqueos);
+router.get("/summary", getArqueosSummary);
 router.get("/", authMiddleware, getAllArqueos);
 router.get("/estado-abierto", authMiddleware, checkArqueoAbierto);
 router.post("/", authMiddleware, createArqueo);

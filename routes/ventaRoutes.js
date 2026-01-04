@@ -20,11 +20,13 @@ const {
   generarInformeMetodosPagoPDF,
   getInformeMovimientoStock,
   generarInformeMovimientoStockPDF,
+  getVentasDashboard,
 } = require("../controllers/ventaController");
 const authMiddleware = require("../middlewares/authMiddleware");
 
 const router = express.Router();
 
+router.get("/dashboard-metrics", getVentasDashboard);
 router.get("/count", countVentas);
 router.get("/summary", getVentasSummary);
 router.get("/reporte", generarReporte);

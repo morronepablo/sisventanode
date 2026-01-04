@@ -1,5 +1,6 @@
 // src/controllers/empresaController.js
 const Empresa = require("../models/Empresa");
+const db = require("../config/db");
 const fs = require("fs");
 const path = require("path");
 const multer = require("multer");
@@ -61,4 +62,13 @@ const updateEmpresa = async (req, res) => {
   }
 };
 
-module.exports = { getEmpresa, updateEmpresa, upload };
+const countEmpresas = async (req, res) => {
+  try {
+    const [rows] = await db.execute("SELECT COUNT(*) AS total FROM empresas");
+    res.json({ total: rows[0].total });
+  } catch (error) {
+    res.status(500).json({ total: 0 });
+  }
+};
+
+module.exports = { getEmpresa, updateEmpresa, upload, countEmpresas };

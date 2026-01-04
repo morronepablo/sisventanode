@@ -38,7 +38,7 @@ const login = async (req, res) => {
         permisos: Array.from(allPermisos),
       },
       process.env.JWT_SECRET,
-      { expiresIn: "7d" }
+      { expiresIn: "1h" }
     );
 
     res.json({

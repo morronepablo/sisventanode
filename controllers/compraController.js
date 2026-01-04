@@ -765,6 +765,44 @@ const getComprasSummary = async (req, res) => {
   }
 };
 
+const getComprasMetrics = async (req, res) => {
+  try {
+    const empresa_id = req.user ? req.user.empresa_id : 1;
+
+    // Usamos las funciones de MySQL: CURDATE() para hoy, MONTH() y YEAR() para el resto.
+    // Esto evita problemas de formato de fecha entre Node y la Base de Datos.
+    const query = `
+      SELECT 
+        SUM(CASE WHEN DATE(fecha) = CURDATE() THEN precio_total ELSE 0 END) as dia,
+        SUM(CASE WHEN MONTH(fecha) = MONTH(CURDATE()) AND YEAR(fecha) = YEAR(CURDATE()) THEN precio_total ELSE 0 END) as mes,
+        SUM(CASE WHEN YEAR(fecha) = YEAR(CURDATE()) THEN precio_total ELSE 0 END) as anio
+      FROM compras 
+      WHERE empresa_id = ?
+    `;
+
+    const [c] = await db.execute(query, [empresa_id]);
+
+    // 2. TOTAL INVENTARIO VALORIZADO
+    const [inv] = await db.execute(
+      `
+      SELECT SUM(IFNULL(stock, 0) * IFNULL(precio_compra, 0)) as total_valorizado
+      FROM productos WHERE empresa_id = ?
+    `,
+      [empresa_id]
+    );
+
+    res.json({
+      compras_dia: c[0].dia || 0,
+      compras_mes: c[0].mes || 0,
+      compras_anio: c[0].anio || 0,
+      total_inventario: inv[0].total_valorizado || 0,
+    });
+  } catch (error) {
+    console.error("ERROR METRICAS COMPRAS:", error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
 module.exports = {
   getListadoCompras,
   getCompraById,
@@ -783,4 +821,5 @@ module.exports = {
   generarInformeNoPagadasPDF,
   countCompras,
   getComprasSummary,
+  getComprasMetrics,
 };

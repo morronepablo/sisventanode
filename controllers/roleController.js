@@ -124,45 +124,6 @@ const getRolePermissions = async (req, res) => {
   }
 };
 
-// const assignPermissionsToRole = async (req, res) => {
-//   try {
-//     const { id } = req.params;
-//     const { permissionIds } = req.body;
-
-//     // Verificar que el rol exista
-//     const [roleRows] = await db.execute("SELECT id FROM roles WHERE id = ?", [
-//       id,
-//     ]);
-//     if (roleRows.length === 0) {
-//       return res.status(404).json({ message: "Rol no encontrado" });
-//     }
-
-//     // Eliminar todas las asignaciones actuales
-//     await db.execute("DELETE FROM role_has_permissions WHERE role_id = ?", [
-//       id,
-//     ]);
-
-//     // Insertar nuevas asignaciones
-//     if (permissionIds && permissionIds.length > 0) {
-//       const values = permissionIds.map((permId) => [id, permId]);
-//       await db.execute(
-//         "INSERT INTO role_has_permissions (role_id, permission_id) VALUES ?",
-//         [values]
-//       );
-//     }
-
-//     res.json({ message: "Permisos asignados exitosamente" });
-//   } catch (error) {
-//     console.error("Error al asignar permisos al rol:", error);
-//     res
-//       .status(500)
-//       .json({
-//         message: "Error al asignar permisos al rol",
-//         error: error.message,
-//       });
-//   }
-// };
-
 const assignPermissionsToRole = async (req, res) => {
   try {
     const { id } = req.params;

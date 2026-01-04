@@ -1,9 +1,17 @@
 // routes/comboRoutes.js
 const express = require("express");
 const router = express.Router();
-const { getCombos } = require("../controllers/comboController");
+const comboController = require("../controllers/comboController");
 const authMiddleware = require("../middlewares/authMiddleware");
 
-router.get("/", authMiddleware, getCombos);
+router.use(authMiddleware);
+
+router.get("/count", comboController.countCombos);
+
+router.get("/", comboController.getCombos);
+router.get("/:id", comboController.getComboById);
+router.post("/", comboController.storeCombo);
+router.put("/:id", comboController.updateCombo);
+router.delete("/:id", comboController.deleteCombo);
 
 module.exports = router;

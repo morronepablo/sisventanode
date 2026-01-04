@@ -18,10 +18,12 @@ const {
   generarInformeNoPagadasPDF,
   countCompras,
   getComprasSummary,
+  getComprasMetrics,
 } = require("../controllers/compraController");
 
 const router = express.Router();
 
+router.get("/dashboard-metrics", getComprasMetrics);
 router.get("/count", countCompras);
 router.get("/summary", getComprasSummary);
 router.get("/reporte", generarReporte);
