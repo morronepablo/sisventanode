@@ -98,7 +98,7 @@ const storeDevolucion = async (req, res) => {
     const { cliente_id, fecha, precio_total, motivo, usuario_id, empresa_id } =
       req.body;
 
-    // 1. Insertar Devolución (QUITAMOS usuario_id porque no existe en esa tabla según tu esquema)
+    // 1. Insertar Devolución
     const [resDev] = await connection.execute(
       `INSERT INTO devoluciones (fecha, precio_total, motivo, cliente_id, empresa_id, venta_id, created_at, updated_at) 
        VALUES (?, ?, ?, ?, ?, NULL, NOW(), NOW())`,
@@ -113,7 +113,7 @@ const storeDevolucion = async (req, res) => {
     );
 
     for (const item of tmpItems) {
-      // Insertar Detalle
+      // Insertar Detalle de Devolución
       await connection.execute(
         "INSERT INTO detalle_devoluciones (cantidad, devolucion_id, producto_id, combo_id, created_at, updated_at) VALUES (?, ?, ?, ?, NOW(), NOW())",
         [
@@ -131,13 +131,14 @@ const storeDevolucion = async (req, res) => {
           [item.cantidad, item.producto_id]
         );
 
-        // Registrar Movimiento (Aquí SÍ usamos usuario_id porque la tabla movimientos lo tiene)
+        // REGISTRAR MOVIMIENTO (Incluyendo la nueva columna devolucion_id)
         await connection.execute(
-          `INSERT INTO movimientos (producto_id, empresa_id, tipo, origen, origen_id, cantidad, fecha, usuario_id, created_at, updated_at) 
-           VALUES (?, ?, 'entrada', 'devolucion', ?, ?, ?, ?, NOW(), NOW())`,
+          `INSERT INTO movimientos (producto_id, empresa_id, tipo, origen, origen_id, devolucion_id, cantidad, fecha, usuario_id, created_at, updated_at) 
+           VALUES (?, ?, 'entrada', 'devolucion', ?, ?, ?, ?, ?, NOW(), NOW())`,
           [
             item.producto_id,
             empresa_id,
+            devolucion_id,
             devolucion_id,
             item.cantidad,
             fecha,
@@ -156,12 +157,15 @@ const storeDevolucion = async (req, res) => {
             "UPDATE productos SET stock = stock + ? WHERE id = ?",
             [totalEntra, c.producto_id]
           );
+
+          // REGISTRAR MOVIMIENTO (Incluyendo la nueva columna devolucion_id)
           await connection.execute(
-            `INSERT INTO movimientos (producto_id, empresa_id, tipo, origen, origen_id, cantidad, fecha, usuario_id, created_at, updated_at) 
-             VALUES (?, ?, 'entrada', 'devolucion', ?, ?, ?, ?, NOW(), NOW())`,
+            `INSERT INTO movimientos (producto_id, empresa_id, tipo, origen, origen_id, devolucion_id, cantidad, fecha, usuario_id, created_at, updated_at) 
+             VALUES (?, ?, 'entrada', 'devolucion', ?, ?, ?, ?, ?, NOW(), NOW())`,
             [
               c.producto_id,
               empresa_id,
+              devolucion_id,
               devolucion_id,
               totalEntra,
               fecha,
@@ -172,7 +176,7 @@ const storeDevolucion = async (req, res) => {
       }
     }
 
-    // 3. Manejo Financiero
+    // 3. Manejo Financiero (Caja o Cta Cte)
     if (parseInt(cliente_id) === 1) {
       const [arqueo] = await connection.execute(
         "SELECT id FROM arqueos WHERE empresa_id = ? AND (fecha_cierre IS NULL OR fecha_cierre = '') LIMIT 1",
@@ -202,7 +206,7 @@ const storeDevolucion = async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     await connection.rollback();
-    console.error("ERROR CRÍTICO EN DEVOLUCIÓN:", error);
+    console.error("ERROR EN DEVOLUCIÓN:", error);
     res.status(500).json({ success: false, message: error.message });
   } finally {
     connection.release();
@@ -213,77 +217,27 @@ const getDevolucionById = async (req, res) => {
   try {
     const { id } = req.params;
     const empresa_id = req.user.empresa_id;
-
-    // 1. Obtener la cabecera de la devolución
     const [devRows] = await db.execute(
-      `SELECT d.*, cl.nombre_cliente, cl.cuil_codigo 
-       FROM devoluciones d
-       LEFT JOIN clientes cl ON d.cliente_id = cl.id
-       WHERE d.id = ? AND d.empresa_id = ?`,
+      `SELECT d.*, cl.nombre_cliente, cl.cuil_codigo FROM devoluciones d LEFT JOIN clientes cl ON d.cliente_id = cl.id WHERE d.id = ? AND d.empresa_id = ?`,
       [id, empresa_id]
     );
-
-    if (devRows.length === 0) {
-      return res.status(404).json({ message: "Devolución no encontrada" });
-    }
-
-    const devolucion = devRows[0];
-
-    // 2. Obtener los detalles (productos y combos)
+    if (devRows.length === 0)
+      return res.status(404).json({ message: "No encontrada" });
     const detalles = await Devolucion.getDetallesByDevolucionId(id);
-
-    // 3. Procesar precios y componentes de combos
-    const detallesProcesados = await Promise.all(
-      detalles.map(async (d) => {
-        let componentes = [];
-        if (d.combo_id) {
-          const [compRows] = await db.execute(
-            `SELECT p.nombre, cp.cantidad, u.nombre as unidad 
-             FROM combo_producto cp 
-             JOIN productos p ON cp.producto_id = p.id 
-             LEFT JOIN unidads u ON p.unidad_id = u.id 
-             WHERE cp.combo_id = ?`,
-            [d.combo_id]
-          );
-          componentes = compRows;
-        }
-
-        // Lógica de precio: Usar el precio de venta almacenado o calculado
-        let precioUnitario = 0;
-        if (d.producto_id) {
-          precioUnitario =
-            d.aplicar_porcentaje === 1
-              ? parseFloat(d.precio_compra) *
-                (1 + (parseFloat(d.valor_porcentaje) || 0) / 100)
-              : parseFloat(d.precio_venta) || 0;
-        } else if (d.combo_id) {
-          precioUnitario = parseFloat(d.combo_precio) || 0;
-        }
-
-        return {
-          ...d,
-          precio_unitario: precioUnitario,
-          subtotal: parseFloat(d.cantidad) * precioUnitario,
-          componentes,
-        };
-      })
-    );
-
-    res.json({ ...devolucion, detalles: detallesProcesados });
+    res.json({ ...devRows[0], detalles });
   } catch (error) {
-    console.error("Error detalle devolución:", error);
-    res.status(500).json({ message: "Error al obtener el detalle" });
+    res.status(500).json({ message: error.message });
   }
 };
 
 const countDevoluciones = async (req, res) => {
   try {
     const [rows] = await db.execute(
-      "SELECT COUNT(*) AS total FROM devoluciones"
+      "SELECT COUNT(*) AS total FROM devoluciones WHERE empresa_id = ?",
+      [req.user.empresa_id]
     );
     res.json({ total: rows[0].total });
   } catch (error) {
-    console.error("Error al contar devoluciones:", error);
     res.status(500).json({ total: 0 });
   }
 };

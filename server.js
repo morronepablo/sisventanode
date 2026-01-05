@@ -50,6 +50,8 @@ const arqueoRoutes = require("./routes/arqueoRoutes");
 const devolucionRoutes = require("./routes/devolucionRoutes");
 const dashboardRoutes = require("./routes/dashboardRoutes");
 const sessionRoutes = require("./routes/configSessionRoutes");
+const ajusteRoutes = require("./routes/ajusteRoutes");
+const movimientoRoutes = require("./routes/movimientoRoutes");
 
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
@@ -68,6 +70,8 @@ app.use("/api/arqueos", arqueoRoutes);
 app.use("/api/devoluciones", devolucionRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/config-session", sessionRoutes);
+app.use("/api/ajustes", ajusteRoutes);
+app.use("/api/movimientos", movimientoRoutes);
 
 app.get("/", (req, res) => {
   res.send("Backend funcionando!");
