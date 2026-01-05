@@ -3,32 +3,50 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
 const Role = require("../models/Role");
+const db = require("../config/db"); // Importamos db para consultar la tabla de sesiones
 require("dotenv").config();
 
 const login = async (req, res) => {
   const { email, password } = req.body;
 
   try {
+    // 1. Verificar existencia del usuario
     const user = await User.findByEmail(email);
     if (!user) {
       return res.status(401).json({ message: "Credenciales inválidas" });
     }
 
+    // 2. Verificar contraseña
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
       return res.status(401).json({ message: "Credenciales inválidas" });
     }
 
-    // Obtener roles del usuario
+    // 3. OBTENER CONFIGURACIÓN DE SESIÓN DINÁMICA
+    const [configRows] = await db.execute(
+      "SELECT unidad, cantidad FROM config_sessions LIMIT 1"
+    );
+
+    // Si la tabla no tiene datos, usamos 24 horas por defecto
+    const sessionConfig = configRows[0] || { unidad: "horas", cantidad: 24 };
+
+    // Convertir unidad de la DB al formato de jsonwebtoken (m, h, d)
+    let timeSuffix = "h";
+    if (sessionConfig.unidad === "minutos") timeSuffix = "m";
+    if (sessionConfig.unidad === "dias") timeSuffix = "d";
+
+    const expireTime = `${sessionConfig.cantidad}${timeSuffix}`;
+
+    // 4. Obtener roles y permisos del usuario
     const roles = await Role.findByUserId(user.id);
     let allPermisos = new Set();
 
-    // Obtener permisos de cada rol
     for (const role of roles) {
       const permisos = await Role.getPermissionsByRole(role.id);
       permisos.forEach((p) => allPermisos.add(p));
     }
 
+    // 5. Firmar el TOKEN con el tiempo dinámico de la base de datos
     const token = jwt.sign(
       {
         id: user.id,
@@ -38,9 +56,10 @@ const login = async (req, res) => {
         permisos: Array.from(allPermisos),
       },
       process.env.JWT_SECRET,
-      { expiresIn: "1h" }
+      { expiresIn: expireTime } // <--- Aplicación del cambio
     );
 
+    // 6. Respuesta al cliente
     res.json({
       token,
       user: {

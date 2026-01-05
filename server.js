@@ -49,6 +49,7 @@ const comboRoutes = require("./routes/comboRoutes");
 const arqueoRoutes = require("./routes/arqueoRoutes");
 const devolucionRoutes = require("./routes/devolucionRoutes");
 const dashboardRoutes = require("./routes/dashboardRoutes");
+const sessionRoutes = require("./routes/configSessionRoutes");
 
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
@@ -66,6 +67,7 @@ app.use("/api/combos", comboRoutes);
 app.use("/api/arqueos", arqueoRoutes);
 app.use("/api/devoluciones", devolucionRoutes);
 app.use("/api/dashboard", dashboardRoutes);
+app.use("/api/config-session", sessionRoutes);
 
 app.get("/", (req, res) => {
   res.send("Backend funcionando!");
