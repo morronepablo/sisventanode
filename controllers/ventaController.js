@@ -4,6 +4,7 @@ const pdf = require("html-pdf");
 const fs = require("fs");
 const path = require("path");
 const db = require("../config/db");
+const { registrarLog } = require("../utils/logger");
 
 const getListadoVentas = async (req, res) => {
   try {
@@ -17,9 +18,8 @@ const getListadoVentas = async (req, res) => {
     }
     res.json(result);
   } catch (error) {
-    res
-      .status(500)
-      .json({ message: "Error al obtener listado", error: error.message });
+    console.error("[VENTAS ERROR] Listado:", error.message);
+    res.status(500).json({ message: "Error al obtener listado" });
   }
 };
 
@@ -32,7 +32,90 @@ const getTmpVentas = async (req, res) => {
   }
 };
 
+// const postTmpVenta = async (req, res) => {
+//   try {
+//     const { codigo, cantidad, usuario_id, producto_id, combo_id } = req.body;
+//     const userId = usuario_id || req.user.id;
+//     const empresa_id = req.user.empresa_id;
+
+//     let item = null;
+//     let tipo = null;
+
+//     // 1. Prioridad: Si el frontend ya nos manda el ID (desde el modal), lo usamos directamente
+//     if (producto_id) {
+//       const [rows] = await db.execute(
+//         "SELECT id, nombre, stock FROM productos WHERE id = ? AND empresa_id = ?",
+//         [producto_id, empresa_id]
+//       );
+//       if (rows.length > 0) {
+//         item = rows[0];
+//         tipo = "producto";
+//       }
+//     } else if (combo_id) {
+//       const [rows] = await db.execute(
+//         "SELECT id, nombre FROM combos WHERE id = ? AND empresa_id = ?",
+//         [combo_id, empresa_id]
+//       );
+//       if (rows.length > 0) {
+//         item = rows[0];
+//         tipo = "combo";
+//       }
+//     }
+//     // 2. Si no hay ID, buscamos por CÓDIGO (para el escáner o escritura manual)
+//     else if (codigo) {
+//       const term = codigo.toString().trim();
+//       // Buscamos en productos
+//       const [pRows] = await db.execute(
+//         "SELECT id, nombre, stock FROM productos WHERE (codigo = ? OR nombre LIKE ?) AND empresa_id = ? LIMIT 1",
+//         [term, `%${term}%`, empresa_id]
+//       );
+//       if (pRows.length > 0) {
+//         item = pRows[0];
+//         tipo = "producto";
+//       } else {
+//         // Buscamos en combos
+//         const [cRows] = await db.execute(
+//           "SELECT id, nombre FROM combos WHERE (codigo = ? OR nombre LIKE ?) AND empresa_id = ? LIMIT 1",
+//           [term, `%${term}%`, empresa_id]
+//         );
+//         if (cRows.length > 0) {
+//           item = cRows[0];
+//           tipo = "combo";
+//         }
+//       }
+//     }
+
+//     if (!item) {
+//       return res.json({
+//         success: false,
+//         message: "El producto o combo no fue encontrado.",
+//       });
+//     }
+
+//     // 3. Validación de Stock si es producto
+//     if (tipo === "producto" && item.stock < cantidad) {
+//       return res.json({
+//         success: false,
+//         message: `Stock insuficiente para ${item.nombre}.`,
+//       });
+//     }
+
+//     // 4. Insertar en tmp_ventas (Usamos session_id para el carrito)
+//     const columnaId = tipo === "producto" ? "producto_id" : "combo_id";
+//     await db.execute(
+//       `INSERT INTO tmp_ventas (cantidad, ${columnaId}, session_id, created_at, updated_at) VALUES (?, ?, ?, NOW(), NOW())`,
+//       [cantidad, item.id, userId]
+//     );
+
+//     res.json({ success: true });
+//   } catch (error) {
+//     console.error("Error en postTmpVenta:", error);
+//     res.status(500).json({ message: "Error interno", error: error.message });
+//   }
+// };
+
 const postTmpVenta = async (req, res) => {
+  console.log("--- INICIO AGREGAR AL CARRITO VENTA ---");
   try {
     const { codigo, cantidad, usuario_id, producto_id, combo_id } = req.body;
     const userId = usuario_id || req.user.id;
@@ -41,7 +124,6 @@ const postTmpVenta = async (req, res) => {
     let item = null;
     let tipo = null;
 
-    // 1. Prioridad: Si el frontend ya nos manda el ID (desde el modal), lo usamos directamente
     if (producto_id) {
       const [rows] = await db.execute(
         "SELECT id, nombre, stock FROM productos WHERE id = ? AND empresa_id = ?",
@@ -60,11 +142,8 @@ const postTmpVenta = async (req, res) => {
         item = rows[0];
         tipo = "combo";
       }
-    }
-    // 2. Si no hay ID, buscamos por CÓDIGO (para el escáner o escritura manual)
-    else if (codigo) {
+    } else if (codigo) {
       const term = codigo.toString().trim();
-      // Buscamos en productos
       const [pRows] = await db.execute(
         "SELECT id, nombre, stock FROM productos WHERE (codigo = ? OR nombre LIKE ?) AND empresa_id = ? LIMIT 1",
         [term, `%${term}%`, empresa_id]
@@ -73,7 +152,6 @@ const postTmpVenta = async (req, res) => {
         item = pRows[0];
         tipo = "producto";
       } else {
-        // Buscamos en combos
         const [cRows] = await db.execute(
           "SELECT id, nombre FROM combos WHERE (codigo = ? OR nombre LIKE ?) AND empresa_id = ? LIMIT 1",
           [term, `%${term}%`, empresa_id]
@@ -85,14 +163,8 @@ const postTmpVenta = async (req, res) => {
       }
     }
 
-    if (!item) {
-      return res.json({
-        success: false,
-        message: "El producto o combo no fue encontrado.",
-      });
-    }
+    if (!item) return res.json({ success: false, message: "No encontrado." });
 
-    // 3. Validación de Stock si es producto
     if (tipo === "producto" && item.stock < cantidad) {
       return res.json({
         success: false,
@@ -100,18 +172,21 @@ const postTmpVenta = async (req, res) => {
       });
     }
 
-    // 4. Insertar en tmp_ventas (Usamos session_id para el carrito)
     const columnaId = tipo === "producto" ? "producto_id" : "combo_id";
     await db.execute(
       `INSERT INTO tmp_ventas (cantidad, ${columnaId}, session_id, created_at, updated_at) VALUES (?, ?, ?, NOW(), NOW())`,
       [cantidad, item.id, userId]
     );
 
+    console.log(
+      `[VENTAS] Ítem agregado al temporal: ${item.nombre} (Cant: ${cantidad})`
+    );
     res.json({ success: true });
   } catch (error) {
-    console.error("Error en postTmpVenta:", error);
-    res.status(500).json({ message: "Error interno", error: error.message });
+    console.error("[VENTAS ERROR] postTmpVenta:", error.message);
+    res.status(500).json({ message: "Error interno" });
   }
+  console.log("--- FIN AGREGAR AL CARRITO VENTA ---");
 };
 
 const deleteTmpVenta = async (req, res) => {
@@ -123,17 +198,45 @@ const deleteTmpVenta = async (req, res) => {
   }
 };
 
+// const storeVenta = async (req, res) => {
+//   try {
+//     const venta_id = await Venta.store(
+//       req.body,
+//       req.user.id,
+//       req.user.empresa_id
+//     );
+//     res.json({ success: true, venta_id });
+//   } catch (error) {
+//     res.status(500).json({ success: false, message: error.message });
+//   }
+// };
+
 const storeVenta = async (req, res) => {
+  console.log("--- INICIO REGISTRO DE VENTA ---");
   try {
+    const { precio_total, cliente_id } = req.body;
     const venta_id = await Venta.store(
       req.body,
       req.user.id,
       req.user.empresa_id
     );
+
+    console.log(`[VENTAS] Venta guardada con éxito. ID: ${venta_id}`);
+
+    // REGISTRO DE LOG
+    await registrarLog(
+      req,
+      "CREAR",
+      "VENTAS",
+      `Se registró una venta por un total de $${precio_total}. Ticket N°: ${venta_id}. Cliente ID: ${cliente_id}`
+    );
+
     res.json({ success: true, venta_id });
   } catch (error) {
+    console.error("[VENTAS ERROR] Fallo al registrar venta:", error.message);
     res.status(500).json({ success: false, message: error.message });
   }
+  console.log("--- FIN REGISTRO DE VENTA ---");
 };
 
 const generarReporte = async (req, res) => {
@@ -1744,6 +1847,50 @@ const getVentaTicket = async (req, res) => {
   }
 };
 
+const updateTmpVentaQuantity = async (req, res) => {
+  try {
+    const { id } = req.params; // ID de la tabla tmp_ventas
+    const { cantidad } = req.body;
+
+    // 1. Buscamos el stock real del producto que está en el carrito
+    const [rows] = await db.execute(
+      `
+      SELECT p.stock, p.nombre 
+      FROM tmp_ventas t
+      JOIN productos p ON t.producto_id = p.id
+      WHERE t.id = ?
+    `,
+      [id]
+    );
+
+    if (rows.length > 0) {
+      const stockDisponible = rows[0].stock;
+      const nombreProducto = rows[0].nombre;
+
+      // 2. Si la cantidad pedida es mayor al stock, bloqueamos
+      if (cantidad > stockDisponible) {
+        return res.json({
+          success: false,
+          message: `Stock insuficiente para ${nombreProducto}. Máximo disponible: ${stockDisponible}`,
+        });
+      }
+    }
+
+    // 3. Si pasó la validación, actualizamos
+    await db.execute(
+      "UPDATE tmp_ventas SET cantidad = ?, updated_at = NOW() WHERE id = ?",
+      [cantidad, id]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Error en updateTmpVentaQuantity:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "Error interno del servidor" });
+  }
+};
+
 const countVentas = async (req, res) => {
   try {
     const [rows] = await db.execute("SELECT COUNT(*) AS total FROM ventas");
@@ -1778,7 +1925,7 @@ const getVentasDashboard = async (req, res) => {
   try {
     const empresa_id = req.user ? req.user.empresa_id : 1;
 
-    // --- CÁLCULO DE FECHA LOCAL ARGENTINA ---
+    // --- 1. CÁLCULO DE FECHA LOCAL ARGENTINA ---
     const options = {
       timeZone: "America/Argentina/Buenos_Aires",
       year: "numeric",
@@ -1794,13 +1941,13 @@ const getVentasDashboard = async (req, res) => {
     const currentMonth = parseInt(dateParts.month);
     const currentYear = parseInt(dateParts.year);
 
-    // 1. VENTAS Y DEVOLUCIONES (MONTO)
+    // --- 2. CONSULTA DE VENTAS Y DEVOLUCIONES (MONTO BRUTO) ---
     const [v] = await db.execute(
       `
       SELECT 
-        SUM(CASE WHEN DATE(fecha) = ? THEN precio_total ELSE 0 END) as v_dia,
-        SUM(CASE WHEN MONTH(fecha) = ? AND YEAR(fecha) = ? THEN precio_total ELSE 0 END) as v_mes,
-        SUM(CASE WHEN YEAR(fecha) = ? THEN precio_total ELSE 0 END) as v_anio
+        IFNULL(SUM(CASE WHEN DATE(fecha) = ? THEN precio_total ELSE 0 END), 0) as dia,
+        IFNULL(SUM(CASE WHEN MONTH(fecha) = ? AND YEAR(fecha) = ? THEN precio_total ELSE 0 END), 0) as mes,
+        IFNULL(SUM(CASE WHEN YEAR(fecha) = ? THEN precio_total ELSE 0 END), 0) as anio
       FROM ventas WHERE empresa_id = ?
     `,
       [todayStr, currentMonth, currentYear, currentYear, empresa_id]
@@ -1809,31 +1956,76 @@ const getVentasDashboard = async (req, res) => {
     const [d] = await db.execute(
       `
       SELECT 
-        SUM(CASE WHEN DATE(fecha) = ? THEN precio_total ELSE 0 END) as d_dia,
-        SUM(CASE WHEN MONTH(fecha) = ? AND YEAR(fecha) = ? THEN precio_total ELSE 0 END) as d_mes,
-        SUM(CASE WHEN YEAR(fecha) = ? THEN precio_total ELSE 0 END) as d_anio,
-        COUNT(id) as total_cantidad -- Total de devoluciones realizadas
+        IFNULL(SUM(CASE WHEN DATE(fecha) = ? THEN precio_total ELSE 0 END), 0) as dia,
+        IFNULL(SUM(CASE WHEN MONTH(fecha) = ? AND YEAR(fecha) = ? THEN precio_total ELSE 0 END), 0) as mes,
+        IFNULL(SUM(CASE WHEN YEAR(fecha) = ? THEN precio_total ELSE 0 END), 0) as anio,
+        COUNT(id) as total_cantidad
       FROM devoluciones WHERE empresa_id = ?
     `,
       [todayStr, currentMonth, currentYear, currentYear, empresa_id]
     );
 
-    // 2. GANANCIAS (Ya lo teníamos)
-    const [g] = await db.execute(
+    // --- 3. GANANCIA BRUTA DE VENTAS (Incluye Productos y Combos) ---
+    const [gVentas] = await db.execute(
       `
       SELECT 
-        SUM(CASE WHEN DATE(v.fecha) = ? THEN (dv.cantidad * (IFNULL(p.precio_venta, 0) - IFNULL(p.precio_compra, 0))) ELSE 0 END) as g_dia,
-        SUM(CASE WHEN MONTH(v.fecha) = ? AND YEAR(v.fecha) = ? THEN (dv.cantidad * (IFNULL(p.precio_venta, 0) - IFNULL(p.precio_compra, 0))) ELSE 0 END) as g_mes,
-        SUM(CASE WHEN YEAR(v.fecha) = ? THEN (dv.cantidad * (IFNULL(p.precio_venta, 0) - IFNULL(p.precio_compra, 0))) ELSE 0 END) as g_anio
-      FROM detalle_ventas dv
-      JOIN ventas v ON dv.venta_id = v.id
-      LEFT JOIN productos p ON dv.producto_id = p.id
-      WHERE v.empresa_id = ?
+        IFNULL(SUM(CASE WHEN DATE(fecha_v) = ? THEN ganancia ELSE 0 END), 0) as dia,
+        IFNULL(SUM(CASE WHEN MONTH(fecha_v) = ? AND YEAR(fecha_v) = ? THEN ganancia ELSE 0 END), 0) as mes,
+        IFNULL(SUM(CASE WHEN YEAR(fecha_v) = ? THEN ganancia ELSE 0 END), 0) as anio
+      FROM (
+        SELECT v.fecha as fecha_v, (dv.cantidad * (p.precio_venta - p.precio_compra)) as ganancia
+        FROM detalle_ventas dv
+        JOIN ventas v ON dv.venta_id = v.id
+        JOIN productos p ON dv.producto_id = p.id
+        WHERE v.empresa_id = ? AND dv.producto_id IS NOT NULL
+        UNION ALL
+        SELECT v.fecha as fecha_v, (dv.cantidad * (c.precio_venta - (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id))) as ganancia
+        FROM detalle_ventas dv
+        JOIN ventas v ON dv.venta_id = v.id
+        JOIN combos c ON dv.combo_id = c.id
+        WHERE v.empresa_id = ? AND dv.combo_id IS NOT NULL
+      ) as t_ventas
+    `,
+      [todayStr, currentMonth, currentYear, currentYear, empresa_id, empresa_id]
+    );
+
+    // --- 4. GANANCIA PERDIDA POR DEVOLUCIONES (Para restar de la ganancia bruta) ---
+    const [gDevs] = await db.execute(
+      `
+        SELECT 
+          IFNULL(SUM(CASE WHEN DATE(fecha_d) = ? THEN g_p ELSE 0 END), 0) as dia,
+          IFNULL(SUM(CASE WHEN MONTH(fecha_d) = ? AND YEAR(fecha_d) = ? THEN g_p ELSE 0 END), 0) as mes,
+          IFNULL(SUM(CASE WHEN YEAR(fecha_d) = ? THEN g_p ELSE 0 END), 0) as anio
+        FROM (
+          SELECT dev.fecha as fecha_d, (dd.cantidad * (p.precio_venta - p.precio_compra)) as g_p
+          FROM detalle_devoluciones dd
+          JOIN devoluciones dev ON dd.devolucion_id = dev.id
+          JOIN productos p ON dd.producto_id = p.id
+          WHERE dev.empresa_id = ? AND dd.producto_id IS NOT NULL
+          UNION ALL
+          SELECT dev.fecha as fecha_d, (dd.cantidad * (c.precio_venta - (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id))) as g_p
+          FROM detalle_devoluciones dd
+          JOIN devoluciones dev ON dd.devolucion_id = dev.id
+          JOIN combos c ON dd.combo_id = c.id
+          WHERE dev.empresa_id = ? AND dd.combo_id IS NOT NULL
+        ) as t_devs
+    `,
+      [todayStr, currentMonth, currentYear, currentYear, empresa_id, empresa_id]
+    );
+
+    // --- 5. TOTAL GASTOS (Egresos operativos) ---
+    const [gas] = await db.execute(
+      `
+      SELECT 
+        IFNULL(SUM(CASE WHEN DATE(fecha) = ? THEN monto ELSE 0 END), 0) as dia,
+        IFNULL(SUM(CASE WHEN MONTH(fecha) = ? AND YEAR(fecha) = ? THEN monto ELSE 0 END), 0) as mes,
+        IFNULL(SUM(CASE WHEN YEAR(fecha) = ? THEN monto ELSE 0 END), 0) as anio
+      FROM gastos WHERE empresa_id = ?
     `,
       [todayStr, currentMonth, currentYear, currentYear, empresa_id]
     );
 
-    // 3. DEUDA GENERAL
+    // --- 6. DEUDA GENERAL ---
     const [deudaRows] = await db.execute(
       `
       SELECT IFNULL(SUM(CASE WHEN tipo = 'deuda' THEN importe ELSE 0 END), 0) - 
@@ -1843,7 +2035,7 @@ const getVentasDashboard = async (req, res) => {
       [empresa_id]
     );
 
-    // 4. TOP PRODUCTOS
+    // --- 7. RANKING TOP 10 ---
     const [top] = await db.execute(
       `
       SELECT nombre, SUM(cant) as veces_vendido FROM (
@@ -1859,17 +2051,40 @@ const getVentasDashboard = async (req, res) => {
       [empresa_id, empresa_id]
     );
 
+    // --- CÁLCULOS FINALES ---
+    // Ventas Neta = Ventas Brutas - Devoluciones
+    const ventas_dia = Math.max(parseFloat(v[0].dia) - parseFloat(d[0].dia), 0);
+    const ventas_mes = Math.max(parseFloat(v[0].mes) - parseFloat(d[0].mes), 0);
+    const ventas_anio = Math.max(
+      parseFloat(v[0].anio) - parseFloat(d[0].anio),
+      0
+    );
+
+    // Ganancia Neta Real = (Ganancia Ventas - Ganancia Devoluciones) - Gastos
+    const ganancia_dia =
+      parseFloat(gVentas[0].dia) -
+      parseFloat(gDevs[0].dia) -
+      parseFloat(gas[0].dia);
+    const ganancia_mes =
+      parseFloat(gVentas[0].mes) -
+      parseFloat(gDevs[0].mes) -
+      parseFloat(gas[0].mes);
+    const ganancia_anio =
+      parseFloat(gVentas[0].anio) -
+      parseFloat(gDevs[0].anio) -
+      parseFloat(gas[0].anio);
+
     res.json({
-      ventas_dia: Math.max(v[0].v_dia - d[0].d_dia, 0),
-      ventas_mes: Math.max(v[0].v_mes - d[0].d_mes, 0),
-      ventas_anio: Math.max(v[0].v_anio - d[0].d_anio, 0),
-      ganancia_dia: Math.max(g[0].g_dia, 0),
-      ganancia_mes: Math.max(g[0].g_mes, 0),
-      ganancia_anio: Math.max(g[0].g_anio, 0),
+      ventas_dia,
+      ventas_mes,
+      ventas_anio,
+      ganancia_dia, // Puede ser negativo si hay pérdidas
+      ganancia_mes,
+      ganancia_anio,
       deuda_general: parseFloat(deudaRows[0].total || 0),
-      devoluciones_dia: d[0].d_dia,
-      devoluciones_mes: d[0].d_mes,
-      devoluciones_anio: d[0].d_anio,
+      devoluciones_dia: parseFloat(d[0].dia),
+      devoluciones_mes: parseFloat(d[0].mes),
+      devoluciones_anio: parseFloat(d[0].anio),
       devoluciones_total_cant: d[0].total_cantidad,
       topProductos: top,
     });
@@ -1897,6 +2112,7 @@ module.exports = {
   getDeudaCliente,
   getVentaById,
   getVentaTicket,
+  updateTmpVentaQuantity,
   countVentas,
   getVentasSummary,
   getVentasDashboard,

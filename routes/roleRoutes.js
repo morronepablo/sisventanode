@@ -1,28 +1,20 @@
 // routes/roleRoutes.js
 const express = require("express");
-const {
-  getAllRoles,
-  getRoleById,
-  getRoleWithDetails,
-  getRolePermissions,
-  assignPermissionsToRole,
-  createRole,
-  updateRole,
-  deleteRole,
-  countRoles,
-} = require("../controllers/roleController");
-
 const router = express.Router();
+const roleController = require("../controllers/roleController");
+const authMiddleware = require("../middlewares/authMiddleware");
 
-router.get("/count", countRoles);
+// 👈 APLICAR MIDDLEWARE A TODAS LAS RUTAS
+router.use(authMiddleware);
 
-router.get("/", getAllRoles);
-router.get("/:id", getRoleById);
-router.get("/:id/detalles", getRoleWithDetails);
-router.get("/:id/permisos", getRolePermissions);
-router.post("/:id/permisos", assignPermissionsToRole);
-router.post("/", createRole);
-router.put("/:id", updateRole);
-router.delete("/:id", deleteRole);
+router.get("/count", roleController.countRoles);
+router.get("/", roleController.getAllRoles);
+router.get("/:id", roleController.getRoleById);
+router.get("/:id/detalles", roleController.getRoleWithDetails);
+router.get("/:id/permisos", roleController.getRolePermissions);
+router.post("/:id/permisos", roleController.assignPermissionsToRole);
+router.post("/", roleController.createRole);
+router.put("/:id", roleController.updateRole);
+router.delete("/:id", roleController.deleteRole);
 
 module.exports = router;

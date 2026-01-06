@@ -52,6 +52,9 @@ const dashboardRoutes = require("./routes/dashboardRoutes");
 const sessionRoutes = require("./routes/configSessionRoutes");
 const ajusteRoutes = require("./routes/ajusteRoutes");
 const movimientoRoutes = require("./routes/movimientoRoutes");
+const gastoRoutes = require("./routes/gastoRoutes");
+const logRoutes = require("./routes/logRoutes");
+const backupRoutes = require("./routes/backupRoutes");
 
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
@@ -72,6 +75,9 @@ app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/config-session", sessionRoutes);
 app.use("/api/ajustes", ajusteRoutes);
 app.use("/api/movimientos", movimientoRoutes);
+app.use("/api/gastos", gastoRoutes);
+app.use("/api/logs", logRoutes);
+app.use("/api/backup", backupRoutes);
 
 app.get("/", (req, res) => {
   res.send("Backend funcionando!");

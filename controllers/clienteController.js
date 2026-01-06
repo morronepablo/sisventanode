@@ -2,14 +2,15 @@
 const Cliente = require("../models/Cliente");
 const pdf = require("html-pdf");
 const db = require("../config/db");
+const { registrarLog } = require("../utils/logger"); // 👈 Importamos el logger
 
 const getListadoClientes = async (req, res) => {
   try {
-    // Asumiendo que obtienes empresa_id del token (req.user)
     const empresaId = req.user.empresa_id || 1;
     const clientes = await Cliente.getAll(empresaId);
     res.json(clientes);
   } catch (error) {
+    console.error("[CLIENTES ERROR] Listado:", error.message);
     res
       .status(500)
       .json({ message: "Error al obtener clientes", error: error.message });
@@ -17,6 +18,7 @@ const getListadoClientes = async (req, res) => {
 };
 
 const createCliente = async (req, res) => {
+  console.log("--- INICIO CREATE CLIENTE ---");
   try {
     const { nombre_cliente, cuil_codigo, telefono, email } = req.body;
     const empresa_id = req.user.empresa_id;
@@ -35,11 +37,22 @@ const createCliente = async (req, res) => {
       empresa_id,
     });
 
+    console.log(`[CLIENTES] Cliente creado con ID: ${id}`);
+
+    // REGISTRO DE LOG
+    await registrarLog(
+      req,
+      "CREAR",
+      "CLIENTES",
+      `Se registró al cliente: ${nombre_cliente} (CUIL: ${cuil_codigo})`
+    );
+
     res.status(201).json({ message: "Cliente registrado con éxito", id });
   } catch (error) {
-    console.error(error);
+    console.error("[CLIENTES ERROR] Create:", error.message);
     res.status(500).json({ message: "Error al registrar el cliente" });
   }
+  console.log("--- FIN CREATE CLIENTE ---");
 };
 
 const getClienteById = async (req, res) => {
@@ -74,7 +87,6 @@ const getClientesConDeuda = async (req, res) => {
 
     const [rows] = await db.execute(query, [empresa_id]);
 
-    // Calcular días de mora en el servidor
     const result = rows.map((row) => {
       const hoy = new Date();
       const fechaDeuda = new Date(row.fecha_antigua);
@@ -100,7 +112,6 @@ const getGestionPagos = async (req, res) => {
     const cliente = await Cliente.findById(id);
     const data = await Cliente.getGestionPagos(id, empresaId);
 
-    // Verificar si hay arqueo abierto
     const [arqueo] = await db.execute(
       "SELECT id FROM arqueos WHERE fecha_cierre IS NULL AND empresa_id = ? LIMIT 1",
       [empresaId]
@@ -117,6 +128,7 @@ const getGestionPagos = async (req, res) => {
 };
 
 const registrarPago = async (req, res) => {
+  console.log("--- INICIO REGISTRO PAGO CLIENTE ---");
   const connection = await db.getConnection();
   try {
     await connection.beginTransaction();
@@ -130,7 +142,6 @@ const registrarPago = async (req, res) => {
     );
     const arqueo_id = arqueo.length > 0 ? arqueo[0].id : null;
 
-    // 1. Registro en Cuenta Corriente
     const [resultCtaCte] = await connection.execute(
       `INSERT INTO compras_cta_cte (cliente_id, empresa_id, importe, tipo, fecha, metodo_pago, created_at, updated_at) 
              VALUES (?, ?, ?, 'pago', ?, ?, NOW(), NOW())`,
@@ -139,7 +150,6 @@ const registrarPago = async (req, res) => {
     const cta_cte_id = resultCtaCte.insertId;
 
     if (arqueo_id) {
-      // 2. Registrar en la tabla 'pagos' y obtener SU ID (pago_real_id)
       const [resultPagosTable] = await connection.execute(
         `INSERT INTO pagos (cliente_id, compra_cta_cte_id, monto, metodo_pago, fecha_pago, descripcion, empresa_id, arqueo_id, created_at) 
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
@@ -154,9 +164,8 @@ const registrarPago = async (req, res) => {
           arqueo_id,
         ]
       );
-      const pago_real_id = resultPagosTable.insertId; // Este es el ID de la tabla pagos
+      const pago_real_id = resultPagosTable.insertId;
 
-      // 3. SI ES EFECTIVO -> Registrar en movimiento_cajas usando pago_real_id
       if (metodo_pago === "efectivo") {
         const [cliente] = await connection.execute(
           "SELECT nombre_cliente FROM clientes WHERE id = ?",
@@ -167,7 +176,7 @@ const registrarPago = async (req, res) => {
                      VALUES ('Ingreso', ?, ?, ?, ?, NOW())`,
           [
             importe,
-            `Pago Cta. Cte. Cliente: ${cliente[0].nombre_cliente} (Pago ID: ${pago_real_id})`,
+            `Pago Cta. Cte. Cliente: ${cliente[0].nombre_cliente}`,
             arqueo_id,
             pago_real_id,
           ]
@@ -176,29 +185,40 @@ const registrarPago = async (req, res) => {
     }
 
     await connection.commit();
+    console.log(`[CLIENTES] Pago registrado para ID: ${id}`);
+
+    // REGISTRO DE LOG
+    await registrarLog(
+      req,
+      "PAGO",
+      "CLIENTES_CTA_CTE",
+      `Se registró un pago de $${importe} para el cliente ID: ${id}`
+    );
+
     res.json({ success: true, pago_id: cta_cte_id });
   } catch (error) {
     await connection.rollback();
+    console.error("[CLIENTES ERROR] Registro de pago:", error.message);
     res.status(500).json({ message: error.message });
   } finally {
     connection.release();
   }
+  console.log("--- FIN REGISTRO PAGO CLIENTE ---");
 };
 
 const updatePago = async (req, res) => {
+  console.log("--- INICIO UPDATE PAGO CLIENTE ---");
   const connection = await db.getConnection();
   try {
     await connection.beginTransaction();
-    const { pagoId } = req.params; // ID de compras_cta_cte
+    const { pagoId } = req.params;
     const { fecha, importe, metodo_pago } = req.body;
 
-    // 1. Actualizar Cuenta Corriente
     await connection.execute(
       "UPDATE compras_cta_cte SET fecha = ?, importe = ?, metodo_pago = ? WHERE id = ?",
       [fecha, importe, metodo_pago, pagoId]
     );
 
-    // 2. Obtener el ID de la tabla 'pagos'
     const [pagoTab] = await connection.execute(
       "SELECT id, arqueo_id, cliente_id FROM pagos WHERE compra_cta_cte_id = ?",
       [pagoId]
@@ -206,39 +226,32 @@ const updatePago = async (req, res) => {
 
     if (pagoTab.length > 0) {
       const pago_real_id = pagoTab[0].id;
-      const arqueo_id = pagoTab[0].arqueo_id;
-
-      // 3. Actualizar Tabla Pagos
       await connection.execute(
         "UPDATE pagos SET monto = ?, metodo_pago = ?, fecha_pago = ? WHERE id = ?",
         [importe, metodo_pago, fecha, pago_real_id]
       );
 
-      // 4. ACTUALIZAR CAJA (Buscando por el pago_id de la tabla pagos)
       const [existeEnCaja] = await connection.execute(
         "SELECT id FROM movimiento_cajas WHERE pago_id = ?",
         [pago_real_id]
       );
 
       if (existeEnCaja.length > 0) {
-        // SOLO MODIFICAR EL IMPORTE (Como pediste)
         await connection.execute(
           "UPDATE movimiento_cajas SET monto = ? WHERE pago_id = ?",
           [importe, pago_real_id]
         );
-      } else {
-        // Si el item fue borrado antes o no existe, lo recreamos para que no falte
+      } else if (metodo_pago === "efectivo") {
         const [cliente] = await connection.execute(
           "SELECT nombre_cliente FROM clientes WHERE id = ?",
           [pagoTab[0].cliente_id]
         );
         await connection.execute(
-          `INSERT INTO movimiento_cajas (tipo, monto, descripcion, arqueo_id, pago_id, created_at) 
-                     VALUES ('Ingreso', ?, ?, ?, ?, NOW())`,
+          `INSERT INTO movimiento_cajas (tipo, monto, descripcion, arqueo_id, pago_id, created_at) VALUES ('Ingreso', ?, ?, ?, ?, NOW())`,
           [
             importe,
-            `Pago Cta. Cte. Cliente: ${cliente[0].nombre_cliente} (Pago ID: ${pago_real_id})`,
-            arqueo_id,
+            `Pago Cta. Cte. Cliente: ${cliente[0].nombre_cliente}`,
+            pagoTab[0].arqueo_id,
             pago_real_id,
           ]
         );
@@ -246,55 +259,48 @@ const updatePago = async (req, res) => {
     }
 
     await connection.commit();
+
+    // REGISTRO DE LOG
+    await registrarLog(
+      req,
+      "EDITAR",
+      "CLIENTES_CTA_CTE",
+      `Se actualizó el pago ID: ${pagoId}. Nuevo monto: $${importe}`
+    );
+
     res.json({ success: true });
   } catch (error) {
     await connection.rollback();
+    console.error("[CLIENTES ERROR] Update pago:", error.message);
     res.status(500).json({ message: error.message });
   } finally {
     connection.release();
   }
+  console.log("--- FIN UPDATE PAGO CLIENTE ---");
 };
 
 const getComprasCliente = async (req, res) => {
   try {
     const { id } = req.params;
     const empresa_id = req.user.empresa_id;
-
     const [cliente] = await db.execute(
       "SELECT nombre_cliente FROM clientes WHERE id = ?",
       [id]
     );
-
     const [ventas] = await db.execute(
-      `SELECT v.*, 
-            (SELECT COUNT(*) FROM detalle_ventas WHERE venta_id = v.id) as cantidad_productos
-            FROM ventas v 
-            WHERE v.cliente_id = ? AND v.empresa_id = ? 
-            ORDER BY v.fecha DESC`,
+      `SELECT v.*, (SELECT COUNT(*) FROM detalle_ventas WHERE venta_id = v.id) as cantidad_productos FROM ventas v WHERE v.cliente_id = ? AND v.empresa_id = ? ORDER BY v.fecha DESC`,
       [id, empresa_id]
     );
 
     for (let v of ventas) {
       const [detalles] = await db.execute(
-        `SELECT dv.cantidad, p.nombre as producto_nombre, c.nombre as combo_nombre, 
-                        u.nombre as unidad_nombre, dv.combo_id, dv.producto_id
-                 FROM detalle_ventas dv
-                 LEFT JOIN productos p ON dv.producto_id = p.id
-                 LEFT JOIN combos c ON dv.combo_id = c.id
-                 LEFT JOIN unidads u ON p.unidad_id = u.id
-                 WHERE dv.venta_id = ?`,
+        `SELECT dv.cantidad, p.nombre as producto_nombre, c.nombre as combo_nombre, u.nombre as unidad_nombre, dv.combo_id, dv.producto_id FROM detalle_ventas dv LEFT JOIN productos p ON dv.producto_id = p.id LEFT JOIN combos c ON dv.combo_id = c.id LEFT JOIN unidads u ON p.unidad_id = u.id WHERE dv.venta_id = ?`,
         [v.id]
       );
-
-      // 👇 NUEVA LÓGICA: Si es combo, buscar sus productos internos
       for (let d of detalles) {
         if (d.combo_id) {
           const [componentes] = await db.execute(
-            `SELECT p.nombre, cp.cantidad, u.nombre as unidad
-                         FROM combo_producto cp
-                         JOIN productos p ON cp.producto_id = p.id
-                         LEFT JOIN unidads u ON p.unidad_id = u.id
-                         WHERE cp.combo_id = ?`,
+            `SELECT p.nombre, cp.cantidad, u.nombre as unidad FROM combo_producto cp JOIN productos p ON cp.producto_id = p.id LEFT JOIN unidads u ON p.unidad_id = u.id WHERE cp.combo_id = ?`,
             [d.combo_id]
           );
           d.componentes = componentes;
@@ -302,7 +308,6 @@ const getComprasCliente = async (req, res) => {
       }
       v.detalles = detalles;
     }
-
     res.json({ cliente: cliente[0], ventas });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -313,7 +318,6 @@ const getHistorialCliente = async (req, res) => {
   try {
     const { id } = req.params;
     const empresa_id = req.user.empresa_id;
-
     const [cliente] = await db.execute(
       "SELECT nombre_cliente FROM clientes WHERE id = ?",
       [id]
@@ -321,63 +325,36 @@ const getHistorialCliente = async (req, res) => {
     if (!cliente[0])
       return res.status(404).json({ message: "Cliente no encontrado" });
 
-    // 1. Obtener Ventas
     const [ventas] = await db.execute(
       "SELECT 'Venta' as tipo, id, fecha, precio_total as monto, CONCAT('Venta Ticket: ', id) as detalle FROM ventas WHERE cliente_id = ? AND empresa_id = ?",
       [id, empresa_id]
     );
-
-    // 2. Obtener Movimientos de Cuenta Corriente (Pagos, Deudas manuales, Devoluciones)
     const [ctaCte] = await db.execute(
-      `SELECT 
-                tipo, 
-                id, 
-                fecha, 
-                importe as monto, 
-                CASE 
-                    WHEN tipo = 'pago' THEN CONCAT('Pago - Método: ', IFNULL(metodo_pago, 'N/A'))
-                    WHEN tipo = 'deuda' THEN CONCAT('Deuda - Referencia ID: ', IFNULL(venta_id, id))
-                    WHEN tipo = 'devolucion' THEN CONCAT('Devolución - ID: ', IFNULL(devolucion_id, id))
-                    ELSE 'Movimiento'
-                END as detalle
-             FROM compras_cta_cte 
-             WHERE cliente_id = ? AND empresa_id = ?`,
+      `SELECT tipo, id, fecha, importe as monto, CASE WHEN tipo = 'pago' THEN CONCAT('Pago - Método: ', IFNULL(metodo_pago, 'N/A')) WHEN tipo = 'deuda' THEN CONCAT('Deuda - Referencia ID: ', IFNULL(venta_id, id)) WHEN tipo = 'devolucion' THEN CONCAT('Devolución - ID: ', IFNULL(devolucion_id, id)) ELSE 'Movimiento' END as detalle FROM compras_cta_cte WHERE cliente_id = ? AND empresa_id = ?`,
       [id, empresa_id]
     );
-
-    // 3. Unificar y Ordenar por fecha descendente
     const transacciones = [...ventas, ...ctaCte].sort(
       (a, b) => new Date(b.fecha) - new Date(a.fecha)
     );
-
-    res.json({
-      cliente: cliente[0],
-      transacciones,
-    });
+    res.json({ cliente: cliente[0], transacciones });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
 
 const updateCliente = async (req, res) => {
+  console.log("--- INICIO UPDATE CLIENTE ---");
   try {
     const { id } = req.params;
     const { nombre_cliente, cuil_codigo, telefono, email } = req.body;
     const empresa_id = req.user.empresa_id;
 
-    // Validación básica
-    if (!nombre_cliente || !cuil_codigo) {
+    if (!nombre_cliente || !cuil_codigo)
       return res
         .status(400)
         .json({ message: "Nombre y CUIL son obligatorios" });
-    }
 
-    const query = `
-      UPDATE clientes 
-      SET nombre_cliente = ?, cuil_codigo = ?, telefono = ?, email = ?, updated_at = NOW()
-      WHERE id = ? AND empresa_id = ?
-    `;
-
+    const query = `UPDATE clientes SET nombre_cliente = ?, cuil_codigo = ?, telefono = ?, email = ?, updated_at = NOW() WHERE id = ? AND empresa_id = ?`;
     const [result] = await db.execute(query, [
       nombre_cliente,
       cuil_codigo,
@@ -387,15 +364,23 @@ const updateCliente = async (req, res) => {
       empresa_id,
     ]);
 
-    if (result.affectedRows === 0) {
+    if (result.affectedRows === 0)
       return res.status(404).json({ message: "Cliente no encontrado" });
-    }
+
+    // REGISTRO DE LOG
+    await registrarLog(
+      req,
+      "EDITAR",
+      "CLIENTES",
+      `Se actualizaron los datos del cliente: ${nombre_cliente} (ID: ${id})`
+    );
 
     res.json({ message: "Cliente actualizado con éxito" });
   } catch (error) {
     console.error(error);
-    res.status(500).json({ message: "Error al actualizar el cliente" });
+    res.status(500).json({ message: "Error" });
   }
+  console.log("--- FIN UPDATE CLIENTE ---");
 };
 
 const getReciboPagoTicket = async (req, res) => {
@@ -427,8 +412,8 @@ const getReciboPagoTicket = async (req, res) => {
 
     // 4. Calcular Saldo Actual (Deuda - Pagos)
     const [[totales]] = await db.execute(
-      `SELECT 
-                SUM(CASE WHEN tipo = 'deuda' THEN importe ELSE 0 END) - 
+      `SELECT
+                SUM(CASE WHEN tipo = 'deuda' THEN importe ELSE 0 END) -
                 SUM(CASE WHEN tipo = 'pago' THEN importe ELSE 0 END) as saldo_total
              FROM compras_cta_cte WHERE cliente_id = ?`,
       [pago.cliente_id]
@@ -452,11 +437,11 @@ const getReciboPagoTicket = async (req, res) => {
             <meta charset="UTF-8">
             <style>
                 * { margin: 0; padding: 0; box-sizing: border-box; }
-                body { 
-                    font-family: 'Courier New', Courier, monospace; 
-                    font-size: 10px; 
-                    line-height: 1.2; 
-                    width: 60mm; 
+                body {
+                    font-family: 'Courier New', Courier, monospace;
+                    font-size: 10px;
+                    line-height: 1.2;
+                    width: 60mm;
                     color: #000;
                     padding: 2px;
                 }
@@ -551,10 +536,13 @@ const getReciboPagoTicket = async (req, res) => {
 
 const countClientes = async (req, res) => {
   try {
-    const [rows] = await db.execute("SELECT COUNT(*) AS total FROM clientes");
+    const empresa_id = req.user.empresa_id;
+    const [rows] = await db.execute(
+      "SELECT COUNT(*) AS total FROM clientes WHERE empresa_id = ?",
+      [empresa_id]
+    );
     res.json({ total: rows[0].total });
   } catch (error) {
-    console.error("Error al contar clientes:", error);
     res.status(500).json({ total: 0 });
   }
 };
@@ -562,39 +550,39 @@ const countClientes = async (req, res) => {
 const getClientesSummary = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
-
-    // Obtenemos el conteo total de clientes y la deuda neta global
     const [rows] = await db.execute(
-      `
-      SELECT 
-        (SELECT COUNT(*) FROM clientes WHERE empresa_id = ?) AS total,
-        IFNULL(
-          (SELECT SUM(CASE WHEN tipo = 'deuda' THEN importe ELSE 0 END) - 
-                  SUM(CASE WHEN tipo = 'pago' THEN importe ELSE 0 END)
-           FROM compras_cta_cte 
-           WHERE empresa_id = ?), 
-        0) AS totalDeuda
-    `,
+      `SELECT (SELECT COUNT(*) FROM clientes WHERE empresa_id = ?) AS total, IFNULL((SELECT SUM(CASE WHEN tipo = 'deuda' THEN importe ELSE 0 END) - SUM(CASE WHEN tipo = 'pago' THEN importe ELSE 0 END) FROM compras_cta_cte WHERE empresa_id = ?), 0) AS totalDeuda`,
       [empresa_id, empresa_id]
     );
-
     res.json({
       total: rows[0].total || 0,
       totalDeuda: parseFloat(rows[0].totalDeuda) || 0,
     });
   } catch (error) {
-    console.error("Error en getClientesSummary:", error);
     res.status(500).json({ total: 0, totalDeuda: 0 });
   }
 };
 
 const eliminarCliente = async (req, res) => {
+  console.log("--- INICIO ELIMINAR CLIENTE ---");
   try {
+    const cliente = await Cliente.findById(req.params.id);
+    const nombre = cliente ? cliente.nombre_cliente : "ID " + req.params.id;
     await Cliente.delete(req.params.id);
+
+    // REGISTRO DE LOG
+    await registrarLog(
+      req,
+      "ELIMINAR",
+      "CLIENTES",
+      `Se eliminó al cliente: ${nombre}`
+    );
+
     res.json({ message: "Cliente eliminado correctamente" });
   } catch (error) {
-    res.status(500).json({ message: "Error al eliminar" });
+    res.status(500).json({ message: "Error" });
   }
+  console.log("--- FIN ELIMINAR CLIENTE ---");
 };
 
 module.exports = {

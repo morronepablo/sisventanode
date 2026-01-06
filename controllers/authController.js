@@ -3,7 +3,9 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
 const Role = require("../models/Role");
-const db = require("../config/db"); // Importamos db para consultar la tabla de sesiones
+const db = require("../config/db");
+const { registrarLog } = require("../utils/logger");
+
 require("dotenv").config();
 
 const login = async (req, res) => {
@@ -30,12 +32,17 @@ const login = async (req, res) => {
     // Si la tabla no tiene datos, usamos 24 horas por defecto
     const sessionConfig = configRows[0] || { unidad: "horas", cantidad: 24 };
 
-    // Convertir unidad de la DB al formato de jsonwebtoken (m, h, d)
-    let timeSuffix = "h";
+    // --- CORRECCIÓN AQUÍ: Usamos .unidad (español) tal cual está en la DB ---
+    let timeSuffix = "h"; // Por defecto horas
     if (sessionConfig.unidad === "minutos") timeSuffix = "m";
     if (sessionConfig.unidad === "dias") timeSuffix = "d";
 
     const expireTime = `${sessionConfig.cantidad}${timeSuffix}`;
+
+    // Log de seguimiento en la terminal del servidor
+    console.log(
+      `Generando token para ${user.email} con duración: ${expireTime}`
+    );
 
     // 4. Obtener roles y permisos del usuario
     const roles = await Role.findByUserId(user.id);
@@ -46,7 +53,7 @@ const login = async (req, res) => {
       permisos.forEach((p) => allPermisos.add(p));
     }
 
-    // 5. Firmar el TOKEN con el tiempo dinámico de la base de datos
+    // 5. Firmar el TOKEN con el tiempo dinámico
     const token = jwt.sign(
       {
         id: user.id,
@@ -56,10 +63,20 @@ const login = async (req, res) => {
         permisos: Array.from(allPermisos),
       },
       process.env.JWT_SECRET,
-      { expiresIn: expireTime } // <--- Aplicación del cambio
+      { expiresIn: expireTime }
     );
 
-    // 6. Respuesta al cliente
+    // 6. Registrar log de inicio de sesión
+    await registrarLog(
+      req,
+      "LOGIN",
+      "AUTENTICACION",
+      `El usuario ${user.email} inició sesión`,
+      user.id,
+      user.empresa_id
+    );
+
+    // 7. Respuesta al cliente
     res.json({
       token,
       user: {
@@ -80,22 +97,18 @@ const login = async (req, res) => {
 
 const register = async (req, res) => {
   const { name, email, password, empresa_id } = req.body;
-
   try {
     const existingUser = await User.findByEmail(email);
     if (existingUser) {
       return res.status(400).json({ message: "El correo ya está registrado" });
     }
-
     const hashedPassword = await bcrypt.hash(password, 10);
-
     const userId = await User.create({
       name,
       email,
       password: hashedPassword,
-      empresa_id: empresa_id || 1, // Por defecto 1 si no se envía
+      empresa_id: empresa_id || 1,
     });
-
     res.status(201).json({ message: "Usuario creado exitosamente", userId });
   } catch (error) {
     res
@@ -104,4 +117,41 @@ const register = async (req, res) => {
   }
 };
 
-module.exports = { login, register };
+const logoutLog = async (req, res) => {
+  try {
+    const { motivo } = req.body;
+    await registrarLog(
+      req,
+      "LOGOUT",
+      "AUTENTICACION",
+      `Sesión cerrada. Motivo: ${motivo}`
+    );
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Error al registrar log de logout:", error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+const logExpiration = async (req, res) => {
+  try {
+    const { userId, empresaId } = req.body;
+
+    // Usamos el logger con los IDs manuales que nos manda el frontend
+    await registrarLog(
+      req,
+      "LOGOUT",
+      "AUTENTICACION",
+      "Sesión cerrada automáticamente por vencimiento de token",
+      userId,
+      empresaId
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Error al registrar log de expiración:", error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+module.exports = { login, register, logoutLog, logExpiration };

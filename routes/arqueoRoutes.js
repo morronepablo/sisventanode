@@ -12,19 +12,20 @@ const {
   countArqueos,
   getArqueosSummary,
 } = require("../controllers/arqueoController");
-
-// Importamos el middleware que acabamos de crear
 const authMiddleware = require("../middlewares/authMiddleware");
 
-// Rutas protegidas
+// 👈 APLICAR MIDDLEWARE A TODAS LAS RUTAS
+router.use(authMiddleware);
+
+// Ahora todas estas rutas son seguras y alimentan al logger
 router.get("/count", countArqueos);
 router.get("/summary", getArqueosSummary);
-router.get("/", authMiddleware, getAllArqueos);
-router.get("/estado-abierto", authMiddleware, checkArqueoAbierto);
-router.post("/", authMiddleware, createArqueo);
-router.get("/:id", authMiddleware, getArqueoById);
-router.put("/:id", authMiddleware, updateArqueo);
-router.post("/movimientos", authMiddleware, storeMovimiento);
-router.put("/cierre/:id", authMiddleware, closeArqueo);
+router.get("/", getAllArqueos);
+router.get("/estado-abierto", checkArqueoAbierto);
+router.post("/", createArqueo);
+router.get("/:id", getArqueoById);
+router.put("/:id", updateArqueo);
+router.post("/movimientos", storeMovimiento);
+router.put("/cierre/:id", closeArqueo);
 
 module.exports = router;

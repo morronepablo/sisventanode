@@ -13,10 +13,9 @@ const authMiddleware = require("../middlewares/authMiddleware");
 
 const router = express.Router();
 
-router.get("/count", countDevoluciones);
-
 router.use(authMiddleware);
 
+router.get("/count", countDevoluciones);
 router.get("/", getListadoDevoluciones);
 router.get("/tmp", getTmpDevoluciones);
 router.post("/tmp", postTmpDevolucion);

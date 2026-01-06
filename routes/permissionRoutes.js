@@ -9,8 +9,12 @@ const {
   deletePermission,
   countPermissions,
 } = require("../controllers/permissionController");
+const authMiddleware = require("../middlewares/authMiddleware"); // 👈 Importar
 
 const router = express.Router();
+
+// 👈 Aplicar middleware a todas las rutas
+router.use(authMiddleware);
 
 router.get("/count", countPermissions);
 router.get("/", getAllPermissions);

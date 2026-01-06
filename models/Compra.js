@@ -21,22 +21,21 @@ const Compra = {
 
   getDetallesByCompraId: async (compraId) => {
     try {
-      // LOG DE DEPURACIÓN: Revisa tu consola de Node/Backend cuando cargues la página
-      console.log(`Buscando detalles para la Compra ID: ${compraId}`);
-
       const query = `
-        SELECT dc.*, prod.nombre as producto_nombre, prod.codigo as producto_codigo, prod.stock as producto_stock
-        FROM detalle_compras dc
-        LEFT JOIN productos prod ON dc.producto_id = prod.id
-        WHERE dc.compra_id = ?
-      `;
+      SELECT 
+        dc.*, 
+        prod.nombre as producto_nombre, 
+        prod.codigo as producto_codigo, 
+        prod.stock as producto_stock,
+        prod.precio_compra -- 👈 ESTA COLUMNA FALTABA
+      FROM detalle_compras dc
+      LEFT JOIN productos prod ON dc.producto_id = prod.id
+      WHERE dc.compra_id = ?
+    `;
       const [rows] = await db.execute(query, [compraId]);
-
-      console.log(`Resultados encontrados para ID ${compraId}:`, rows.length);
       return rows;
     } catch (error) {
-      // SI HAY UN ERROR AQUÍ, AHORA LO VERÁS EN LA CONSOLA
-      console.error("ERROR CRÍTICO EN SQL DETALLES:", error.message);
+      console.error("ERROR EN SQL DETALLES COMPRA:", error.message);
       return [];
     }
   },

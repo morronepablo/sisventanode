@@ -12,7 +12,12 @@ const {
   countProveedores,
   getProveedoresSummary,
 } = require("../controllers/proveedorController");
+const authMiddleware = require("../middlewares/authMiddleware");
+
 const router = express.Router();
+
+// 👈 APLICAR MIDDLEWARE A TODAS LAS RUTAS DEL ARCHIVO
+router.use(authMiddleware);
 
 router.get("/count", countProveedores);
 router.get("/summary", getProveedoresSummary);

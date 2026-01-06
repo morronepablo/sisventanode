@@ -30,6 +30,7 @@ const getListadoAjustes = async (req, res) => {
 };
 
 const storeAjuste = async (req, res) => {
+  console.log("--- INICIO CREAR AJUSTE ---");
   const connection = await db.getConnection();
   try {
     await connection.beginTransaction();
@@ -37,8 +38,17 @@ const storeAjuste = async (req, res) => {
     const { producto_id, tipo, cantidad, motivo, fecha } = req.body;
     const empresa_id = req.user.empresa_id;
     const usuario_id = req.user.id;
+    const ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress; // Captura la IP
 
-    // 1. Insertar el Ajuste
+    // 1. Obtener nombre del producto para el detalle del log
+    const [prodRows] = await connection.execute(
+      "SELECT nombre FROM productos WHERE id = ?",
+      [producto_id]
+    );
+    const productoNombre =
+      prodRows.length > 0 ? prodRows[0].nombre : "Desconocido";
+
+    // 2. Insertar el Ajuste
     const [resAjuste] = await connection.execute(
       `INSERT INTO ajustes (producto_id, tipo, cantidad, motivo, fecha, usuario_id, empresa_id, created_at, updated_at) 
        VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
@@ -46,14 +56,14 @@ const storeAjuste = async (req, res) => {
     );
     const ajuste_id = resAjuste.insertId;
 
-    // 2. Actualizar Stock del Producto
+    // 3. Actualizar Stock del Producto
     const operador = tipo === "entrada" ? "+" : "-";
     await connection.execute(
       `UPDATE productos SET stock = stock ${operador} ? WHERE id = ?`,
       [cantidad, producto_id]
     );
 
-    // 3. Registrar Movimiento de Stock
+    // 4. Registrar Movimiento de Stock (Kardex)
     await connection.execute(
       `INSERT INTO movimientos (producto_id, empresa_id, tipo, origen, origen_id, cantidad, fecha, usuario_id, created_at, updated_at) 
        VALUES (?, ?, ?, 'ajuste', ?, ?, ?, ?, NOW(), NOW())`,
@@ -68,8 +78,20 @@ const storeAjuste = async (req, res) => {
       ]
     );
 
+    // 5. REGISTRAR LOG DE ACTIVIDAD
+    const detalleLog = `Registró un ajuste de ${tipo.toUpperCase()} de ${cantidad} unidades para el producto: ${productoNombre}. Motivo: ${motivo}`;
+
+    await connection.execute(
+      `INSERT INTO logs (usuario_id, accion, modulo, detalle, ip, empresa_id, created_at) 
+       VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+      [usuario_id, "CREAR", "INVENTARIO", detalleLog, ip, empresa_id]
+    );
+
     await connection.commit();
-    res.json({ success: true, message: "Ajuste registrado correctamente" });
+    res.json({
+      success: true,
+      message: "Ajuste registrado correctamente y auditado",
+    });
   } catch (error) {
     await connection.rollback();
     console.error("Error al registrar ajuste:", error);
@@ -79,6 +101,7 @@ const storeAjuste = async (req, res) => {
   } finally {
     connection.release();
   }
+  console.log("--- FIN CREAR AJUSTE ---");
 };
 
 const getAjusteById = async (req, res) => {

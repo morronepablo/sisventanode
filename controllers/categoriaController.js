@@ -1,6 +1,7 @@
 // controllers/categoriaController.js
 const Categoria = require("../models/Categoria");
 const db = require("../config/db");
+const { registrarLog } = require("../utils/logger"); // 👈 Importamos el logger
 
 const getAllCategorias = async (req, res) => {
   try {
@@ -30,6 +31,7 @@ const getCategoriaById = async (req, res) => {
 };
 
 const createCategoria = async (req, res) => {
+  console.log("--- INICIO CREATE CATEGORIA ---");
   try {
     const { nombre, descripcion } = req.body;
     if (!nombre?.trim())
@@ -45,16 +47,29 @@ const createCategoria = async (req, res) => {
       nombre: nombre.trim(),
       descripcion: descripcion || "",
     });
+
+    console.log(`[CATEGORIAS] Categoría creada con ID: ${id}`);
+
+    // REGISTRO DE LOG
+    await registrarLog(
+      req,
+      "CREAR",
+      "CATEGORIAS",
+      `Se creó la categoría: ${nombre.trim()}`
+    );
+
     res.status(201).json({ message: "Categoría creada exitosamente", id });
   } catch (error) {
-    console.error("Error al crear categoría:", error);
+    console.error("[CATEGORIAS ERROR] Fallo al crear:", error);
     res
       .status(500)
       .json({ message: "Error al crear categoría", error: error.message });
   }
+  console.log("--- FIN CREATE CATEGORIA ---");
 };
 
 const updateCategoria = async (req, res) => {
+  console.log("--- INICIO UPDATE CATEGORIA ---");
   try {
     const { id } = req.params;
     const { nombre, descripcion } = req.body;
@@ -76,34 +91,64 @@ const updateCategoria = async (req, res) => {
       nombre: nombre.trim(),
       descripcion: descripcion || "",
     });
+
     if (!updated)
       return res.status(404).json({ message: "Categoría no encontrada" });
 
+    console.log(`[CATEGORIAS] Categoría ID ${id} actualizada.`);
+
+    // REGISTRO DE LOG
+    await registrarLog(
+      req,
+      "EDITAR",
+      "CATEGORIAS",
+      `Se actualizó la categoría ID ${id}. Nuevo nombre: ${nombre.trim()}`
+    );
+
     res.json({ message: "Categoría actualizada exitosamente" });
   } catch (error) {
-    console.error("Error al actualizar categoría:", error);
+    console.error("[CATEGORIAS ERROR] Fallo al actualizar:", error);
     res
       .status(500)
       .json({ message: "Error al actualizar categoría", error: error.message });
   }
+  console.log("--- FIN UPDATE CATEGORIA ---");
 };
 
 const deleteCategoria = async (req, res) => {
+  console.log("--- INICIO DELETE CATEGORIA ---");
   try {
     const { id } = req.params;
+
+    // Obtenemos los datos antes de borrar para el LOG
+    const categoriaABorrar = await Categoria.findById(id);
+    const nombreCat = categoriaABorrar ? categoriaABorrar.nombre : "ID " + id;
+
     const deleted = await Categoria.deleteById(id);
     if (!deleted)
-      return res
-        .status(404)
-        .json({ message: "Categoría no encontrada o no se puede eliminar" });
+      return res.status(404).json({
+        message:
+          "Categoría no encontrada o no se puede eliminar (tiene productos asociados)",
+      });
+
+    console.log(`[CATEGORIAS] Categoría ${nombreCat} eliminada.`);
+
+    // REGISTRO DE LOG
+    await registrarLog(
+      req,
+      "ELIMINAR",
+      "CATEGORIAS",
+      `Se eliminó la categoría: ${nombreCat}`
+    );
 
     res.json({ message: "Categoría eliminada exitosamente" });
   } catch (error) {
-    console.error("Error al eliminar categoría:", error);
+    console.error("[CATEGORIAS ERROR] Fallo al eliminar:", error);
     res
       .status(500)
       .json({ message: "Error al eliminar categoría", error: error.message });
   }
+  console.log("--- FIN DELETE CATEGORIA ---");
 };
 
 const countCategorias = async (req, res) => {

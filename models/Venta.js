@@ -45,8 +45,9 @@ const Venta = {
   getTmpItems: async (usuario_id) => {
     try {
       const query = `
-        SELECT t.*, p.nombre, p.codigo, p.precio_venta, p.precio_compra, p.aplicar_porcentaje, p.valor_porcentaje,
-               u.nombre as unidad_nombre, c.nombre as combo_nombre, c.codigo as combo_codigo, c.precio_venta as combo_precio
+        SELECT t.*, p.nombre, p.codigo, p.precio_venta, p.precio_compra, 
+              p.stock as producto_stock, -- 👈 ESTO ES LO QUE FALTA
+              u.nombre as unidad_nombre, c.nombre as combo_nombre, c.codigo as combo_codigo, c.precio_venta as combo_precio
         FROM tmp_ventas t
         LEFT JOIN productos p ON t.producto_id = p.id
         LEFT JOIN unidads u ON p.unidad_id = u.id 

@@ -4,6 +4,7 @@ const db = require("../config/db");
 const fs = require("fs");
 const path = require("path");
 const multer = require("multer");
+const { registrarLog } = require("../utils/logger"); // 👈 Importamos el logger
 
 // Definir ruta absoluta a la carpeta de imágenes
 const uploadDir = path.join(process.cwd(), "src/assets/img/");
@@ -55,6 +56,17 @@ const updateEmpresa = async (req, res) => {
 
     const data = { ...req.body, logo: logoFilename };
     await Empresa.updateById(id, data);
+
+    // 👈 REGISTRO DE LOG DE AUDITORÍA
+    await registrarLog(
+      req,
+      "EDITAR",
+      "CONFIGURACION_EMPRESA",
+      `Se actualizaron los datos de la empresa: ${
+        req.body.nombre_empresa || "Datos generales"
+      }`
+    );
+
     res.json({ message: "Éxito" });
   } catch (error) {
     console.error(error);

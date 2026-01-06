@@ -8,8 +8,12 @@ const {
   deleteUnidad,
   countUnidades,
 } = require("../controllers/unidadController");
+const authMiddleware = require("../middlewares/authMiddleware"); // 👈 1. IMPORTAR
 
 const router = express.Router();
+
+// 👈 2. APLICAR EL MIDDLEWARE A TODAS LAS RUTAS
+router.use(authMiddleware);
 
 router.get("/count", countUnidades);
 router.get("/", getAllUnidades);

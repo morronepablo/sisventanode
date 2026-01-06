@@ -1,6 +1,7 @@
 // controllers/devolucionController.js
 const Devolucion = require("../models/Devolucion");
 const db = require("../config/db");
+const { registrarLog } = require("../utils/logger"); // 👈 Importamos el logger
 
 const getListadoDevoluciones = async (req, res) => {
   try {
@@ -13,6 +14,7 @@ const getListadoDevoluciones = async (req, res) => {
     }
     res.json(result);
   } catch (error) {
+    console.error("[DEVOLUCIONES ERROR] Listado:", error.message);
     res
       .status(500)
       .json({ message: "Error al obtener listado", error: error.message });
@@ -23,8 +25,7 @@ const getTmpDevoluciones = async (req, res) => {
   try {
     const { usuario_id } = req.query;
     const [rows] = await db.execute(
-      `
-      SELECT t.*, p.nombre, p.codigo, p.precio_venta, p.precio_compra, p.aplicar_porcentaje, p.valor_porcentaje,
+      `SELECT t.*, p.nombre, p.codigo, p.precio_venta, p.precio_compra, p.aplicar_porcentaje, p.valor_porcentaje,
              u.nombre as unidad_nombre, c.nombre as combo_nombre, c.codigo as combo_codigo, c.precio_venta as combo_precio
       FROM tmp_devoluciones t
       LEFT JOIN productos p ON t.producto_id = p.id
@@ -40,6 +41,7 @@ const getTmpDevoluciones = async (req, res) => {
 };
 
 const postTmpDevolucion = async (req, res) => {
+  console.log("--- INICIO AGREGAR ITEM TEMPORAL DEVOLUCION ---");
   try {
     const { codigo, cantidad, usuario_id } = req.body;
     const empresa_id = req.user.empresa_id;
@@ -65,21 +67,30 @@ const postTmpDevolucion = async (req, res) => {
       }
     }
 
-    if (!item)
+    if (!item) {
+      console.warn(`[DEVOLUCIONES] Ítem no encontrado: ${codigo}`);
       return res.json({ success: false, message: "Ítem no encontrado." });
+    }
 
     const columnaId = tipo === "producto" ? "producto_id" : "combo_id";
     await db.execute(
       `INSERT INTO tmp_devoluciones (cantidad, ${columnaId}, session_id, created_at, updated_at) VALUES (?, ?, ?, NOW(), NOW())`,
       [cantidad, item.id, usuario_id]
     );
+
+    console.log(
+      `[DEVOLUCIONES] Agregado al carrito: ${item.nombre} (Cantidad: ${cantidad})`
+    );
     res.json({ success: true });
   } catch (error) {
+    console.error("[DEVOLUCIONES ERROR] postTmpDevolucion:", error.message);
     res.status(500).json({ message: error.message });
   }
+  console.log("--- FIN AGREGAR ITEM TEMPORAL DEVOLUCION ---");
 };
 
 const deleteTmpDevolucion = async (req, res) => {
+  console.log(`--- ELIMINANDO ITEM TEMPORAL ID: ${req.params.id} ---`);
   try {
     await db.execute("DELETE FROM tmp_devoluciones WHERE id = ?", [
       req.params.id,
@@ -91,6 +102,7 @@ const deleteTmpDevolucion = async (req, res) => {
 };
 
 const storeDevolucion = async (req, res) => {
+  console.log("--- INICIO REGISTRO DE DEVOLUCIÓN ---");
   const connection = await db.getConnection();
   try {
     await connection.beginTransaction();
@@ -105,6 +117,7 @@ const storeDevolucion = async (req, res) => {
       [fecha, precio_total, motivo, cliente_id, empresa_id]
     );
     const devolucion_id = resDev.insertId;
+    console.log(`[DEVOLUCIONES] Cabecera creada. ID: ${devolucion_id}`);
 
     // 2. Traer ítems temporales
     const [tmpItems] = await connection.execute(
@@ -113,7 +126,6 @@ const storeDevolucion = async (req, res) => {
     );
 
     for (const item of tmpItems) {
-      // Insertar Detalle de Devolución
       await connection.execute(
         "INSERT INTO detalle_devoluciones (cantidad, devolucion_id, producto_id, combo_id, created_at, updated_at) VALUES (?, ?, ?, ?, NOW(), NOW())",
         [
@@ -125,13 +137,11 @@ const storeDevolucion = async (req, res) => {
       );
 
       if (item.producto_id) {
-        // Aumentar Stock Producto
         await connection.execute(
           "UPDATE productos SET stock = stock + ? WHERE id = ?",
           [item.cantidad, item.producto_id]
         );
 
-        // REGISTRAR MOVIMIENTO (Incluyendo la nueva columna devolucion_id)
         await connection.execute(
           `INSERT INTO movimientos (producto_id, empresa_id, tipo, origen, origen_id, devolucion_id, cantidad, fecha, usuario_id, created_at, updated_at) 
            VALUES (?, ?, 'entrada', 'devolucion', ?, ?, ?, ?, ?, NOW(), NOW())`,
@@ -146,7 +156,6 @@ const storeDevolucion = async (req, res) => {
           ]
         );
       } else if (item.combo_id) {
-        // Aumentar Stock de componentes del combo
         const [comps] = await connection.execute(
           "SELECT producto_id, cantidad FROM combo_producto WHERE combo_id = ?",
           [item.combo_id]
@@ -157,8 +166,6 @@ const storeDevolucion = async (req, res) => {
             "UPDATE productos SET stock = stock + ? WHERE id = ?",
             [totalEntra, c.producto_id]
           );
-
-          // REGISTRAR MOVIMIENTO (Incluyendo la nueva columna devolucion_id)
           await connection.execute(
             `INSERT INTO movimientos (producto_id, empresa_id, tipo, origen, origen_id, devolucion_id, cantidad, fecha, usuario_id, created_at, updated_at) 
              VALUES (?, ?, 'entrada', 'devolucion', ?, ?, ?, ?, ?, NOW(), NOW())`,
@@ -176,7 +183,7 @@ const storeDevolucion = async (req, res) => {
       }
     }
 
-    // 3. Manejo Financiero (Caja o Cta Cte)
+    // 3. Manejo Financiero
     if (parseInt(cliente_id) === 1) {
       const [arqueo] = await connection.execute(
         "SELECT id FROM arqueos WHERE empresa_id = ? AND (fecha_cierre IS NULL OR fecha_cierre = '') LIMIT 1",
@@ -196,21 +203,35 @@ const storeDevolucion = async (req, res) => {
       );
     }
 
-    // 4. Limpiar temporal
     await connection.execute(
       "DELETE FROM tmp_devoluciones WHERE session_id = ?",
       [usuario_id]
     );
 
     await connection.commit();
+    console.log(
+      `[DEVOLUCIONES] Proceso completado exitosamente para ID: ${devolucion_id}`
+    );
+
+    // --- REGISTRO DE LOG ---
+    await registrarLog(
+      req,
+      "CREAR",
+      "DEVOLUCIONES",
+      `Se registró la devolución N° ${devolucion_id} por un total de $${precio_total}. Motivo: ${
+        motivo || "No especificado"
+      }`
+    );
+
     res.json({ success: true });
   } catch (error) {
     await connection.rollback();
-    console.error("ERROR EN DEVOLUCIÓN:", error);
+    console.error("[DEVOLUCIONES ERROR] Crítico en store:", error.message);
     res.status(500).json({ success: false, message: error.message });
   } finally {
     connection.release();
   }
+  console.log("--- FIN REGISTRO DE DEVOLUCIÓN ---");
 };
 
 const getDevolucionById = async (req, res) => {
@@ -238,6 +259,7 @@ const countDevoluciones = async (req, res) => {
     );
     res.json({ total: rows[0].total });
   } catch (error) {
+    console.error("Error al contar devoluciones:", error);
     res.status(500).json({ total: 0 });
   }
 };

@@ -8,13 +8,15 @@ const {
   deleteUser,
   countUsers,
 } = require("../controllers/userController");
+const authMiddleware = require("../middlewares/authMiddleware"); // 👈 1. IMPORTAR
 
 const router = express.Router();
 
-// 🔸 Rutas estáticas PRIMERO
-router.get("/count", countUsers);
+// 👈 2. APLICAR EL MIDDLEWARE A TODAS LAS RUTAS
+// Esto garantiza que req.user esté lleno en todas las funciones del controlador
+router.use(authMiddleware);
 
-// 🔸 Rutas dinámicas DESPUÉS
+router.get("/count", countUsers);
 router.get("/", getAllUsers);
 router.get("/:id", getUserById);
 router.post("/", createUser);
