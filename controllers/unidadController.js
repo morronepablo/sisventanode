@@ -5,13 +5,21 @@ const { registrarLog } = require("../utils/logger"); // 👈 Importamos el logge
 
 const getAllUnidades = async (req, res) => {
   try {
-    const unidades = await Unidad.getAll();
-    res.json(unidades);
+    const empresa_id = req.user.empresa_id;
+    // Agregamos subconsulta para contar productos asociados
+    const query = `
+      SELECT 
+        u.*, 
+        (SELECT COUNT(*) FROM productos WHERE unidad_id = u.id) as productos_count
+      FROM unidads u 
+      WHERE u.empresa_id = ?
+      ORDER BY u.nombre ASC
+    `;
+    const [rows] = await db.execute(query, [empresa_id]);
+    res.json(rows);
   } catch (error) {
     console.error("Error al obtener unidades:", error);
-    res
-      .status(500)
-      .json({ message: "Error al obtener unidades", error: error.message });
+    res.status(500).json({ message: "Error al obtener unidades" });
   }
 };
 
@@ -115,19 +123,24 @@ const deleteUnidad = async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Buscamos antes de borrar para el LOG
+    // 1. Validación de seguridad en el servidor
+    const [check] = await db.execute(
+      "SELECT COUNT(*) as count FROM productos WHERE unidad_id = ?",
+      [id]
+    );
+
+    if (check[0].count > 0) {
+      return res.status(400).json({
+        message:
+          "No se puede eliminar la unidad porque existen productos que la utilizan.",
+      });
+    }
+
     const unidadABorrar = await Unidad.findById(id);
     const nombreUnidad = unidadABorrar ? unidadABorrar.nombre : "ID " + id;
 
     const deleted = await Unidad.deleteById(id);
-    if (!deleted)
-      return res
-        .status(404)
-        .json({ message: "Unidad no encontrada o tiene productos asociados" });
 
-    console.log(`[UNIDADES] Unidad ${nombreUnidad} eliminada.`);
-
-    // REGISTRO DE LOG
     await registrarLog(
       req,
       "ELIMINAR",
