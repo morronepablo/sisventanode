@@ -6,17 +6,21 @@ const { registrarLog } = require("../utils/logger"); // 👈 1. Importamos el lo
 const getListadoProveedores = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
-    // Pasamos el empresa_id para filtrar correctamente
     const proveedores = await Proveedor.getAll(empresa_id);
 
-    if (!proveedores || proveedores.length === 0) {
-      return res.json([]);
-    }
+    if (!proveedores || proveedores.length === 0) return res.json([]);
 
     const result = [];
     for (const p of proveedores) {
+      // 1. Obtener datos para el detalle expandible
       const facturas = await Proveedor.getFacturasAdeudadas(p.id);
       const pagos = await Proveedor.getPagosRealizados(p.id);
+
+      // 2. CONTAR TODAS LAS COMPRAS (Incluso las pagadas) para decidir si se puede borrar
+      const [countRows] = await db.execute(
+        "SELECT COUNT(*) as total FROM compras WHERE proveedor_id = ?",
+        [p.id]
+      );
 
       const deudaTotal = facturas.reduce(
         (acc, f) => acc + (f.saldo_pendiente || 0),
@@ -28,6 +32,8 @@ const getListadoProveedores = async (req, res) => {
         deuda: deudaTotal,
         facturasAdeudadas: facturas,
         pagosRealizados: pagos,
+        // Propiedad para el frontend: se puede borrar si no tiene ni una sola compra
+        puede_eliminarse: countRows[0].total === 0,
       });
     }
 
@@ -189,6 +195,53 @@ const getMovimientos = async (req, res) => {
   }
 };
 
+const deleteProveedor = async (req, res) => {
+  console.log("--- INICIO DELETE PROVEEDOR ---");
+  try {
+    const { id } = req.params;
+
+    // 1. Validación de seguridad en el servidor (Check de compras)
+    const [check] = await db.execute(
+      "SELECT COUNT(*) as total FROM compras WHERE proveedor_id = ?",
+      [id]
+    );
+
+    if (check[0].total > 0) {
+      return res.status(400).json({
+        message:
+          "No se puede eliminar el proveedor: tiene facturas o compras registradas en el sistema.",
+      });
+    }
+
+    const provToDelete = await Proveedor.findById(id);
+    const nombreProv = provToDelete ? provToDelete.empresa : "ID " + id;
+
+    // 2. Ejecutar borrado (Asegúrate de tener este método en tu modelo Proveedor)
+    const [result] = await db.execute("DELETE FROM proveedors WHERE id = ?", [
+      id,
+    ]);
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ message: "Proveedor no encontrado" });
+    }
+
+    // 3. LOG DE AUDITORÍA
+    await registrarLog(
+      req,
+      "ELIMINAR",
+      "PROVEEDORES",
+      `Se eliminó al proveedor: ${nombreProv}`
+    );
+
+    console.log(`[PROVEEDORES] Proveedor ${nombreProv} eliminado.`);
+    res.json({ success: true, message: "Proveedor eliminado correctamente" });
+  } catch (error) {
+    console.error("[PROVEEDORES ERROR] Fallo al eliminar:", error.message);
+    res.status(500).json({ message: "Error al eliminar proveedor" });
+  }
+  console.log("--- FIN DELETE PROVEEDOR ---");
+};
+
 const countProveedores = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
@@ -233,6 +286,7 @@ module.exports = {
   postRegistrarPago,
   getProveedoresConDeuda,
   getMovimientos,
+  deleteProveedor,
   countProveedores,
   getProveedoresSummary,
 };

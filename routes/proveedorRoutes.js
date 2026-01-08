@@ -5,6 +5,7 @@ const {
   getProveedorById,
   createProveedor,
   updateProveedor,
+  deleteProveedor, // 👈 1. Importamos la nueva función
   getGestionPagos,
   postRegistrarPago,
   getProveedoresConDeuda,
@@ -16,7 +17,7 @@ const authMiddleware = require("../middlewares/authMiddleware");
 
 const router = express.Router();
 
-// 👈 APLICAR MIDDLEWARE A TODAS LAS RUTAS DEL ARCHIVO
+// APLICAR MIDDLEWARE A TODAS LAS RUTAS DEL ARCHIVO
 router.use(authMiddleware);
 
 router.get("/count", countProveedores);
@@ -29,5 +30,8 @@ router.get("/:id/movimientos", getMovimientos);
 router.post("/", createProveedor);
 router.post("/:id/pagos", postRegistrarPago);
 router.put("/:id", updateProveedor);
+
+// 👈 2. AGREGAMOS LA RUTA DELETE
+router.delete("/:id", deleteProveedor);
 
 module.exports = router;
