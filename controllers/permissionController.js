@@ -4,9 +4,16 @@ const { registrarLog } = require("../utils/logger"); // 👈 Importamos el logge
 
 const getAllPermissions = async (req, res) => {
   try {
-    const [rows] = await db.execute(
-      "SELECT id, name FROM permissions ORDER BY name"
-    );
+    // Agregamos una subconsulta para saber cuántos roles usan cada permiso
+    const query = `
+      SELECT 
+        p.id, 
+        p.name, 
+        (SELECT COUNT(*) FROM role_has_permissions WHERE permission_id = p.id) as roles_count
+      FROM permissions p 
+      ORDER BY p.name
+    `;
+    const [rows] = await db.execute(query);
     res.json(rows);
   } catch (error) {
     console.error("Error al obtener permisos:", error);
