@@ -5,13 +5,19 @@ const { registrarLog } = require("../utils/logger"); // 👈 Importamos el logge
 
 const getAllCategorias = async (req, res) => {
   try {
-    const categorias = await Categoria.getAll();
+    // Agregamos una subconsulta para contar los productos de cada categoría
+    const query = `
+      SELECT 
+        c.*, 
+        (SELECT COUNT(*) FROM productos WHERE categoria_id = c.id) as productos_count 
+      FROM categorias c 
+      ORDER BY c.nombre ASC
+    `;
+    const [categorias] = await db.execute(query);
     res.json(categorias);
   } catch (error) {
     console.error("Error al obtener categorías:", error);
-    res
-      .status(500)
-      .json({ message: "Error al obtener categorías", error: error.message });
+    res.status(500).json({ message: "Error al obtener categorías" });
   }
 };
 
@@ -120,20 +126,24 @@ const deleteCategoria = async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Obtenemos los datos antes de borrar para el LOG
+    // 1. Verificación de seguridad en el servidor: ¿Tiene productos?
+    const [check] = await db.execute(
+      "SELECT COUNT(*) as count FROM productos WHERE categoria_id = ?",
+      [id]
+    );
+
+    if (check[0].count > 0) {
+      return res.status(400).json({
+        message:
+          "No se puede eliminar: existen productos vinculados a esta categoría.",
+      });
+    }
+
     const categoriaABorrar = await Categoria.findById(id);
     const nombreCat = categoriaABorrar ? categoriaABorrar.nombre : "ID " + id;
 
     const deleted = await Categoria.deleteById(id);
-    if (!deleted)
-      return res.status(404).json({
-        message:
-          "Categoría no encontrada o no se puede eliminar (tiene productos asociados)",
-      });
 
-    console.log(`[CATEGORIAS] Categoría ${nombreCat} eliminada.`);
-
-    // REGISTRO DE LOG
     await registrarLog(
       req,
       "ELIMINAR",
@@ -144,9 +154,7 @@ const deleteCategoria = async (req, res) => {
     res.json({ message: "Categoría eliminada exitosamente" });
   } catch (error) {
     console.error("[CATEGORIAS ERROR] Fallo al eliminar:", error);
-    res
-      .status(500)
-      .json({ message: "Error al eliminar categoría", error: error.message });
+    res.status(500).json({ message: "Error al eliminar la categoría" });
   }
   console.log("--- FIN DELETE CATEGORIA ---");
 };
