@@ -4,9 +4,57 @@ const bcrypt = require("bcryptjs");
 const db = require("../config/db");
 const { registrarLog } = require("../utils/logger"); // 👈 Importamos el logger
 
+// const getAllUsers = async (req, res) => {
+//   try {
+//     const users = await User.getAll();
+//     const usersWithRoles = [];
+
+//     for (const user of users) {
+//       const roles = await User.getRolesByUserId(user.id);
+//       usersWithRoles.push({
+//         ...user,
+//         roles: roles,
+//       });
+//     }
+
+//     res.json(usersWithRoles);
+//   } catch (error) {
+//     console.error("Error al obtener usuarios:", error);
+//     res
+//       .status(500)
+//       .json({ message: "Error al obtener usuarios", error: error.message });
+//   }
+// };
+
 const getAllUsers = async (req, res) => {
   try {
-    const users = await User.getAll();
+    const empresa_id = req.user.empresa_id; // Obtenemos la empresa del token
+
+    // Consulta avanzada para obtener usuarios y verificar actividad
+    const query = `
+      SELECT 
+        u.*,
+        (
+          SELECT COUNT(*) FROM ventas WHERE usuario_id = u.id
+        ) +
+        (
+          SELECT COUNT(*) FROM compras WHERE usuario_id = u.id
+        ) +
+        (
+          SELECT COUNT(*) FROM arqueos WHERE usuario_id = u.id
+        ) +
+        (
+          SELECT COUNT(*) FROM gastos WHERE usuario_id = u.id
+        ) +
+        (
+          SELECT COUNT(*) FROM ajustes WHERE usuario_id = u.id
+        ) as total_actividad
+      FROM users u
+      WHERE u.empresa_id = ?
+      ORDER BY u.id ASC
+    `;
+
+    const [users] = await db.execute(query, [empresa_id]);
     const usersWithRoles = [];
 
     for (const user of users) {
@@ -14,15 +62,15 @@ const getAllUsers = async (req, res) => {
       usersWithRoles.push({
         ...user,
         roles: roles,
+        // Un usuario puede eliminarse si total_actividad es 0 y no es el Admin ID 1
+        puede_eliminarse: user.total_actividad === 0 && user.id !== 1,
       });
     }
 
     res.json(usersWithRoles);
   } catch (error) {
     console.error("Error al obtener usuarios:", error);
-    res
-      .status(500)
-      .json({ message: "Error al obtener usuarios", error: error.message });
+    res.status(500).json({ message: "Error al obtener usuarios" });
   }
 };
 
@@ -145,27 +193,96 @@ const updateUser = async (req, res) => {
   console.log("--- FIN UPDATE USUARIO ---");
 };
 
+// const deleteUser = async (req, res) => {
+//   console.log("--- INICIO DELETE USUARIO ---");
+//   try {
+//     const { id } = req.params;
+
+//     if (id == 1) {
+//       return res
+//         .status(400)
+//         .json({ message: "No se puede eliminar al usuario Admin" });
+//     }
+
+//     // Obtenemos los datos antes de borrar para el LOG
+//     const userToDelete = await User.findById(id);
+
+//     const deleted = await User.deleteById(id);
+//     if (!deleted) {
+//       return res.status(404).json({ message: "Usuario no encontrado" });
+//     }
+//     console.log(`[USUARIOS] Usuario ID ${id} eliminado con éxito.`);
+
+//     // 3. REGISTRO DE LOG
+//     await registrarLog(
+//       req,
+//       "ELIMINAR",
+//       "USUARIOS",
+//       `Se eliminó al usuario: ${userToDelete ? userToDelete.email : "ID " + id}`
+//     );
+
+//     res.json({ message: "Usuario eliminado exitosamente" });
+//   } catch (error) {
+//     console.error("[USUARIOS ERROR] Fallo al eliminar usuario:", error);
+//     res
+//       .status(500)
+//       .json({ message: "Error al eliminar usuario", error: error.message });
+//   }
+//   console.log("--- FIN DELETE USUARIO ---");
+// };
+
 const deleteUser = async (req, res) => {
   console.log("--- INICIO DELETE USUARIO ---");
   try {
     const { id } = req.params;
+    const currentUserId = req.user.id; // ID del usuario logueado (desde el token)
 
+    // 1. Impedir borrar al Admin principal
     if (id == 1) {
       return res
         .status(400)
-        .json({ message: "No se puede eliminar al usuario Admin" });
+        .json({
+          message: "No se puede eliminar al usuario Administrador maestro.",
+        });
     }
 
-    // Obtenemos los datos antes de borrar para el LOG
-    const userToDelete = await User.findById(id);
+    // 2. Impedir que un usuario se borre a sí mismo
+    if (id == currentUserId) {
+      return res
+        .status(400)
+        .json({
+          message:
+            "No puedes eliminar tu propia cuenta mientras estás logueado.",
+        });
+    }
 
+    // 3. Verificar actividad antes de borrar (Validación de seguridad en el servidor)
+    const [check] = await db.execute(
+      `
+       SELECT 
+        (SELECT COUNT(*) FROM ventas WHERE usuario_id = ?) +
+        (SELECT COUNT(*) FROM compras WHERE usuario_id = ?) +
+        (SELECT COUNT(*) FROM arqueos WHERE usuario_id = ?) as actividad
+    `,
+      [id, id, id]
+    );
+
+    if (check[0].actividad > 0) {
+      return res
+        .status(400)
+        .json({
+          message:
+            "No se puede eliminar el usuario porque tiene historial de movimientos registrado.",
+        });
+    }
+
+    const userToDelete = await User.findById(id);
     const deleted = await User.deleteById(id);
+
     if (!deleted) {
       return res.status(404).json({ message: "Usuario no encontrado" });
     }
-    console.log(`[USUARIOS] Usuario ID ${id} eliminado con éxito.`);
 
-    // 3. REGISTRO DE LOG
     await registrarLog(
       req,
       "ELIMINAR",
@@ -176,9 +293,7 @@ const deleteUser = async (req, res) => {
     res.json({ message: "Usuario eliminado exitosamente" });
   } catch (error) {
     console.error("[USUARIOS ERROR] Fallo al eliminar usuario:", error);
-    res
-      .status(500)
-      .json({ message: "Error al eliminar usuario", error: error.message });
+    res.status(500).json({ message: "Error al eliminar usuario" });
   }
   console.log("--- FIN DELETE USUARIO ---");
 };
