@@ -32,88 +32,6 @@ const getTmpVentas = async (req, res) => {
   }
 };
 
-// const postTmpVenta = async (req, res) => {
-//   try {
-//     const { codigo, cantidad, usuario_id, producto_id, combo_id } = req.body;
-//     const userId = usuario_id || req.user.id;
-//     const empresa_id = req.user.empresa_id;
-
-//     let item = null;
-//     let tipo = null;
-
-//     // 1. Prioridad: Si el frontend ya nos manda el ID (desde el modal), lo usamos directamente
-//     if (producto_id) {
-//       const [rows] = await db.execute(
-//         "SELECT id, nombre, stock FROM productos WHERE id = ? AND empresa_id = ?",
-//         [producto_id, empresa_id]
-//       );
-//       if (rows.length > 0) {
-//         item = rows[0];
-//         tipo = "producto";
-//       }
-//     } else if (combo_id) {
-//       const [rows] = await db.execute(
-//         "SELECT id, nombre FROM combos WHERE id = ? AND empresa_id = ?",
-//         [combo_id, empresa_id]
-//       );
-//       if (rows.length > 0) {
-//         item = rows[0];
-//         tipo = "combo";
-//       }
-//     }
-//     // 2. Si no hay ID, buscamos por CÓDIGO (para el escáner o escritura manual)
-//     else if (codigo) {
-//       const term = codigo.toString().trim();
-//       // Buscamos en productos
-//       const [pRows] = await db.execute(
-//         "SELECT id, nombre, stock FROM productos WHERE (codigo = ? OR nombre LIKE ?) AND empresa_id = ? LIMIT 1",
-//         [term, `%${term}%`, empresa_id]
-//       );
-//       if (pRows.length > 0) {
-//         item = pRows[0];
-//         tipo = "producto";
-//       } else {
-//         // Buscamos en combos
-//         const [cRows] = await db.execute(
-//           "SELECT id, nombre FROM combos WHERE (codigo = ? OR nombre LIKE ?) AND empresa_id = ? LIMIT 1",
-//           [term, `%${term}%`, empresa_id]
-//         );
-//         if (cRows.length > 0) {
-//           item = cRows[0];
-//           tipo = "combo";
-//         }
-//       }
-//     }
-
-//     if (!item) {
-//       return res.json({
-//         success: false,
-//         message: "El producto o combo no fue encontrado.",
-//       });
-//     }
-
-//     // 3. Validación de Stock si es producto
-//     if (tipo === "producto" && item.stock < cantidad) {
-//       return res.json({
-//         success: false,
-//         message: `Stock insuficiente para ${item.nombre}.`,
-//       });
-//     }
-
-//     // 4. Insertar en tmp_ventas (Usamos session_id para el carrito)
-//     const columnaId = tipo === "producto" ? "producto_id" : "combo_id";
-//     await db.execute(
-//       `INSERT INTO tmp_ventas (cantidad, ${columnaId}, session_id, created_at, updated_at) VALUES (?, ?, ?, NOW(), NOW())`,
-//       [cantidad, item.id, userId]
-//     );
-
-//     res.json({ success: true });
-//   } catch (error) {
-//     console.error("Error en postTmpVenta:", error);
-//     res.status(500).json({ message: "Error interno", error: error.message });
-//   }
-// };
-
 const postTmpVenta = async (req, res) => {
   console.log("--- INICIO AGREGAR AL CARRITO VENTA ---");
   try {
@@ -197,19 +115,6 @@ const deleteTmpVenta = async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 };
-
-// const storeVenta = async (req, res) => {
-//   try {
-//     const venta_id = await Venta.store(
-//       req.body,
-//       req.user.id,
-//       req.user.empresa_id
-//     );
-//     res.json({ success: true, venta_id });
-//   } catch (error) {
-//     res.status(500).json({ success: false, message: error.message });
-//   }
-// };
 
 const storeVenta = async (req, res) => {
   console.log("--- INICIO REGISTRO DE VENTA ---");
