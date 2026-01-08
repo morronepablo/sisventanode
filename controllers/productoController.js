@@ -64,12 +64,38 @@ const uploadCsv = multer({
 
 const getAllProductos = async (req, res) => {
   try {
-    const productos = await Producto.getAll();
-    res.json(productos);
+    const empresa_id = req.user.empresa_id;
+    // Consulta con subconsultas para verificar uso en TODAS las tablas relacionadas
+    const query = `
+      SELECT 
+        p.*, 
+        c.nombre as categoria_nombre, 
+        u.nombre as unidad_nombre,
+        (
+          (SELECT COUNT(*) FROM detalle_ventas WHERE producto_id = p.id) +
+          (SELECT COUNT(*) FROM detalle_compras WHERE producto_id = p.id) +
+          (SELECT COUNT(*) FROM ajustes WHERE producto_id = p.id) +
+          (SELECT COUNT(*) FROM detalle_devoluciones WHERE producto_id = p.id) +
+          (SELECT COUNT(*) FROM combo_producto WHERE producto_id = p.id)
+        ) as total_uso
+      FROM productos p
+      LEFT JOIN categorias c ON p.categoria_id = c.id
+      LEFT JOIN unidads u ON p.unidad_id = u.id
+      WHERE p.empresa_id = ?
+      ORDER BY p.nombre ASC
+    `;
+    const [productos] = await db.execute(query, [empresa_id]);
+
+    // Agregamos la propiedad booleana para el frontend
+    const result = productos.map((prod) => ({
+      ...prod,
+      puede_eliminarse: prod.total_uso === 0,
+    }));
+
+    res.json(result);
   } catch (error) {
-    res
-      .status(500)
-      .json({ message: "Error al obtener productos", error: error.message });
+    console.error("Error al obtener productos:", error);
+    res.status(500).json({ message: "Error al obtener productos" });
   }
 };
 
@@ -181,14 +207,32 @@ const deleteProducto = async (req, res) => {
   console.log("--- INICIO DELETE PRODUCTO ---");
   try {
     const { id } = req.params;
+
+    // 1. Verificación de seguridad en el servidor antes de borrar
+    const queryCheck = `
+      SELECT (
+        (SELECT COUNT(*) FROM detalle_ventas WHERE producto_id = ?) +
+        (SELECT COUNT(*) FROM detalle_compras WHERE producto_id = ?) +
+        (SELECT COUNT(*) FROM ajustes WHERE producto_id = ?) +
+        (SELECT COUNT(*) FROM combo_producto WHERE producto_id = ?)
+      ) as uso`;
+
+    const [check] = await db.execute(queryCheck, [id, id, id, id]);
+
+    if (check[0].uso > 0) {
+      return res.status(400).json({
+        message:
+          "No se puede eliminar el producto porque tiene historial de movimientos o pertenece a un combo.",
+      });
+    }
+
     const existing = await Producto.findById(id);
     const nombreProd = existing ? existing.nombre : "ID " + id;
 
     const deleted = await Producto.deleteById(id);
     if (!deleted)
-      return res.status(404).json({ message: "No se puede eliminar" });
+      return res.status(404).json({ message: "Producto no encontrado" });
 
-    // REGISTRO DE LOG
     await registrarLog(
       req,
       "ELIMINAR",
@@ -196,8 +240,7 @@ const deleteProducto = async (req, res) => {
       `Se eliminó el producto: ${nombreProd}`
     );
 
-    console.log(`[PRODUCTOS] Producto ${nombreProd} eliminado.`);
-    res.json({ message: "Producto eliminado exitosamente" });
+    res.json({ success: true, message: "Producto eliminado exitosamente" });
   } catch (error) {
     console.error("[PRODUCTOS ERROR] Fallo al eliminar:", error);
     res.status(500).json({ message: "Error al eliminar producto" });
