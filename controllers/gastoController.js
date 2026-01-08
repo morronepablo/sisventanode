@@ -103,45 +103,88 @@ const storeGasto = async (req, res) => {
   console.log("--- FIN REGISTRO DE GASTO ---");
 };
 
-const deleteGasto = async (req, res) => {
-  console.log("--- INICIO ELIMINACIÓN DE GASTO ---");
+const getGastoById = async (req, res) => {
   try {
     const { id } = req.params;
     const empresa_id = req.user.empresa_id;
 
-    // Obtener datos antes de borrar para el log
-    const [gastoRows] = await db.execute(
-      "SELECT monto, descripcion FROM gastos WHERE id = ? AND empresa_id = ?",
-      [id, empresa_id]
-    );
+    const query = `
+      SELECT g.*, cg.nombre as categoria_nombre, u.name as usuario_nombre
+      FROM gastos g
+      JOIN categorias_gastos cg ON g.categoria_gasto_id = cg.id
+      JOIN users u ON g.usuario_id = u.id
+      WHERE g.id = ? AND g.empresa_id = ?
+    `;
 
-    if (gastoRows.length === 0) {
-      console.warn(`[GASTOS] Intento de eliminar gasto inexistente ID: ${id}`);
+    const [rows] = await db.execute(query, [id, empresa_id]);
+
+    if (rows.length === 0) {
       return res.status(404).json({ message: "Gasto no encontrado" });
     }
 
-    const { monto, descripcion } = gastoRows[0];
+    res.json(rows[0]);
+  } catch (error) {
+    console.error("Error al obtener detalle del gasto:", error);
+    res.status(500).json({ message: "Error al obtener los detalles" });
+  }
+};
 
-    await db.execute("DELETE FROM gastos WHERE id = ? AND empresa_id = ?", [
-      id,
-      empresa_id,
-    ]);
-    console.log(`[GASTOS] Gasto ID ${id} eliminado correctamente.`);
+const deleteGasto = async (req, res) => {
+  console.log("--- INICIO ELIMINACIÓN DE GASTO (CON CAJA) ---");
+  const connection = await db.getConnection();
+  try {
+    await connection.beginTransaction();
+    const { id } = req.params;
+    const empresa_id = req.user.empresa_id;
 
-    // --- REGISTRO DE LOG ---
+    // 1. Obtener datos del gasto antes de borrar
+    const [rows] = await connection.execute(
+      "SELECT * FROM gastos WHERE id = ? AND empresa_id = ?",
+      [id, empresa_id]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ message: "Gasto no encontrado" });
+    }
+
+    const gasto = rows[0];
+
+    // 2. Si el gasto fue en EFECTIVO, borrar el movimiento de caja relacionado
+    if (gasto.metodo_pago === "efectivo" && gasto.arqueo_id) {
+      await connection.execute(
+        `DELETE FROM movimiento_cajas 
+         WHERE arqueo_id = ? AND monto = ? AND tipo = 'Egreso' AND descripcion LIKE ?`,
+        [gasto.arqueo_id, gasto.monto, `%Gasto: ${gasto.descripcion}%`]
+      );
+      console.log(
+        `[GASTOS] Movimiento de caja eliminado para sincronizar arqueo.`
+      );
+    }
+
+    // 3. Borrar el gasto
+    await connection.execute("DELETE FROM gastos WHERE id = ?", [id]);
+
+    await connection.commit();
+
+    // 4. LOG DE AUDITORÍA
     await registrarLog(
       req,
       "ELIMINAR",
       "GASTOS",
-      `Se eliminó un gasto de $${monto}. Descripción original: ${descripcion}`
+      `Se eliminó gasto de $${gasto.monto}. Motivo: ${gasto.descripcion}. Se sincronizó con caja.`
     );
 
-    res.json({ success: true });
+    res.json({
+      success: true,
+      message: "Gasto y movimiento de caja eliminados.",
+    });
   } catch (error) {
+    await connection.rollback();
     console.error("[GASTOS ERROR] Fallo al eliminar:", error.message);
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ message: "Error al procesar la eliminación" });
+  } finally {
+    connection.release();
   }
-  console.log("--- FIN ELIMINACIÓN DE GASTO ---");
 };
 
 const countGastos = async (req, res) => {
@@ -158,6 +201,7 @@ module.exports = {
   getCategoriasGastos,
   getListadoGastos,
   storeGasto,
+  getGastoById,
   deleteGasto,
   countGastos,
 };

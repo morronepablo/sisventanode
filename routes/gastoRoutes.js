@@ -5,6 +5,7 @@ const {
   getCategoriasGastos,
   getListadoGastos,
   storeGasto,
+  getGastoById,
   deleteGasto,
   countGastos,
 } = require("../controllers/gastoController");
@@ -15,6 +16,7 @@ router.use(authMiddleware);
 router.get("/count", countGastos);
 router.get("/", getListadoGastos);
 router.get("/categorias", getCategoriasGastos);
+router.get("/:id", getGastoById);
 router.post("/", storeGasto);
 router.delete("/:id", deleteGasto);
 

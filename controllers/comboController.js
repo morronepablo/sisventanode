@@ -5,10 +5,17 @@ const { registrarLog } = require("../utils/logger"); // 👈 Importamos el logge
 const getCombos = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
-    const [combos] = await db.execute(
-      "SELECT * FROM combos WHERE empresa_id = ? ORDER BY id DESC",
-      [empresa_id]
-    );
+
+    // Consulta con subconsulta para contar cuántas veces se vendió este combo
+    const query = `
+      SELECT c.*, 
+      (SELECT COUNT(*) FROM detalle_ventas WHERE combo_id = c.id) as ventas_count
+      FROM combos c 
+      WHERE c.empresa_id = ? 
+      ORDER BY c.id DESC
+    `;
+
+    const [combos] = await db.execute(query, [empresa_id]);
 
     const combosConDetalle = await Promise.all(
       combos.map(async (combo) => {
@@ -20,7 +27,12 @@ const getCombos = async (req, res) => {
            WHERE cp.combo_id = ?`,
           [combo.id]
         );
-        return { ...combo, productos };
+        return {
+          ...combo,
+          productos,
+          // Propiedad para el frontend
+          puede_eliminarse: combo.ventas_count === 0,
+        };
       })
     );
     res.json(combosConDetalle);
@@ -173,20 +185,32 @@ const deleteCombo = async (req, res) => {
     const { id } = req.params;
     const empresa_id = req.user.empresa_id;
 
-    // Obtener nombre antes de borrar para el log
+    // 1. Verificación de seguridad en el servidor: ¿Se ha vendido?
+    const [check] = await db.execute(
+      "SELECT COUNT(*) as total FROM detalle_ventas WHERE combo_id = ?",
+      [id]
+    );
+
+    if (check[0].total > 0) {
+      return res.status(400).json({
+        message:
+          "No se puede eliminar el combo porque ya tiene ventas registradas en el historial.",
+      });
+    }
+
     const [rows] = await db.execute(
       "SELECT nombre FROM combos WHERE id = ? AND empresa_id = ?",
       [id, empresa_id]
     );
     const comboNombre = rows.length > 0 ? rows[0].nombre : "ID " + id;
 
+    // 2. Eliminar relación y combo (La DB debería tener ON DELETE CASCADE, si no, borrar combo_producto primero)
+    await db.execute("DELETE FROM combo_producto WHERE combo_id = ?", [id]);
     await db.execute("DELETE FROM combos WHERE id = ? AND empresa_id = ?", [
       id,
       empresa_id,
     ]);
-    console.log(`[COMBOS] Combo ${comboNombre} eliminado.`);
 
-    // 👈 REGISTRO DE LOG
     await registrarLog(
       req,
       "ELIMINAR",

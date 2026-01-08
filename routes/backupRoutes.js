@@ -1,17 +1,3 @@
-// // routes/backupRoutes.js
-// const express = require("express");
-// const router = express.Router();
-// const {
-//   createBackup,
-//   resetSystem,
-// } = require("../controllers/backupController");
-// const authMiddleware = require("../middlewares/authMiddleware");
-
-// router.get("/download", authMiddleware, createBackup);
-// router.post("/reset-system", authMiddleware, resetSystem);
-
-// module.exports = router;
-
 // routes/backupRoutes.js
 const express = require("express");
 const router = express.Router();
