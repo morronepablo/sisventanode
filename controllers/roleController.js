@@ -4,13 +4,21 @@ const { registrarLog } = require("../utils/logger"); // 👈 Importamos el logge
 
 const getAllRoles = async (req, res) => {
   try {
-    const [rows] = await db.execute("SELECT id, name FROM roles ORDER BY name");
+    // Usamos una subconsulta para contar cuántos usuarios están usando este rol
+    // Nota: Uso 'user_roles' que es la tabla que vimos en el módulo de usuarios
+    const query = `
+      SELECT 
+        r.id, 
+        r.name,
+        (SELECT COUNT(*) FROM user_roles WHERE role_id = r.id) as user_count
+      FROM roles r 
+      ORDER BY r.name
+    `;
+    const [rows] = await db.execute(query);
     res.json(rows);
   } catch (error) {
     console.error("Error al obtener roles:", error);
-    res
-      .status(500)
-      .json({ message: "Error al obtener roles", error: error.message });
+    res.status(500).json({ message: "Error al obtener roles" });
   }
 };
 
@@ -225,14 +233,23 @@ const deleteRole = async (req, res) => {
   try {
     const { id } = req.params;
 
+    // 1. Protección absoluta del Rol Administrador (ID 1)
+    if (id == 1) {
+      return res.status(400).json({
+        message: "No se puede eliminar el rol Administrador maestro.",
+      });
+    }
+
+    // 2. Verificar si hay usuarios asignados antes de borrar
     const [assigned] = await db.execute(
-      "SELECT COUNT(*) as count FROM model_has_roles WHERE role_id = ?",
+      "SELECT COUNT(*) as count FROM user_roles WHERE role_id = ?",
       [id]
     );
+
     if (assigned[0].count > 0) {
-      return res
-        .status(400)
-        .json({ message: "El rol tiene usuarios asignados" });
+      return res.status(400).json({
+        message: `No se puede eliminar: este rol tiene ${assigned[0].count} usuarios asignados.`,
+      });
     }
 
     const [roleRows] = await db.execute("SELECT name FROM roles WHERE id = ?", [
@@ -241,11 +258,7 @@ const deleteRole = async (req, res) => {
     const roleName = roleRows.length > 0 ? roleRows[0].name : "ID " + id;
 
     const [result] = await db.execute("DELETE FROM roles WHERE id = ?", [id]);
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ message: "Rol no encontrado" });
-    }
 
-    // REGISTRO DE LOG
     await registrarLog(
       req,
       "ELIMINAR",
@@ -253,11 +266,10 @@ const deleteRole = async (req, res) => {
       `Se eliminó el rol: ${roleName}`
     );
 
-    console.log(`[ROLES] Rol ${roleName} eliminado.`);
     res.json({ message: "Rol eliminado exitosamente" });
   } catch (error) {
     console.error("[ROLES ERROR] Fallo al eliminar rol:", error);
-    res.status(500).json({ message: "Error al eliminar rol" });
+    res.status(500).json({ message: "Error al eliminar el rol" });
   }
   console.log("--- FIN DELETE ROL ---");
 };
