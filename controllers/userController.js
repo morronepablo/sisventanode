@@ -4,28 +4,6 @@ const bcrypt = require("bcryptjs");
 const db = require("../config/db");
 const { registrarLog } = require("../utils/logger"); // 👈 Importamos el logger
 
-// const getAllUsers = async (req, res) => {
-//   try {
-//     const users = await User.getAll();
-//     const usersWithRoles = [];
-
-//     for (const user of users) {
-//       const roles = await User.getRolesByUserId(user.id);
-//       usersWithRoles.push({
-//         ...user,
-//         roles: roles,
-//       });
-//     }
-
-//     res.json(usersWithRoles);
-//   } catch (error) {
-//     console.error("Error al obtener usuarios:", error);
-//     res
-//       .status(500)
-//       .json({ message: "Error al obtener usuarios", error: error.message });
-//   }
-// };
-
 const getAllUsers = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id; // Obtenemos la empresa del token
@@ -239,21 +217,16 @@ const deleteUser = async (req, res) => {
 
     // 1. Impedir borrar al Admin principal
     if (id == 1) {
-      return res
-        .status(400)
-        .json({
-          message: "No se puede eliminar al usuario Administrador maestro.",
-        });
+      return res.status(400).json({
+        message: "No se puede eliminar al usuario Administrador maestro.",
+      });
     }
 
     // 2. Impedir que un usuario se borre a sí mismo
     if (id == currentUserId) {
-      return res
-        .status(400)
-        .json({
-          message:
-            "No puedes eliminar tu propia cuenta mientras estás logueado.",
-        });
+      return res.status(400).json({
+        message: "No puedes eliminar tu propia cuenta mientras estás logueado.",
+      });
     }
 
     // 3. Verificar actividad antes de borrar (Validación de seguridad en el servidor)
@@ -268,12 +241,10 @@ const deleteUser = async (req, res) => {
     );
 
     if (check[0].actividad > 0) {
-      return res
-        .status(400)
-        .json({
-          message:
-            "No se puede eliminar el usuario porque tiene historial de movimientos registrado.",
-        });
+      return res.status(400).json({
+        message:
+          "No se puede eliminar el usuario porque tiene historial de movimientos registrado.",
+      });
     }
 
     const userToDelete = await User.findById(id);
