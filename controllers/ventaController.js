@@ -1992,15 +1992,35 @@ const getVentasDashboard = async (req, res) => {
     // --- 7. RANKING TOP 10 ---
     const [top] = await db.execute(
       `
-      SELECT nombre, SUM(cant) as veces_vendido FROM (
-        SELECT p.nombre, SUM(dv.cantidad) as cant FROM detalle_ventas dv 
-        JOIN ventas v ON dv.venta_id = v.id JOIN productos p ON dv.producto_id = p.id
-        WHERE v.empresa_id = ? AND dv.producto_id IS NOT NULL GROUP BY p.id, p.nombre
-        UNION ALL
-        SELECT p.nombre, SUM(dv.cantidad * cp.cantidad) as cant FROM detalle_ventas dv
-        JOIN ventas v ON dv.venta_id = v.id JOIN combo_producto cp ON dv.combo_id = cp.combo_id
-        JOIN productos p ON cp.producto_id = p.id WHERE v.empresa_id = ? AND dv.combo_id IS NOT NULL GROUP BY p.id, p.nombre
-      ) t GROUP BY nombre ORDER BY veces_vendido DESC LIMIT 10
+        SELECT nombre, SUM(cant) as veces_vendido FROM (
+          -- 1. PRODUCTOS VENDIDOS INDIVIDUALMENTE (Filtrados por unidad)
+          SELECT p.nombre, SUM(dv.cantidad) as cant 
+          FROM detalle_ventas dv 
+          JOIN ventas v ON dv.venta_id = v.id 
+          JOIN productos p ON dv.producto_id = p.id
+          JOIN unidads u ON p.unidad_id = u.id
+          WHERE v.empresa_id = ? 
+            AND dv.producto_id IS NOT NULL 
+            AND u.nombre = 'Unidad' -- 👈 SOLO CONTAMOS LOS QUE SON POR UNIDAD
+          GROUP BY p.id, p.nombre
+
+          UNION ALL
+
+          -- 2. PRODUCTOS DENTRO DE COMBOS (Filtrados por unidad)
+          SELECT p.nombre, SUM(dv.cantidad * cp.cantidad) as cant 
+          FROM detalle_ventas dv
+          JOIN ventas v ON dv.venta_id = v.id 
+          JOIN combo_producto cp ON dv.combo_id = cp.combo_id
+          JOIN productos p ON cp.producto_id = p.id 
+          JOIN unidads u ON p.unidad_id = u.id
+          WHERE v.empresa_id = ? 
+            AND dv.combo_id IS NOT NULL 
+            AND u.nombre = 'Unidad' -- 👈 SOLO CONTAMOS LOS QUE SON POR UNIDAD
+          GROUP BY p.id, p.nombre
+        ) t 
+        GROUP BY nombre 
+        ORDER BY veces_vendido DESC 
+        LIMIT 10
     `,
       [empresa_id, empresa_id]
     );

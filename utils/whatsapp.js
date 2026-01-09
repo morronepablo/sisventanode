@@ -2,31 +2,6 @@
 const { Client, LocalAuth } = require("whatsapp-web.js");
 const qrcode = require("qrcode");
 
-// const client = new Client({
-//   authStrategy: new LocalAuth(),
-//   // IMPORTANTE: Este bloque ayuda a que WhatsApp no detecte que el navegador es "viejo"
-//   webVersionCache: {
-//     type: "remote",
-//     remotePath:
-//       "https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html",
-//   },
-//   puppeteer: {
-//     headless: true, // Cambia a false si quieres ver la ventana del navegador abrirse para depurar
-//     args: [
-//       "--no-sandbox",
-//       "--disable-setuid-sandbox",
-//       "--disable-dev-shm-usage",
-//       "--disable-accelerated-2d-canvas",
-//       "--no-first-run",
-//       "--no-zygote",
-//       "--single-process",
-//       "--disable-gpu",
-//     ],
-//     // Si tienes Google Chrome instalado, descomenta la línea de abajo para mayor estabilidad:
-//     // executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
-//   },
-// });
-
 const client = new Client({
   authStrategy: new LocalAuth(),
   // Forzamos una versión estable de WhatsApp Web
@@ -89,8 +64,34 @@ const sendWS = async (numero, mensaje) => {
   }
 };
 
+const logoutWS = async () => {
+  try {
+    qrCodeData = ""; // 1. Ponemos el estado en "LOADING" inmediatamente
+
+    if (client) {
+      console.log("Cerrando sesión y destruyendo cliente actual...");
+
+      // Intenta cerrar sesión (esto borra la carpeta .wwebjs_auth)
+      try {
+        await client.logout();
+      } catch (e) {
+        console.log("No había sesión activa para cerrar o falló el logout.");
+      }
+
+      // 2. IMPORTANTE: Reiniciamos el cliente para que genere un nuevo QR
+      console.log("Reiniciando motor de WhatsApp para nuevo login...");
+      await client.initialize();
+
+      return { success: true };
+    }
+  } catch (error) {
+    console.error("Error al reiniciar WhatsApp:", error);
+    return { success: false, error: error.message };
+  }
+};
+
 client
   .initialize()
   .catch((err) => console.error("Error al iniciar WhatsApp:", err));
 
-module.exports = { sendWS, getQR: () => qrCodeData };
+module.exports = { sendWS, getQR: () => qrCodeData, logoutWS };

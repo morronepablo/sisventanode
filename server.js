@@ -7,7 +7,7 @@ const helmet = require("helmet");
 const morgan = require("morgan");
 const path = require("path");
 const db = require("./config/db");
-const { getQR } = require("./utils/whatsapp");
+const { getQR, logoutWS } = require("./utils/whatsapp");
 
 const app = express();
 
@@ -85,6 +85,18 @@ app.get("/api/whatsapp-status", (req, res) => {
   if (qr === "CONNECTED") return res.json({ status: "CONNECTED" });
   if (qr === "") return res.json({ status: "LOADING" });
   res.json({ status: "QR_READY", qr: qr });
+});
+
+app.post("/api/whatsapp-logout", async (req, res) => {
+  const result = await logoutWS();
+  if (result.success) {
+    res.json({
+      status: "DISCONNECTED",
+      message: "Sesión cerrada correctamente",
+    });
+  } else {
+    res.status(500).json({ message: "No se pudo cerrar la sesión" });
+  }
 });
 
 app.get("/", (req, res) => {

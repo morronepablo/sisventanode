@@ -3,6 +3,22 @@ const Cliente = require("../models/Cliente");
 const pdf = require("html-pdf");
 const db = require("../config/db");
 const { registrarLog } = require("../utils/logger"); // 👈 Importamos el logger
+const { calcularDiferencias } = require("../utils/differences");
+const { sendWS } = require("../utils/whatsapp"); // 👈 Importamos WhatsApp
+
+// --- FUNCIÓN AUXILIAR PARA EL TELÉFONO DE LA EMPRESA ---
+const getEmpresaPhone = async (empresa_id) => {
+  const [rows] = await db.execute(
+    "SELECT telefono FROM empresas WHERE id = ?",
+    [empresa_id]
+  );
+  if (rows.length > 0 && rows[0].telefono) {
+    let phone = rows[0].telefono.replace(/\D/g, "");
+    if (!phone.startsWith("54")) phone = "549" + phone;
+    return phone;
+  }
+  return null;
+};
 
 const getListadoClientes = async (req, res) => {
   try {
@@ -124,6 +140,7 @@ const getGestionPagos = async (req, res) => {
 };
 
 const registrarPago = async (req, res) => {
+  console.log("--- INICIO REGISTRO PAGO CLIENTE (CAJA + WS) ---");
   const connection = await db.getConnection();
   try {
     await connection.beginTransaction();
@@ -131,14 +148,14 @@ const registrarPago = async (req, res) => {
     const { fecha, importe, metodo_pago } = req.body;
     const empresa_id = req.user.empresa_id;
 
-    // A. Buscar Caja Abierta
+    // 1. Buscar si hay caja abierta
     const [arqueo] = await connection.execute(
       "SELECT id FROM arqueos WHERE fecha_cierre IS NULL AND empresa_id = ? LIMIT 1",
       [empresa_id]
     );
     const arqueo_id = arqueo.length > 0 ? arqueo[0].id : null;
 
-    // B. Insertar en Cuenta Corriente
+    // 2. Registrar en Cuenta Corriente
     const [resultCtaCte] = await connection.execute(
       `INSERT INTO compras_cta_cte (cliente_id, empresa_id, importe, tipo, fecha, metodo_pago, created_at, updated_at) 
        VALUES (?, ?, ?, 'pago', ?, ?, NOW(), NOW())`,
@@ -146,18 +163,18 @@ const registrarPago = async (req, res) => {
     );
     const cta_cte_id = resultCtaCte.insertId;
 
-    // C. Si hay caja, registrar en tabla 'pagos' y 'movimiento_cajas'
+    // 3. Sincronizar con tabla de Pagos y Caja
     if (arqueo_id) {
-      const [resPagos] = await connection.execute(
+      const [resultPagosTable] = await connection.execute(
         `INSERT INTO pagos (cliente_id, compra_cta_cte_id, monto, metodo_pago, fecha_pago, descripcion, empresa_id, arqueo_id, created_at) 
          VALUES (?, ?, ?, ?, ?, 'Pago de Cuenta Corriente', ?, ?, NOW())`,
         [id, cta_cte_id, importe, metodo_pago, fecha, empresa_id, arqueo_id]
       );
-      const pago_real_id = resPagos.insertId;
+      const pago_real_id = resultPagosTable.insertId;
 
-      // D. Movimiento de Caja solo si es Efectivo
+      // Movimiento de caja solo si es Efectivo
       if (metodo_pago === "efectivo") {
-        const [cli] = await connection.execute(
+        const [cliente] = await connection.execute(
           "SELECT nombre_cliente FROM clientes WHERE id = ?",
           [id]
         );
@@ -166,7 +183,7 @@ const registrarPago = async (req, res) => {
            VALUES ('Ingreso', ?, ?, ?, ?, NOW())`,
           [
             importe,
-            `Pago Cta. Cte. Cliente: ${cli[0].nombre_cliente}`,
+            `Pago Cta. Cte. Cliente: ${cliente[0].nombre_cliente}`,
             arqueo_id,
             pago_real_id,
           ]
@@ -176,16 +193,42 @@ const registrarPago = async (req, res) => {
 
     await connection.commit();
 
+    // 4. NOTIFICACIÓN WHATSAPP (Opción C)
+    const telefonoDestino = await getEmpresaPhone(empresa_id);
+    if (telefonoDestino) {
+      const [cli] = await connection.execute(
+        "SELECT nombre_cliente FROM clientes WHERE id = ?",
+        [id]
+      );
+
+      // Convertimos YYYY-MM-DD a DD/MM/YYYY
+      const fechaFormateada = fecha.split("-").reverse().join("/");
+
+      const msg =
+        `💰 *COBRO REGISTRADO* 💰\n\n` +
+        `*Cliente:* ${cli[0].nombre_cliente}\n` +
+        `*Monto:* $${parseFloat(importe).toLocaleString("es-AR", {
+          minimumFractionDigits: 2,
+        })}\n` +
+        `*Método:* ${metodo_pago.toUpperCase()}\n` +
+        `*Fecha:* ${fechaFormateada}\n\n` + // 👈 Usamos la fecha formateada
+        `_Dinero ingresado al sistema correctamente._`;
+
+      sendWS(telefonoDestino, msg);
+    }
+
+    // 5. LOG DE AUDITORÍA
     await registrarLog(
       req,
       "PAGO",
       "CLIENTES_CTA_CTE",
-      `Cobró $${importe} en ${metodo_pago.toUpperCase()} al cliente ID: ${id}`
+      `Se registró un pago de $${importe} para el cliente ID: ${id}`
     );
 
     res.json({ success: true, pago_id: cta_cte_id });
   } catch (error) {
     await connection.rollback();
+    console.error("[CLIENTES ERROR] Registro de pago:", error.message);
     res.status(500).json({ message: error.message });
   } finally {
     connection.release();
@@ -193,11 +236,13 @@ const registrarPago = async (req, res) => {
 };
 
 const updatePago = async (req, res) => {
+  console.log("--- INICIO UPDATE PAGO CLIENTE (CAJA + AUDIT + WS) ---");
   const connection = await db.getConnection();
   try {
     await connection.beginTransaction();
     const { pagoId } = req.params;
     const { fecha, importe, metodo_pago } = req.body;
+    const empresa_id = req.user.empresa_id;
 
     // A. Datos anteriores para auditoría
     const [old] = await connection.execute(
@@ -206,7 +251,6 @@ const updatePago = async (req, res) => {
     );
     if (old.length === 0)
       return res.status(404).json({ message: "Pago no encontrado" });
-
     const detalleCambios = calcularDiferencias(old[0], req.body, [
       "id",
       "cliente_id",
@@ -222,7 +266,7 @@ const updatePago = async (req, res) => {
       [fecha, importe, metodo_pago, pagoId]
     );
 
-    // C. Sincronizar con tabla de pagos y movimientos de caja
+    // C. Sincronizar con tabla Pagos y Movimiento Cajas
     const [pagoTab] = await connection.execute(
       "SELECT id, arqueo_id, cliente_id FROM pagos WHERE compra_cta_cte_id = ?",
       [pagoId]
@@ -235,14 +279,12 @@ const updatePago = async (req, res) => {
         [importe, metodo_pago, fecha, pago_real_id]
       );
 
-      // Sincronizar Caja
       const [existeEnCaja] = await connection.execute(
         "SELECT id FROM movimiento_cajas WHERE pago_id = ?",
         [pago_real_id]
       );
 
       if (existeEnCaja.length > 0) {
-        // Si el nuevo método ya no es efectivo, borramos el movimiento de caja
         if (metodo_pago !== "efectivo") {
           await connection.execute(
             "DELETE FROM movimiento_cajas WHERE id = ?",
@@ -255,8 +297,7 @@ const updatePago = async (req, res) => {
           );
         }
       } else if (metodo_pago === "efectivo" && pagoTab[0].arqueo_id) {
-        // Si antes no era efectivo y ahora sí, creamos el movimiento
-        const [cli] = await connection.execute(
+        const [cliente] = await connection.execute(
           "SELECT nombre_cliente FROM clientes WHERE id = ?",
           [pagoTab[0].cliente_id]
         );
@@ -264,7 +305,7 @@ const updatePago = async (req, res) => {
           `INSERT INTO movimiento_cajas (tipo, monto, descripcion, arqueo_id, pago_id, created_at) VALUES ('Ingreso', ?, ?, ?, ?, NOW())`,
           [
             importe,
-            `Pago Cta. Cte. Cliente: ${cli[0].nombre_cliente}`,
+            `Pago Cta. Cte. Cliente: ${cliente[0].nombre_cliente}`,
             pagoTab[0].arqueo_id,
             pago_real_id,
           ]
@@ -274,16 +315,42 @@ const updatePago = async (req, res) => {
 
     await connection.commit();
 
+    // D. NOTIFICACIÓN WHATSAPP DE EDICIÓN
+    const telefonoDestino = await getEmpresaPhone(empresa_id);
+    if (telefonoDestino) {
+      const [cli] = await connection.execute(
+        "SELECT nombre_cliente FROM clientes WHERE id = ?",
+        [pagoTab[0].cliente_id]
+      );
+
+      // Convertimos YYYY-MM-DD a DD/MM/YYYY
+      const fechaFormateada = fecha.split("-").reverse().join("/");
+
+      const msg =
+        `✏️ *PAGO MODIFICADO* ✏️\n\n` +
+        `Se editó un cobro del cliente: *${cli[0].nombre_cliente}*\n\n` +
+        `*Nuevos Datos:* \n` +
+        `- Monto: $${parseFloat(importe).toLocaleString("es-AR", {
+          minimumFractionDigits: 2,
+        })}\n` +
+        `- Método: ${metodo_pago.toUpperCase()}\n` +
+        `- Fecha: ${fechaFormateada}\n\n` + // 👈 Agregada fecha al aviso de edición
+        `_Auditado en el historial._`;
+
+      sendWS(telefonoDestino, msg);
+    }
+
     await registrarLog(
       req,
       "EDITAR",
       "CLIENTES_CTA_CTE",
-      `Editó pago ID: ${pagoId}. Cambios: ${detalleCambios}`
+      `Se actualizó el pago ID: ${pagoId}. Cambios: ${detalleCambios}`
     );
 
     res.json({ success: true });
   } catch (error) {
     await connection.rollback();
+    console.error("[CLIENTES ERROR] Update pago:", error.message);
     res.status(500).json({ message: error.message });
   } finally {
     connection.release();
