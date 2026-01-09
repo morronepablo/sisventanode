@@ -250,19 +250,381 @@ const getInformeProductos = async (req, res) => {
 };
 
 const generarInformeProductosPDF = async (req, res) => {
-  /* lógica similar con filtros por empresa */
+  try {
+    const { fecha_inicio, fecha_fin } = req.query;
+    const empresa_id = req.user.empresa_id;
+
+    const fInicio = fecha_inicio.split("-").reverse().join("/");
+    const fFin = fecha_fin.split("-").reverse().join("/");
+
+    // 1. Obtener datos de la empresa para el encabezado
+    const [empresaRows] = await db.execute(
+      "SELECT * FROM empresas WHERE id = ?",
+      [empresa_id]
+    );
+    const empresa = empresaRows[0];
+
+    // 2. Obtener los datos del informe (Misma query que el listado)
+    const query = `
+        SELECT p.codigo, p.nombre, SUM(dc.cantidad) as cantidad, u.nombre as unidad, 
+               p.precio_compra as costo, SUM(dc.cantidad * p.precio_compra) as total
+        FROM detalle_compras dc
+        JOIN compras c ON dc.compra_id = c.id
+        JOIN productos p ON dc.producto_id = p.id
+        LEFT JOIN unidads u ON p.unidad_id = u.id
+        WHERE c.empresa_id = ? AND c.fecha BETWEEN ? AND ?
+        GROUP BY p.id, p.codigo, p.nombre, u.nombre, p.precio_compra
+        ORDER BY total DESC
+    `;
+    const [productos] = await db.execute(query, [
+      empresa_id,
+      fecha_inicio,
+      fecha_fin,
+    ]);
+
+    // 3. Preparar el Logo en Base64
+    let logoBase64 = "";
+    try {
+      const logoPath = path.join(__dirname, "../src/assets/img", empresa.logo);
+      if (fs.existsSync(logoPath)) {
+        const bitmap = fs.readFileSync(logoPath);
+        logoBase64 = `data:image/png;base64,${bitmap.toString("base64")}`;
+      }
+    } catch (e) {
+      console.error("Error logo:", e);
+    }
+
+    // 4. Construir filas de la tabla
+    let filas = "";
+    let totalGral = 0;
+    productos.forEach((p) => {
+      totalGral += parseFloat(p.total);
+      filas += `
+        <tr>
+            <td style="text-align: center;">${p.codigo || "N/A"}</td>
+            <td>${p.nombre}</td>
+            <td style="text-align: center;">${p.cantidad}</td>
+            <td style="text-align: center;">${p.unidad || "Unid."}</td>
+            <td style="text-align: right;">$ ${parseFloat(
+              p.costo
+            ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
+            <td style="text-align: right;">$ ${parseFloat(
+              p.total
+            ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
+        </tr>`;
+    });
+
+    // 5. HTML completo del reporte
+    const htmlContent = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <style>
+            body { font-family: 'Helvetica', sans-serif; color: #333; font-size: 11px; }
+            .header { border-bottom: 2px solid #007bff; padding: 10px; margin-bottom: 20px; }
+            .table { width: 100%; border-collapse: collapse; }
+            .table th { background-color: #343a40; color: #fff; padding: 8px; border: 1px solid #dee2e6; }
+            .table td { padding: 8px; border: 1px solid #dee2e6; }
+            .total-box { text-align: right; margin-top: 20px; font-size: 14px; font-weight: bold; border-top: 2px solid #333; padding-top: 10px; }
+            #pageFooter { position: fixed; bottom: -15px; left: 0; right: 0; text-align: center; font-size: 9px; color: #999; border-top: 1px solid #eee; padding-top: 10px; }
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <table style="width:100%">
+                <tr>
+                    <td style="width:70%">
+                        <h1 style="margin:0">${empresa.nombre_empresa}</h1>
+                        <p style="margin:5px 0">CUIT: ${
+                          empresa.cuit
+                        } | Reporte de Compras por Productos</p>
+                    </td>
+                    <td style="text-align:right">
+                        ${
+                          logoBase64
+                            ? `<img src="${logoBase64}" style="width:70px">`
+                            : ""
+                        }
+                    </td>
+                </tr>
+            </table>
+        </div>
+
+        <h2 style="text-align:center">Informe del ${fInicio} al ${fFin}</h2>
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Código</th>
+                    <th>Producto</th>
+                    <th>Cant.</th>
+                    <th>Unidad</th>
+                    <th>Costo Unit.</th>
+                    <th>Subtotal</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${filas}
+            </tbody>
+        </table>
+
+        <div class="total-box">
+            TOTAL INVERTIDO: $ ${totalGral.toLocaleString("es-AR", {
+              minimumFractionDigits: 2,
+            })}
+        </div>
+
+        <div id="pageFooter">
+            Reporte generado el ${new Date().toLocaleString(
+              "es-AR"
+            )} - Sistema de Ventas
+        </div>
+    </body>
+    </html>`;
+
+    // 6. Generar el PDF
+    const options = {
+      format: "A4",
+      border: { top: "10mm", right: "10mm", bottom: "25mm", left: "10mm" },
+    };
+
+    pdf.create(htmlContent, options).toBuffer((err, buffer) => {
+      if (err) return res.status(500).send("Error al generar PDF");
+      res.setHeader("Content-Type", "application/pdf");
+      res.send(buffer);
+    });
+  } catch (error) {
+    console.error("Error reporte productos PDF:", error);
+    res.status(500).send("Error interno del servidor");
+  }
 };
+
 const getInformeProveedores = async (req, res) => {
-  /* lógica similar con filtros por empresa */
+  try {
+    const { fecha_inicio, fecha_fin } = req.query;
+    const empresa_id = req.user.empresa_id;
+
+    // Ajustamos los nombres: 'proveedor' para la empresa y 'total' para el monto
+    const query = `
+      SELECT 
+        p.empresa as proveedor, 
+        p.marca, 
+        COUNT(c.id) as cant_compras, 
+        SUM(c.precio_total) as total
+      FROM compras c
+      JOIN proveedors p ON c.proveedor_id = p.id
+      WHERE c.empresa_id = ? AND c.fecha BETWEEN ? AND ?
+      GROUP BY p.id, p.empresa, p.marca
+      ORDER BY total DESC`;
+
+    const [rows] = await db.execute(query, [
+      empresa_id,
+      fecha_inicio,
+      fecha_fin,
+    ]);
+    res.json(rows);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Error al obtener informe" });
+  }
 };
+
 const generarInformeProveedoresPDF = async (req, res) => {
-  /* lógica similar con filtros por empresa */
+  try {
+    const { fecha_inicio, fecha_fin } = req.query;
+    const empresa_id = req.user.empresa_id;
+
+    const [empresaRows] = await db.execute(
+      "SELECT * FROM empresas WHERE id = ?",
+      [empresa_id]
+    );
+    const empresa = empresaRows[0];
+
+    const [datos] = await db.execute(
+      `
+      SELECT p.empresa as proveedor, p.marca, COUNT(c.id) as cant_compras, SUM(c.precio_total) as total
+      FROM compras c 
+      JOIN proveedors p ON c.proveedor_id = p.id
+      WHERE c.empresa_id = ? AND c.fecha BETWEEN ? AND ? 
+      GROUP BY p.id, p.empresa, p.marca 
+      ORDER BY total DESC`,
+      [empresa_id, fecha_inicio, fecha_fin]
+    );
+
+    let filas = "";
+    let totalGral = 0;
+    datos.forEach((d) => {
+      totalGral += parseFloat(d.total);
+      filas += `
+        <tr>
+          <td>${d.proveedor}</td>
+          <td>${d.marca || "N/A"}</td>
+          <td style="text-align:center">${d.cant_compras}</td>
+          <td style="text-align:right">$ ${parseFloat(d.total).toLocaleString(
+            "es-AR",
+            { minimumFractionDigits: 2 }
+          )}</td>
+        </tr>`;
+    });
+
+    const html = `
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <style>
+          body { font-family: Helvetica; font-size: 11px; }
+          .header { border-bottom: 2px solid #28a745; padding: 10px; margin-bottom: 20px; }
+          .table { width: 100%; border-collapse: collapse; }
+          .table th { background-color: #343a40; color: #fff; padding: 8px; }
+          .table td { padding: 8px; border: 1px solid #eee; }
+          .total { text-align: right; font-weight: bold; font-size: 14px; margin-top: 20px; }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <h1>${empresa.nombre_empresa}</h1>
+          <p>Informe de Compras por Proveedor</p>
+          <p>Período: ${fecha_inicio} al ${fecha_fin}</p>
+        </div>
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Proveedor</th>
+              <th>Marca</th>
+              <th>Cant. Facturas</th>
+              <th>Total Invertido</th>
+            </tr>
+          </thead>
+          <tbody>${filas}</tbody>
+        </table>
+        <div class="total">TOTAL GENERAL: $ ${totalGral.toLocaleString(
+          "es-AR",
+          { minimumFractionDigits: 2 }
+        )}</div>
+      </body>
+      </html>`;
+
+    pdf
+      .create(html, { format: "A4", border: "10mm" })
+      .toBuffer((err, buffer) => {
+        if (err) return res.status(500).send("Error");
+        res.setHeader("Content-Type", "application/pdf");
+        res.send(buffer);
+      });
+  } catch (e) {
+    res.status(500).send(e.message);
+  }
 };
+
 const getInformeNoPagadas = async (req, res) => {
-  /* lógica similar con filtros por empresa */
+  try {
+    const empresa_id = req.user.empresa_id;
+    // Alineamos los nombres de las columnas con lo que espera el Frontend
+    const query = `
+      SELECT 
+        c.id,
+        c.fecha, 
+        c.comprobante, 
+        p.empresa as proveedor, 
+        c.precio_total, 
+        c.deuda
+      FROM compras c
+      JOIN proveedors p ON c.proveedor_id = p.id
+      WHERE c.empresa_id = ? AND c.deuda > 0
+      ORDER BY c.fecha DESC`;
+
+    const [rows] = await db.execute(query, [empresa_id]);
+    res.json(rows);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Error al obtener deudas" });
+  }
 };
+
 const generarInformeNoPagadasPDF = async (req, res) => {
-  /* lógica similar con filtros por empresa */
+  try {
+    const empresa_id = req.user.empresa_id;
+    const [empresaRows] = await db.execute(
+      "SELECT * FROM empresas WHERE id = ?",
+      [empresa_id]
+    );
+    const empresa = empresaRows[0];
+
+    const [datos] = await db.execute(
+      `
+      SELECT c.fecha, c.comprobante, p.empresa as proveedor, c.precio_total, c.deuda
+      FROM compras c 
+      JOIN proveedors p ON c.proveedor_id = p.id
+      WHERE c.empresa_id = ? AND c.deuda > 0 
+      ORDER BY c.fecha DESC`,
+      [empresa_id]
+    );
+
+    let filas = "";
+    let totalDeudaGral = 0;
+
+    datos.forEach((d) => {
+      totalDeudaGral += parseFloat(d.deuda);
+      filas += `
+        <tr>
+          <td>${new Date(d.fecha).toLocaleDateString("es-AR")}</td>
+          <td>${d.comprobante}</td>
+          <td>${d.proveedor}</td>
+          <td style="text-align:right">$ ${parseFloat(
+            d.precio_total
+          ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
+          <td style="text-align:right; color:red; font-weight:bold">$ ${parseFloat(
+            d.deuda
+          ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
+        </tr>`;
+    });
+
+    const html = `
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <style>
+          body { font-family: Helvetica; font-size: 11px; }
+          .header { border-bottom: 2px solid #dc3545; padding: 10px; margin-bottom: 20px; }
+          .table { width: 100%; border-collapse: collapse; }
+          .table th { background-color: #343a40; color: #fff; padding: 8px; }
+          .table td { padding: 8px; border: 1px solid #eee; }
+          .total { text-align: right; font-weight: bold; font-size: 14px; margin-top: 20px; color: #dc3545; }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <h1>${empresa.nombre_empresa}</h1>
+          <p>Reporte de Cuentas por Pagar (Deudas con Proveedores)</p>
+        </div>
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Fecha</th>
+              <th>Comprobante</th>
+              <th>Proveedor</th>
+              <th>Monto Factura</th>
+              <th>Saldo Pendiente</th>
+            </tr>
+          </thead>
+          <tbody>${filas}</tbody>
+        </table>
+        <div class="total">DEUDA TOTAL PENDIENTE: $ ${totalDeudaGral.toLocaleString(
+          "es-AR",
+          { minimumFractionDigits: 2 }
+        )}</div>
+      </body>
+      </html>`;
+
+    pdf
+      .create(html, { format: "A4", border: "10mm" })
+      .toBuffer((err, buffer) => {
+        res.setHeader("Content-Type", "application/pdf");
+        res.send(buffer);
+      });
+  } catch (e) {
+    res.status(500).send(e.message);
+  }
 };
 
 const updateTmpQuantity = async (req, res) => {

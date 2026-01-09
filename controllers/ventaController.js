@@ -195,17 +195,27 @@ const storeVenta = async (req, res) => {
 
 const generarReporte = async (req, res) => {
   try {
-    // 1. Obtener datos de empresa y ventas
-    const [empresaRows] = await db.execute("SELECT * FROM empresas LIMIT 1");
-    const empresa = empresaRows[0];
+    const empresa_id = req.user?.empresa_id || 1;
 
-    // Obtenemos las ventas (Asegúrate de que Venta.getAll() esté funcionando)
-    const ventas = await Venta.getAll(req.user?.empresa_id || 1);
+    const [empresaRows] = await db.execute(
+      "SELECT * FROM empresas WHERE id = ?",
+      [empresa_id]
+    );
+    const empresa = empresaRows[0];
 
     if (!empresa)
       return res.status(404).send("Configuración de empresa no encontrada");
 
-    // 2. Preparar el Logo en Base64
+    const ventas = await Venta.getAll(empresa_id);
+
+    const [devoluciones] = await db.execute(
+      `SELECT d.*, cl.nombre_cliente 
+       FROM devoluciones d 
+       LEFT JOIN clientes cl ON d.cliente_id = cl.id 
+       WHERE d.empresa_id = ?`,
+      [empresa_id]
+    );
+
     let logoBase64 = "";
     try {
       const logoPath = path.join(__dirname, "../src/assets/img", empresa.logo);
@@ -214,85 +224,96 @@ const generarReporte = async (req, res) => {
         logoBase64 = `data:image/png;base64,${bitmap.toString("base64")}`;
       }
     } catch (e) {
-      console.error("Error al cargar logo:", e);
+      console.error("Error logo:", e);
     }
 
-    // 3. Construir las filas de la tabla
-    let tablaFilas = "";
-    let totalGeneral = 0;
-
+    let tablaVentas = "";
+    let totalVentas = 0;
     ventas.forEach((v, index) => {
-      const fecha = new Date(v.fecha).toLocaleDateString("es-AR");
-      const precioTotal = parseFloat(v.precio_total);
-      totalGeneral += precioTotal;
-
-      tablaFilas += `
-                <tr>
-                    <td style="text-align: center;">${index + 1}</td>
-                    <td style="text-align: center;">${fecha}</td>
-                    <td style="text-align: center;">T-${String(v.id).padStart(
-                      8,
-                      "0"
-                    )}</td>
-                    <td style="text-align: left;">${
-                      v.cliente_nombre || "Consumidor Final"
-                    }</td>
-                    <td style="text-align: right;">$ ${precioTotal.toLocaleString(
-                      "es-AR",
-                      { minimumFractionDigits: 2 }
-                    )}</td>
-                </tr>
-            `;
+      totalVentas += parseFloat(v.precio_total);
+      tablaVentas += `
+        <tr>
+            <td style="text-align: center;">${index + 1}</td>
+            <td style="text-align: center;">${new Date(
+              v.fecha
+            ).toLocaleDateString("es-AR")}</td>
+            <td style="text-align: center;">Venta T-${String(v.id).padStart(
+              8,
+              "0"
+            )}</td>
+            <td>${v.cliente_nombre || "Consumidor Final"}</td>
+            <td style="text-align: right;">$ ${parseFloat(
+              v.precio_total
+            ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
+        </tr>`;
     });
 
-    // 4. HTML del Reporte con ajuste en el Footer
+    let tablaDevoluciones = "";
+    let totalDevoluciones = 0;
+    devoluciones.forEach((d, index) => {
+      totalDevoluciones += parseFloat(d.precio_total);
+      tablaDevoluciones += `
+        <tr style="color: #d33;">
+            <td style="text-align: center;">${index + 1}</td>
+            <td style="text-align: center;">${new Date(
+              d.fecha
+            ).toLocaleDateString("es-AR")}</td>
+            <td style="text-align: center;">Devol. D-${String(d.id).padStart(
+              8,
+              "0"
+            )}</td>
+            <td>${d.nombre_cliente || "Consumidor Final"}</td>
+            <td style="text-align: right;">- $ ${parseFloat(
+              d.precio_total
+            ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
+        </tr>`;
+    });
+
+    const totalNeto = totalVentas - totalDevoluciones;
+
     const htmlContent = `
         <!DOCTYPE html>
         <html>
         <head>
             <meta charset="UTF-8">
             <style>
-                body { font-family: 'Helvetica', Arial, sans-serif; color: #333; margin: 0; }
-                .header { background-color: #f8f9fa; padding: 20px; border-bottom: 2px solid #28a745; }
-                .header table { width: 100%; }
-                .content { padding: 20px; padding-bottom: 60px; } /* Añadido padding abajo para no solapar footer */
-                h1 { color: #333; margin: 0; font-size: 24px; }
-                h2 { color: #666; font-size: 18px; margin-bottom: 10px; }
-                .table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-                .table th { background-color: #343a40; color: #fff; padding: 10px; text-align: center; font-size: 12px; border: 1px solid #dee2e6; }
-                .table td { padding: 10px; font-size: 11px; border: 1px solid #dee2e6; }
-                .total-box { text-align: right; margin-top: 20px; font-size: 14px; font-weight: bold; border-top: 2px solid #333; padding-top: 10px; }
+                body { font-family: 'Helvetica', sans-serif; color: #333; font-size: 11px; margin: 0; padding: 0; }
+                .header { border-bottom: 2px solid #28a745; padding: 10px; margin-bottom: 20px; }
+                .table { width: 100%; border-collapse: collapse; }
+                .table th { background-color: #343a40; color: #fff; padding: 8px; border: 1px solid #dee2e6; }
+                .table td { padding: 8px; border: 1px solid #dee2e6; }
+                .summary-box { margin-top: 20px; width: 280px; margin-left: auto; border: 1px solid #ccc; padding: 10px; background-color: #f9f9f9; }
+                .summary-line { display: block; width: 100%; margin-bottom: 5px; font-size: 12px; }
+                .neto { border-top: 2px solid #333; padding-top: 5px; font-weight: bold; color: #007bff; font-size: 14px; margin-top: 5px; }
                 
-                /* ESTILO DEL PIE DE PÁGINA CORREGIDO */
-                .footer { 
-                    position: fixed; 
-                    bottom: 0; 
-                    width: 100%; 
-                    text-align: center; 
-                    font-size: 9px; 
-                    color: #777; 
-                    padding-top: 35px; /* 👈 Aumentado para dar más espacio */
-                    border-top: 1px solid #eee; /* Línea divisoria tenue */
+                /* PIE DE PÁGINA CORREGIDO */
+                #pageFooter {
+                    position: fixed;
+                    bottom: -15px; /* Empujamos el pie de página bien abajo */
+                    left: 0;
+                    right: 0;
+                    text-align: center;
+                    font-size: 9px;
+                    color: #999;
+                    border-top: 1px solid #eee;
+                    padding-top: 10px;
                 }
             </style>
         </head>
         <body>
             <div class="header">
-                <table>
+                <table style="width:100%">
                     <tr>
-                        <td style="width: 30%; font-size: 10px;">
-                            <strong>${empresa.nombre_empresa}</strong><br>
-                            CUIT: ${empresa.cuit}<br>
-                            ${empresa.correo}<br>
-                            ${empresa.telefono}
+                        <td style="width:70%">
+                            <h1 style="margin:0">${empresa.nombre_empresa}</h1>
+                            <p style="margin:5px 0">CUIT: ${empresa.cuit} | ${
+      empresa.correo
+    }</p>
                         </td>
-                        <td style="text-align: center; width: 40%;">
-                            <h1>REPORTE DE VENTAS</h1>
-                        </td>
-                        <td style="text-align: right; width: 30%;">
+                        <td style="text-align:right">
                             ${
                               logoBase64
-                                ? `<img src="${logoBase64}" style="width: 80px;">`
+                                ? `<img src="${logoBase64}" style="width:70px">`
                                 : ""
                             }
                         </td>
@@ -300,57 +321,68 @@ const generarReporte = async (req, res) => {
                 </table>
             </div>
 
-            <div class="content">
-                <h2>Listado General de Ventas</h2>
-                <hr style="border: 0; border-top: 1px solid #eee;">
-                <table class="table">
-                    <thead>
-                        <tr>
-                            <th width="40">Nro</th>
-                            <th width="100">Fecha</th>
-                            <th width="120">Comprobante</th>
-                            <th>Cliente</th>
-                            <th width="120">Monto Total</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${tablaFilas}
-                    </tbody>
-                </table>
-                
-                <div class="total-box">
-                    TOTAL GENERAL VENDIDO: $ ${totalGeneral.toLocaleString(
-                      "es-AR",
-                      { minimumFractionDigits: 2 }
-                    )}
-                </div>
+            <h2 style="font-size: 14px;">Listado de Movimientos (Ventas y Devoluciones)</h2>
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Fecha</th>
+                        <th>Comprobante</th>
+                        <th>Cliente</th>
+                        <th>Importe</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${tablaVentas}
+                    ${tablaDevoluciones}
+                </tbody>
+            </table>
+
+            <div class="summary-box">
+                <div class="summary-line">Total Ventas (Bruto): <span style="float:right">$ ${totalVentas.toLocaleString(
+                  "es-AR",
+                  { minimumFractionDigits: 2 }
+                )}</span></div>
+                <div style="clear:both"></div>
+                <div class="summary-line" style="color:red">Total Devoluciones: <span style="float:right">- $ ${totalDevoluciones.toLocaleString(
+                  "es-AR",
+                  { minimumFractionDigits: 2 }
+                )}</span></div>
+                <div style="clear:both"></div>
+                <div class="summary-line neto">TOTAL NETO: <span style="float:right">$ ${totalNeto.toLocaleString(
+                  "es-AR",
+                  { minimumFractionDigits: 2 }
+                )}</span></div>
+                <div style="clear:both"></div>
             </div>
 
-            <div class="footer">
+            <div id="pageFooter">
                 Reporte generado el ${new Date().toLocaleString(
                   "es-AR"
                 )} - Sistema de Ventas
             </div>
         </body>
         </html>
-        `;
+    `;
 
+    // CONFIGURACIÓN DE MÁRGENES CORREGIDA
     const options = {
       format: "A4",
-      orientation: "portrait",
-      border: { top: "10mm", right: "10mm", bottom: "15mm", left: "10mm" }, // 👈 Aumentado margen inferior
+      border: {
+        top: "5mm",
+        right: "10mm",
+        bottom: "5mm", // Aumentamos el margen inferior del contenido para que el footer no choque
+        left: "10mm",
+      },
     };
 
     pdf.create(htmlContent, options).toBuffer((err, buffer) => {
-      if (err) {
-        console.error(err);
-        return res.status(500).send("Error al generar el PDF");
-      }
+      if (err) return res.status(500).send("Error");
       res.setHeader("Content-Type", "application/pdf");
       res.send(buffer);
     });
   } catch (error) {
-    console.error("Error en reporte ventas:", error);
+    console.error(error);
     res.status(500).send("Error interno");
   }
 };

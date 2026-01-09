@@ -12,6 +12,7 @@ const {
   getGestionPagos,
   registrarPago,
   updatePago,
+  generarReporte,
   getReciboPagoTicket,
   getComprasCliente,
   getHistorialCliente,
@@ -23,6 +24,7 @@ const authMiddleware = require("../middlewares/authMiddleware");
 router.use(authMiddleware);
 
 // Rutas de conteo y resumen (Dashboard/Navbar)
+router.get("/reporte", generarReporte);
 router.get("/count", countClientes);
 router.get("/summary", getClientesSummary);
 router.get("/con-deuda", getClientesConDeuda);

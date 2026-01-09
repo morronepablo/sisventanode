@@ -357,6 +357,135 @@ const updatePago = async (req, res) => {
   }
 };
 
+const generarReporte = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    // 1. Obtener datos de la empresa
+    const [empresaRows] = await db.execute(
+      "SELECT * FROM empresas WHERE id = ?",
+      [empresa_id]
+    );
+    const empresa = empresaRows[0];
+    if (!empresa) return res.status(404).send("Empresa no encontrada");
+
+    // 2. Obtener listado de clientes con saldos calculados
+    const query = `
+      SELECT 
+        c.nombre_cliente, 
+        c.cuil_codigo, 
+        c.telefono,
+        IFNULL(SUM(CASE WHEN ct.tipo = 'deuda' THEN ct.importe ELSE 0 END), 0) as total_deuda,
+        IFNULL(SUM(CASE WHEN ct.tipo = 'pago' THEN ct.importe ELSE 0 END), 0) as total_pagos
+      FROM clientes c
+      LEFT JOIN compras_cta_cte ct ON c.id = ct.cliente_id
+      WHERE c.empresa_id = ?
+      GROUP BY c.id
+      ORDER BY c.nombre_cliente ASC
+    `;
+    const [clientes] = await db.execute(query, [empresa_id]);
+
+    // 3. Logo en Base64
+    let logoBase64 = "";
+    try {
+      const logoPath = path.join(__dirname, "../src/assets/img", empresa.logo);
+      if (fs.existsSync(logoPath)) {
+        const bitmap = fs.readFileSync(logoPath);
+        logoBase64 = `data:image/png;base64,${bitmap.toString("base64")}`;
+      }
+    } catch (e) {
+      console.error("Error logo:", e);
+    }
+
+    // 4. Construir filas
+    let filas = "";
+    let sumaSaldos = 0;
+
+    clientes.forEach((c, i) => {
+      const saldo = parseFloat(c.total_deuda) - parseFloat(c.total_pagos);
+      sumaSaldos += saldo;
+      filas += `
+        <tr>
+          <td style="text-align:center">${i + 1}</td>
+          <td>${c.nombre_cliente}</td>
+          <td style="text-align:center">${c.cuil_codigo}</td>
+          <td style="text-align:center">${c.telefono || "-"}</td>
+          <td style="text-align:right">$ ${parseFloat(
+            c.total_deuda
+          ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
+          <td style="text-align:right">$ ${parseFloat(
+            c.total_pagos
+          ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
+          <td style="text-align:right; font-weight:bold; color: ${
+            saldo > 0 ? "#d33" : "#28a745"
+          }">
+            $ ${saldo.toLocaleString("es-AR", { minimumFractionDigits: 2 })}
+          </td>
+        </tr>`;
+    });
+
+    const htmlContent = `
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <style>
+          body { font-family: Helvetica; font-size: 10px; color: #333; }
+          .header { border-bottom: 2px solid #007bff; padding: 10px; margin-bottom: 20px; }
+          .table { width: 100%; border-collapse: collapse; }
+          .table th { background-color: #343a40; color: #fff; padding: 6px; }
+          .table td { padding: 6px; border: 1px solid #eee; }
+          .total-box { text-align: right; margin-top: 20px; font-size: 12px; font-weight: bold; }
+          #pageFooter { position: fixed; bottom: -15px; left: 0; right: 0; text-align: center; font-size: 8px; color: #999; border-top: 1px solid #eee; padding-top: 5px; }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <table style="width:100%">
+            <tr>
+              <td><h1>${
+                empresa.nombre_empresa
+              }</h1><p>Reporte de Saldos de Clientes</p></td>
+              <td style="text-align:right">${
+                logoBase64 ? `<img src="${logoBase64}" style="width:60px">` : ""
+              }</td>
+            </tr>
+          </table>
+        </div>
+        <table class="table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Cliente</th>
+              <th>CUIL/DNI</th>
+              <th>Teléfono</th>
+              <th>Deuda Tot.</th>
+              <th>Pagos Tot.</th>
+              <th>Saldo Pend.</th>
+            </tr>
+          </thead>
+          <tbody>${filas}</tbody>
+        </table>
+        <div class="total-box">SALDO TOTAL A COBRAR: $ ${sumaSaldos.toLocaleString(
+          "es-AR",
+          { minimumFractionDigits: 2 }
+        )}</div>
+        <div id="pageFooter">Generado el ${new Date().toLocaleString()} - Sistema de Ventas</div>
+      </body>
+      </html>`;
+
+    pdf
+      .create(htmlContent, { format: "A4", border: "10mm" })
+      .toBuffer((err, buffer) => {
+        if (err) return res.status(500).send("Error");
+        res.setHeader("Content-Type", "application/pdf");
+        res.send(buffer);
+      });
+  } catch (e) {
+    console.error(e);
+    res.status(500).send("Error interno");
+  }
+};
+
 const getComprasCliente = async (req, res) => {
   try {
     const { id } = req.params;
@@ -673,6 +802,7 @@ module.exports = {
   getGestionPagos,
   registrarPago,
   updatePago,
+  generarReporte,
   getComprasCliente,
   getHistorialCliente,
   updateCliente,
