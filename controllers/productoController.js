@@ -8,6 +8,7 @@ const csv = require("csv-parser");
 const bwipjs = require("bwip-js");
 const { registrarLog } = require("../utils/logger"); // 👈 Importamos el logger
 const { calcularDiferencias } = require("../utils/differences"); // 👈 Importar la utilidad
+const { sendWS } = require("../utils/whatsapp"); // 👈 1. IMPORTAR WHATSAPP
 
 // Usa fuentes nativas de PDF (Helvetica)
 const pdfMake = require("pdfmake");
@@ -62,6 +63,26 @@ const uploadCsv = multer({
     }
   },
 });
+
+const getEmpresaPhone = async (empresa_id) => {
+  const [rows] = await db.execute(
+    "SELECT telefono FROM empresas WHERE id = ?",
+    [empresa_id]
+  );
+  if (rows.length > 0 && rows[0].telefono) {
+    // Limpiamos el número: solo dejamos dígitos
+    let phone = rows[0].telefono.replace(/\D/g, "");
+
+    // Lógica para Argentina:
+    // Si el número empieza con 11 o similar (sin el 54), se lo agregamos.
+    // Si no empieza con 54, asumimos que falta el código de país.
+    if (!phone.startsWith("54")) {
+      phone = "549" + phone;
+    }
+    return phone;
+  }
+  return null;
+};
 
 const getAllProductos = async (req, res) => {
   try {
@@ -135,6 +156,8 @@ const createProducto = async (req, res) => {
       aplicar_porcentaje,
       valor_porcentaje,
       precio_venta,
+      stock, // 👈 Asegurarnos de recibir estos
+      stock_minimo, // 👈 campos para la validación
     } = req.body;
 
     if (await Producto.codigoExists(codigo)) {
@@ -154,6 +177,15 @@ const createProducto = async (req, res) => {
     });
 
     console.log(`[PRODUCTOS] Producto creado con ID: ${id}`);
+
+    // 👈 WHATSAPP DINÁMICO
+    if (parseFloat(stock) <= parseFloat(stock_minimo)) {
+      const telefonoDestino = await getEmpresaPhone(empresa_id);
+      if (telefonoDestino) {
+        const mensaje = `⚠️ *STOCK CRÍTICO* ⚠️\nSe creó: *${nombre}*\nStock: ${stock} / Mínimo: ${stock_minimo}`;
+        sendWS(telefonoDestino, mensaje);
+      }
+    }
 
     // REGISTRO DE LOG
     await registrarLog(
@@ -177,13 +209,15 @@ const updateProducto = async (req, res) => {
     const { id } = req.params;
     const nuevosDatos = req.body;
 
-    // 1. OBTENER DATOS ACTUALES ANTES DE EDITAR
+    // 1. OBTENER EL empresa_id DEL USUARIO LOGUEADO (Esto es lo que faltaba)
+    const empresa_id = req.user.empresa_id;
+
+    // 2. OBTENER DATOS ACTUALES ANTES DE EDITAR
     const productoAnterior = await Producto.findById(id);
     if (!productoAnterior)
       return res.status(404).json({ message: "Producto no encontrado" });
 
-    // 2. CALCULAR QUÉ CAMBIÓ
-    // Ignoramos campos que no queremos ver en el log como la imagen o fechas
+    // 3. CALCULAR QUÉ CAMBIÓ
     const detalleCambios = calcularDiferencias(productoAnterior, nuevosDatos, [
       "updated_at",
       "created_at",
@@ -196,10 +230,28 @@ const updateProducto = async (req, res) => {
       ? `/src/assets/productos/${req.file.filename}`
       : productoAnterior.imagen;
 
-    // 3. ACTUALIZAR EN LA DB
+    // 4. ACTUALIZAR EN LA DB
     await Producto.updateById(id, { ...nuevosDatos, imagen: imagenUrl });
 
-    // 4. REGISTRAR LOG DETALLADO
+    // 5. LÓGICA DE WHATSAPP (Ahora empresa_id ya está definido)
+    if (
+      parseFloat(nuevosDatos.stock) <=
+      parseFloat(nuevosDatos.stock_minimo || productoAnterior.stock_minimo)
+    ) {
+      const telefonoDestino = await getEmpresaPhone(empresa_id); // 👈 Ya no dará error
+      if (telefonoDestino) {
+        const mensaje = `⚠️ *AVISO DE STOCK* ⚠️\n\nEl stock del producto *${
+          productoAnterior.nombre
+        }* ha sido actualizado y se encuentra bajo el mínimo:\n\n*Stock actual:* ${
+          nuevosDatos.stock
+        }\n*Mínimo:* ${
+          nuevosDatos.stock_minimo || productoAnterior.stock_minimo
+        }`;
+        sendWS(telefonoDestino, mensaje);
+      }
+    }
+
+    // 6. REGISTRAR LOG DETALLADO
     await registrarLog(
       req,
       "EDITAR",
@@ -209,7 +261,7 @@ const updateProducto = async (req, res) => {
 
     res.json({ message: "Producto actualizado correctamente" });
   } catch (error) {
-    console.error(error);
+    console.error("Error en updateProducto:", error);
     res.status(500).json({ message: "Error interno" });
   }
 };

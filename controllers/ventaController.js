@@ -5,6 +5,20 @@ const fs = require("fs");
 const path = require("path");
 const db = require("../config/db");
 const { registrarLog } = require("../utils/logger");
+const { sendWS } = require("../utils/whatsapp"); // 👈 1. Importar WhatsApp
+
+const getEmpresaPhone = async (empresa_id) => {
+  const [rows] = await db.execute(
+    "SELECT telefono FROM empresas WHERE id = ?",
+    [empresa_id]
+  );
+  if (rows.length > 0 && rows[0].telefono) {
+    let phone = rows[0].telefono.replace(/\D/g, "");
+    if (!phone.startsWith("54")) phone = "549" + phone;
+    return phone;
+  }
+  return null;
+};
 
 const getListadoVentas = async (req, res) => {
   try {
@@ -119,16 +133,51 @@ const deleteTmpVenta = async (req, res) => {
 const storeVenta = async (req, res) => {
   console.log("--- INICIO REGISTRO DE VENTA ---");
   try {
-    const { precio_total, cliente_id } = req.body;
-    const venta_id = await Venta.store(
-      req.body,
-      req.user.id,
-      req.user.empresa_id
-    );
+    // 1. Extraer 'items' de req.body para poder recorrerlos después
+    const { precio_total, cliente_id, items } = req.body;
+    const empresa_id = req.user.empresa_id;
+
+    // 2. Guardar la venta
+    const venta_id = await Venta.store(req.body, req.user.id, empresa_id);
 
     console.log(`[VENTAS] Venta guardada con éxito. ID: ${venta_id}`);
 
-    // REGISTRO DE LOG
+    // 3. OBTENER EL TELÉFONO (Esto es lo que faltaba definir)
+    const telefonoDestino = await getEmpresaPhone(empresa_id);
+
+    // 4. Lógica de WhatsApp
+    if (telefonoDestino && items && items.length > 0) {
+      for (const item of items) {
+        if (item.producto_id) {
+          const [prod] = await db.execute(
+            "SELECT nombre, stock, stock_minimo FROM productos WHERE id = ?",
+            [item.producto_id]
+          );
+
+          if (prod.length > 0) {
+            const p = prod[0];
+            if (parseFloat(p.stock) <= parseFloat(p.stock_minimo)) {
+              const mensaje = `🚨 *ALERTA DE REPOSICIÓN* 🚨\n\nEl producto *${
+                p.nombre
+              }* acaba de quedar con stock bajo tras la venta *T-${venta_id
+                .toString()
+                .padStart(8, "0")}*.\n\n*Stock actual:* ${
+                p.stock
+              }\n*Mínimo permitido:* ${
+                p.stock_minimo
+              }\n\n_Por favor, genere un pedido al proveedor._`;
+
+              await sendWS(telefonoDestino, mensaje);
+              console.log(
+                `[WHATSAPP] Aviso enviado para el producto: ${p.nombre}`
+              );
+            }
+          }
+        }
+      }
+    }
+
+    // 5. REGISTRO DE LOG
     await registrarLog(
       req,
       "CREAR",

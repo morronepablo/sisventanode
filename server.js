@@ -7,6 +7,7 @@ const helmet = require("helmet");
 const morgan = require("morgan");
 const path = require("path");
 const db = require("./config/db");
+const { getQR } = require("./utils/whatsapp");
 
 const app = express();
 
@@ -78,6 +79,13 @@ app.use("/api/movimientos", movimientoRoutes);
 app.use("/api/gastos", gastoRoutes);
 app.use("/api/logs", logRoutes);
 app.use("/api/backup", backupRoutes);
+
+app.get("/api/whatsapp-status", (req, res) => {
+  const qr = getQR();
+  if (qr === "CONNECTED") return res.json({ status: "CONNECTED" });
+  if (qr === "") return res.json({ status: "LOADING" });
+  res.json({ status: "QR_READY", qr: qr });
+});
 
 app.get("/", (req, res) => {
   res.send("Backend funcionando!");
