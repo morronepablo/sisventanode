@@ -1,6 +1,7 @@
 // controllers/permissionController.js
 const db = require("../config/db");
 const { registrarLog } = require("../utils/logger"); // 👈 Importamos el logger
+const { calcularDiferencias } = require("../utils/differences"); // 👈 1. Importar la utilidad
 
 const getAllPermissions = async (req, res) => {
   try {
@@ -65,7 +66,7 @@ const getPermissionWithDetails = async (req, res) => {
 };
 
 const createPermission = async (req, res) => {
-  console.log("--- INICIO CREATE PERMISO ---");
+  console.log("--- INICIO CREATE PERMISO (AUDITADO) ---");
   try {
     const { name } = req.body;
 
@@ -91,22 +92,20 @@ const createPermission = async (req, res) => {
       req,
       "CREAR",
       "SEGURIDAD_PERMISOS",
-      `Se creó un nuevo permiso: ${name}`
+      `Se creó un nuevo permiso técnico: ${name.trim()}`
     );
 
-    console.log(`[PERMISOS] Permiso ${name} creado con ID: ${result.insertId}`);
     res
       .status(201)
       .json({ message: "Permiso creado exitosamente", id: result.insertId });
   } catch (error) {
-    console.error("[PERMISOS ERROR] Fallo al crear permiso:", error);
+    console.error("[PERMISOS ERROR] Fallo al crear:", error);
     res.status(500).json({ message: "Error al crear permiso" });
   }
-  console.log("--- FIN CREATE PERMISO ---");
 };
 
 const updatePermission = async (req, res) => {
-  console.log("--- INICIO UPDATE PERMISO ---");
+  console.log("--- INICIO UPDATE PERMISO (AUDITADO) ---");
   try {
     const { id } = req.params;
     const { name } = req.body;
@@ -114,6 +113,20 @@ const updatePermission = async (req, res) => {
     if (!name || name.trim().length < 2) {
       return res.status(400).json({ message: "Nombre de permiso inválido" });
     }
+
+    // 2. OBTENER DATOS ANTERIORES PARA COMPARAR
+    const [permAnterior] = await db.execute(
+      "SELECT name FROM permissions WHERE id = ?",
+      [id]
+    );
+    if (permAnterior.length === 0) {
+      return res.status(404).json({ message: "Permiso no encontrado" });
+    }
+
+    // 3. CALCULAR QUÉ CAMBIÓ
+    const detalleCambio = calcularDiferencias(permAnterior[0], req.body, [
+      "id",
+    ]);
 
     const [result] = await db.execute(
       "UPDATE permissions SET name = ? WHERE id = ?",
@@ -123,21 +136,19 @@ const updatePermission = async (req, res) => {
       return res.status(404).json({ message: "Permiso no encontrado" });
     }
 
-    // REGISTRO DE LOG
+    // 4. REGISTRO DE LOG DETALLADO
     await registrarLog(
       req,
       "EDITAR",
       "SEGURIDAD_PERMISOS",
-      `Se actualizó el permiso ID ${id}. Nuevo nombre: ${name}`
+      `Se actualizó el permiso ID ${id}. Cambios: ${detalleCambio}`
     );
 
-    console.log(`[PERMISOS] Permiso ID ${id} actualizado a ${name}`);
     res.json({ message: "Permiso actualizado exitosamente" });
   } catch (error) {
-    console.error("[PERMISOS ERROR] Fallo al actualizar permiso:", error);
+    console.error("[PERMISOS ERROR] Fallo al actualizar:", error);
     res.status(500).json({ message: "Error al actualizar permiso" });
   }
-  console.log("--- FIN UPDATE PERMISO ---");
 };
 
 const deletePermission = async (req, res) => {

@@ -18,7 +18,6 @@ const getListadoClientes = async (req, res) => {
 };
 
 const createCliente = async (req, res) => {
-  console.log("--- INICIO CREATE CLIENTE ---");
   try {
     const { nombre_cliente, cuil_codigo, telefono, email } = req.body;
     const empresa_id = req.user.empresa_id;
@@ -37,22 +36,19 @@ const createCliente = async (req, res) => {
       empresa_id,
     });
 
-    console.log(`[CLIENTES] Cliente creado con ID: ${id}`);
-
-    // REGISTRO DE LOG
     await registrarLog(
       req,
       "CREAR",
       "CLIENTES",
-      `Se registró al cliente: ${nombre_cliente} (CUIL: ${cuil_codigo})`
+      `Nuevo cliente: ${nombre_cliente}. CUIL: ${cuil_codigo}. Contacto: ${
+        telefono || "N/A"
+      }`
     );
 
     res.status(201).json({ message: "Cliente registrado con éxito", id });
   } catch (error) {
-    console.error("[CLIENTES ERROR] Create:", error.message);
-    res.status(500).json({ message: "Error al registrar el cliente" });
+    res.status(500).json({ message: "Error al registrar" });
   }
-  console.log("--- FIN CREATE CLIENTE ---");
 };
 
 const getClienteById = async (req, res) => {
@@ -128,7 +124,6 @@ const getGestionPagos = async (req, res) => {
 };
 
 const registrarPago = async (req, res) => {
-  console.log("--- INICIO REGISTRO PAGO CLIENTE ---");
   const connection = await db.getConnection();
   try {
     await connection.beginTransaction();
@@ -136,47 +131,42 @@ const registrarPago = async (req, res) => {
     const { fecha, importe, metodo_pago } = req.body;
     const empresa_id = req.user.empresa_id;
 
+    // A. Buscar Caja Abierta
     const [arqueo] = await connection.execute(
       "SELECT id FROM arqueos WHERE fecha_cierre IS NULL AND empresa_id = ? LIMIT 1",
       [empresa_id]
     );
     const arqueo_id = arqueo.length > 0 ? arqueo[0].id : null;
 
+    // B. Insertar en Cuenta Corriente
     const [resultCtaCte] = await connection.execute(
       `INSERT INTO compras_cta_cte (cliente_id, empresa_id, importe, tipo, fecha, metodo_pago, created_at, updated_at) 
-             VALUES (?, ?, ?, 'pago', ?, ?, NOW(), NOW())`,
+       VALUES (?, ?, ?, 'pago', ?, ?, NOW(), NOW())`,
       [id, empresa_id, importe, fecha, metodo_pago]
     );
     const cta_cte_id = resultCtaCte.insertId;
 
+    // C. Si hay caja, registrar en tabla 'pagos' y 'movimiento_cajas'
     if (arqueo_id) {
-      const [resultPagosTable] = await connection.execute(
+      const [resPagos] = await connection.execute(
         `INSERT INTO pagos (cliente_id, compra_cta_cte_id, monto, metodo_pago, fecha_pago, descripcion, empresa_id, arqueo_id, created_at) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-        [
-          id,
-          cta_cte_id,
-          importe,
-          metodo_pago,
-          fecha,
-          "Pago de Cuenta Corriente",
-          empresa_id,
-          arqueo_id,
-        ]
+         VALUES (?, ?, ?, ?, ?, 'Pago de Cuenta Corriente', ?, ?, NOW())`,
+        [id, cta_cte_id, importe, metodo_pago, fecha, empresa_id, arqueo_id]
       );
-      const pago_real_id = resultPagosTable.insertId;
+      const pago_real_id = resPagos.insertId;
 
+      // D. Movimiento de Caja solo si es Efectivo
       if (metodo_pago === "efectivo") {
-        const [cliente] = await connection.execute(
+        const [cli] = await connection.execute(
           "SELECT nombre_cliente FROM clientes WHERE id = ?",
           [id]
         );
         await connection.execute(
           `INSERT INTO movimiento_cajas (tipo, monto, descripcion, arqueo_id, pago_id, created_at) 
-                     VALUES ('Ingreso', ?, ?, ?, ?, NOW())`,
+           VALUES ('Ingreso', ?, ?, ?, ?, NOW())`,
           [
             importe,
-            `Pago Cta. Cte. Cliente: ${cliente[0].nombre_cliente}`,
+            `Pago Cta. Cte. Cliente: ${cli[0].nombre_cliente}`,
             arqueo_id,
             pago_real_id,
           ]
@@ -185,40 +175,54 @@ const registrarPago = async (req, res) => {
     }
 
     await connection.commit();
-    console.log(`[CLIENTES] Pago registrado para ID: ${id}`);
 
-    // REGISTRO DE LOG
     await registrarLog(
       req,
       "PAGO",
       "CLIENTES_CTA_CTE",
-      `Se registró un pago de $${importe} para el cliente ID: ${id}`
+      `Cobró $${importe} en ${metodo_pago.toUpperCase()} al cliente ID: ${id}`
     );
 
     res.json({ success: true, pago_id: cta_cte_id });
   } catch (error) {
     await connection.rollback();
-    console.error("[CLIENTES ERROR] Registro de pago:", error.message);
     res.status(500).json({ message: error.message });
   } finally {
     connection.release();
   }
-  console.log("--- FIN REGISTRO PAGO CLIENTE ---");
 };
 
 const updatePago = async (req, res) => {
-  console.log("--- INICIO UPDATE PAGO CLIENTE ---");
   const connection = await db.getConnection();
   try {
     await connection.beginTransaction();
     const { pagoId } = req.params;
     const { fecha, importe, metodo_pago } = req.body;
 
+    // A. Datos anteriores para auditoría
+    const [old] = await connection.execute(
+      "SELECT * FROM compras_cta_cte WHERE id = ?",
+      [pagoId]
+    );
+    if (old.length === 0)
+      return res.status(404).json({ message: "Pago no encontrado" });
+
+    const detalleCambios = calcularDiferencias(old[0], req.body, [
+      "id",
+      "cliente_id",
+      "empresa_id",
+      "tipo",
+      "created_at",
+      "updated_at",
+    ]);
+
+    // B. Update Cuenta Corriente
     await connection.execute(
       "UPDATE compras_cta_cte SET fecha = ?, importe = ?, metodo_pago = ? WHERE id = ?",
       [fecha, importe, metodo_pago, pagoId]
     );
 
+    // C. Sincronizar con tabla de pagos y movimientos de caja
     const [pagoTab] = await connection.execute(
       "SELECT id, arqueo_id, cliente_id FROM pagos WHERE compra_cta_cte_id = ?",
       [pagoId]
@@ -231,18 +235,28 @@ const updatePago = async (req, res) => {
         [importe, metodo_pago, fecha, pago_real_id]
       );
 
+      // Sincronizar Caja
       const [existeEnCaja] = await connection.execute(
         "SELECT id FROM movimiento_cajas WHERE pago_id = ?",
         [pago_real_id]
       );
 
       if (existeEnCaja.length > 0) {
-        await connection.execute(
-          "UPDATE movimiento_cajas SET monto = ? WHERE pago_id = ?",
-          [importe, pago_real_id]
-        );
-      } else if (metodo_pago === "efectivo") {
-        const [cliente] = await connection.execute(
+        // Si el nuevo método ya no es efectivo, borramos el movimiento de caja
+        if (metodo_pago !== "efectivo") {
+          await connection.execute(
+            "DELETE FROM movimiento_cajas WHERE id = ?",
+            [existeEnCaja[0].id]
+          );
+        } else {
+          await connection.execute(
+            "UPDATE movimiento_cajas SET monto = ? WHERE pago_id = ?",
+            [importe, pago_real_id]
+          );
+        }
+      } else if (metodo_pago === "efectivo" && pagoTab[0].arqueo_id) {
+        // Si antes no era efectivo y ahora sí, creamos el movimiento
+        const [cli] = await connection.execute(
           "SELECT nombre_cliente FROM clientes WHERE id = ?",
           [pagoTab[0].cliente_id]
         );
@@ -250,7 +264,7 @@ const updatePago = async (req, res) => {
           `INSERT INTO movimiento_cajas (tipo, monto, descripcion, arqueo_id, pago_id, created_at) VALUES ('Ingreso', ?, ?, ?, ?, NOW())`,
           [
             importe,
-            `Pago Cta. Cte. Cliente: ${cliente[0].nombre_cliente}`,
+            `Pago Cta. Cte. Cliente: ${cli[0].nombre_cliente}`,
             pagoTab[0].arqueo_id,
             pago_real_id,
           ]
@@ -260,23 +274,20 @@ const updatePago = async (req, res) => {
 
     await connection.commit();
 
-    // REGISTRO DE LOG
     await registrarLog(
       req,
       "EDITAR",
       "CLIENTES_CTA_CTE",
-      `Se actualizó el pago ID: ${pagoId}. Nuevo monto: $${importe}`
+      `Editó pago ID: ${pagoId}. Cambios: ${detalleCambios}`
     );
 
     res.json({ success: true });
   } catch (error) {
     await connection.rollback();
-    console.error("[CLIENTES ERROR] Update pago:", error.message);
     res.status(500).json({ message: error.message });
   } finally {
     connection.release();
   }
-  console.log("--- FIN UPDATE PAGO CLIENTE ---");
 };
 
 const getComprasCliente = async (req, res) => {
@@ -343,44 +354,45 @@ const getHistorialCliente = async (req, res) => {
 };
 
 const updateCliente = async (req, res) => {
-  console.log("--- INICIO UPDATE CLIENTE ---");
   try {
     const { id } = req.params;
-    const { nombre_cliente, cuil_codigo, telefono, email } = req.body;
     const empresa_id = req.user.empresa_id;
 
-    if (!nombre_cliente || !cuil_codigo)
-      return res
-        .status(400)
-        .json({ message: "Nombre y CUIL son obligatorios" });
-
-    const query = `UPDATE clientes SET nombre_cliente = ?, cuil_codigo = ?, telefono = ?, email = ?, updated_at = NOW() WHERE id = ? AND empresa_id = ?`;
-    const [result] = await db.execute(query, [
-      nombre_cliente,
-      cuil_codigo,
-      telefono,
-      email,
-      id,
-      empresa_id,
-    ]);
-
-    if (result.affectedRows === 0)
+    const clienteAnterior = await Cliente.findById(id);
+    if (!clienteAnterior)
       return res.status(404).json({ message: "Cliente no encontrado" });
 
-    // REGISTRO DE LOG
+    const detalleCambios = calcularDiferencias(clienteAnterior, req.body, [
+      "id",
+      "empresa_id",
+      "updated_at",
+      "created_at",
+    ]);
+
+    await db.execute(
+      `UPDATE clientes SET nombre_cliente = ?, cuil_codigo = ?, telefono = ?, email = ?, updated_at = NOW() 
+       WHERE id = ? AND empresa_id = ?`,
+      [
+        req.body.nombre_cliente,
+        req.body.cuil_codigo,
+        req.body.telefono,
+        req.body.email,
+        id,
+        empresa_id,
+      ]
+    );
+
     await registrarLog(
       req,
       "EDITAR",
       "CLIENTES",
-      `Se actualizaron los datos del cliente: ${nombre_cliente} (ID: ${id})`
+      `Editó cliente: ${clienteAnterior.nombre_cliente}. Cambios: ${detalleCambios}`
     );
 
-    res.json({ message: "Cliente actualizado con éxito" });
+    res.json({ message: "Cliente actualizado" });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: "Error" });
+    res.status(500).json({ message: "Error al actualizar" });
   }
-  console.log("--- FIN UPDATE CLIENTE ---");
 };
 
 const getReciboPagoTicket = async (req, res) => {

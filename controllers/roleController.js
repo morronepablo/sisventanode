@@ -1,6 +1,7 @@
 // controllers/roleController.js
 const db = require("../config/db");
 const { registrarLog } = require("../utils/logger"); // 👈 Importamos el logger
+const { calcularDiferencias } = require("../utils/differences"); // 👈 1. Importar utilidad
 
 const getAllRoles = async (req, res) => {
   try {
@@ -107,7 +108,7 @@ const getRolePermissions = async (req, res) => {
 };
 
 const assignPermissionsToRole = async (req, res) => {
-  console.log("--- INICIO ASIGNAR PERMISOS A ROL ---");
+  console.log("--- INICIO ASIGNAR PERMISOS A ROL (AUDITADO) ---");
   try {
     const { id } = req.params;
     const { permissionIds } = req.body;
@@ -115,17 +116,25 @@ const assignPermissionsToRole = async (req, res) => {
     const [roleRows] = await db.execute("SELECT name FROM roles WHERE id = ?", [
       id,
     ]);
-    if (roleRows.length === 0) {
+    if (roleRows.length === 0)
       return res.status(404).json({ message: "Rol no encontrado" });
-    }
     const roleName = roleRows[0].name;
 
-    // Eliminar actuales
+    // 2. OBTENER PERMISOS ACTUALES PARA EL LOG ANTES DE BORRARLOS
+    const [permsAnteriores] = await db.execute(
+      `SELECT p.name FROM permissions p 
+       INNER JOIN role_has_permissions rhp ON p.id = rhp.permission_id 
+       WHERE rhp.role_id = ?`,
+      [id]
+    );
+    const nombresPermisosAnteriores =
+      permsAnteriores.map((p) => p.name).join(", ") || "Ninguno";
+
+    // 3. PROCESO DE ACTUALIZACIÓN (Eliminar e Insertar)
     await db.execute("DELETE FROM role_has_permissions WHERE role_id = ?", [
       id,
     ]);
 
-    // Insertar nuevos
     if (permissionIds && permissionIds.length > 0) {
       const placeholders = permissionIds.map(() => "(?, ?)").join(", ");
       const values = permissionIds.flatMap((permId) => [id, permId]);
@@ -135,21 +144,29 @@ const assignPermissionsToRole = async (req, res) => {
       );
     }
 
-    // REGISTRO DE LOG
+    // 4. OBTENER NUEVOS PERMISOS PARA COMPARAR EN EL LOG
+    const [permsNuevos] = await db.execute(
+      `SELECT p.name FROM permissions p 
+       INNER JOIN role_has_permissions rhp ON p.id = rhp.permission_id 
+       WHERE rhp.role_id = ?`,
+      [id]
+    );
+    const nombresPermisosNuevos =
+      permsNuevos.map((p) => p.name).join(", ") || "Ninguno";
+
+    // 5. REGISTRO DE LOG DETALLADO
     await registrarLog(
       req,
       "EDITAR",
       "SEGURIDAD_ROLES",
-      `Se actualizaron los permisos para el rol: ${roleName} (Cant: ${permissionIds.length})`
+      `Se actualizaron permisos del rol: ${roleName}. ANTERIORES: [${nombresPermisosAnteriores}] ➡️ NUEVOS: [${nombresPermisosNuevos}]`
     );
 
-    console.log(`[ROLES] Permisos actualizados para el rol ${roleName}`);
     res.json({ message: "Permisos asignados exitosamente" });
   } catch (error) {
     console.error("[ROLES ERROR] Fallo al asignar permisos:", error);
     res.status(500).json({ message: "Error al asignar permisos" });
   }
-  console.log("--- FIN ASIGNAR PERMISOS A ROL ---");
 };
 
 const createRole = async (req, res) => {
@@ -192,7 +209,7 @@ const createRole = async (req, res) => {
 };
 
 const updateRole = async (req, res) => {
-  console.log("--- INICIO UPDATE ROL ---");
+  console.log("--- INICIO UPDATE ROL (AUDITADO) ---");
   try {
     const { id } = req.params;
     const { name } = req.body;
@@ -203,29 +220,37 @@ const updateRole = async (req, res) => {
       });
     }
 
+    // 2. OBTENER NOMBRE ANTERIOR PARA COMPARAR
+    const [roleAnterior] = await db.execute(
+      "SELECT name FROM roles WHERE id = ?",
+      [id]
+    );
+    if (roleAnterior.length === 0)
+      return res.status(404).json({ message: "Rol no encontrado" });
+
+    // 3. CALCULAR DIFERENCIA
+    const detalleCambio = calcularDiferencias(roleAnterior[0], req.body, [
+      "id",
+    ]);
+
     const [result] = await db.execute(
       "UPDATE roles SET name = ? WHERE id = ?",
       [name, id]
     );
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ message: "Rol no encontrado" });
-    }
 
-    // REGISTRO DE LOG
+    // 4. REGISTRO DE LOG DETALLADO
     await registrarLog(
       req,
       "EDITAR",
       "SEGURIDAD_ROLES",
-      `Se cambió el nombre del rol ID ${id} a: ${name}`
+      `Se cambió el nombre del rol ID ${id}. Cambios: ${detalleCambio}`
     );
 
-    console.log(`[ROLES] Rol ID ${id} actualizado a ${name}`);
     res.json({ message: "Rol actualizado exitosamente" });
   } catch (error) {
     console.error("[ROLES ERROR] Fallo al actualizar rol:", error);
     res.status(500).json({ message: "Error al actualizar rol" });
   }
-  console.log("--- FIN UPDATE ROL ---");
 };
 
 const deleteRole = async (req, res) => {

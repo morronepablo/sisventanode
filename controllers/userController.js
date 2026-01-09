@@ -3,6 +3,7 @@ const User = require("../models/User");
 const bcrypt = require("bcryptjs");
 const db = require("../config/db");
 const { registrarLog } = require("../utils/logger"); // 👈 Importamos el logger
+const { calcularDiferencias } = require("../utils/differences"); // 👈 1. Importar la utilidad
 
 const getAllUsers = async (req, res) => {
   try {
@@ -127,7 +128,7 @@ const createUser = async (req, res) => {
 };
 
 const updateUser = async (req, res) => {
-  console.log("--- INICIO UPDATE USUARIO ---");
+  console.log("--- INICIO UPDATE USUARIO (AUDITADO) ---");
   try {
     const { id } = req.params;
     const { name, email, empresa_id, roles } = req.body;
@@ -137,77 +138,58 @@ const updateUser = async (req, res) => {
       return res.status(400).json({ message: "El email ya está registrado" });
     }
 
-    // 1. Actualizar datos base
+    // 2. OBTENER DATOS ACTUALES ANTES DE EDITAR
+    const userAnterior = await User.findById(id);
+    if (!userAnterior) {
+      return res.status(404).json({ message: "Usuario no encontrado" });
+    }
+
+    // 3. CALCULAR QUÉ CAMBIÓ EN LOS DATOS BASE
+    // Ignoramos password (por seguridad), id y empresa_id si no quieres rastrearlo
+    const detalleCambios = calcularDiferencias(userAnterior, req.body, [
+      "id",
+      "password",
+      "updated_at",
+      "created_at",
+    ]);
+
+    // 4. ACTUALIZAR DATOS BASE
     const updated = await User.updateById(id, { name, email, empresa_id });
     if (!updated) {
       return res.status(404).json({ message: "Usuario no encontrado" });
     }
-    console.log(`[USUARIOS] Datos base actualizados para ID: ${id}`);
 
-    // 2. Actualizar roles (Quitar y Poner)
+    // 5. ACTUALIZAR ROLES Y PREPARAR TEXTO PARA EL LOG
+    let logRoles = "";
     if (roles) {
+      // Obtenemos los nombres de roles actuales para el log antes de borrarlos
+      const rolesActualesObj = await User.getRolesByUserId(id);
+      const nombresRolesAnteriores =
+        rolesActualesObj.map((r) => r.name).join(", ") || "Ninguno";
+
       await User.removeRolesFromUser(id);
       for (const roleId of roles) {
         await User.assignRoleToUser(id, roleId);
       }
-      console.log(`[USUARIOS] Roles sincronizados para ID: ${id}`);
+
+      logRoles = ` | ROLES ANTERIORES: [${nombresRolesAnteriores}] ➡️ Sincronizados nuevos roles.`;
     }
 
-    // 3. REGISTRO DE LOG
+    // 6. REGISTRO DE LOG DETALLADO
     await registrarLog(
       req,
       "EDITAR",
       "USUARIOS",
-      `Se actualizaron los datos y roles del usuario: ${email} (ID: ${id})`
+      `Se actualizaron los datos de: ${userAnterior.email}. Cambios: ${detalleCambios}${logRoles}`
     );
 
     res.json({ message: "Usuario actualizado exitosamente" });
   } catch (error) {
     console.error("[USUARIOS ERROR] Fallo al actualizar usuario:", error);
-    res
-      .status(500)
-      .json({ message: "Error al actualizar usuario", error: error.message });
+    res.status(500).json({ message: "Error al actualizar usuario" });
   }
   console.log("--- FIN UPDATE USUARIO ---");
 };
-
-// const deleteUser = async (req, res) => {
-//   console.log("--- INICIO DELETE USUARIO ---");
-//   try {
-//     const { id } = req.params;
-
-//     if (id == 1) {
-//       return res
-//         .status(400)
-//         .json({ message: "No se puede eliminar al usuario Admin" });
-//     }
-
-//     // Obtenemos los datos antes de borrar para el LOG
-//     const userToDelete = await User.findById(id);
-
-//     const deleted = await User.deleteById(id);
-//     if (!deleted) {
-//       return res.status(404).json({ message: "Usuario no encontrado" });
-//     }
-//     console.log(`[USUARIOS] Usuario ID ${id} eliminado con éxito.`);
-
-//     // 3. REGISTRO DE LOG
-//     await registrarLog(
-//       req,
-//       "ELIMINAR",
-//       "USUARIOS",
-//       `Se eliminó al usuario: ${userToDelete ? userToDelete.email : "ID " + id}`
-//     );
-
-//     res.json({ message: "Usuario eliminado exitosamente" });
-//   } catch (error) {
-//     console.error("[USUARIOS ERROR] Fallo al eliminar usuario:", error);
-//     res
-//       .status(500)
-//       .json({ message: "Error al eliminar usuario", error: error.message });
-//   }
-//   console.log("--- FIN DELETE USUARIO ---");
-// };
 
 const deleteUser = async (req, res) => {
   console.log("--- INICIO DELETE USUARIO ---");

@@ -2,6 +2,7 @@
 const Unidad = require("../models/Unidad");
 const db = require("../config/db");
 const { registrarLog } = require("../utils/logger"); // 👈 Importamos el logger
+const { calcularDiferencias } = require("../utils/differences"); // 👈 1. Importar utilidad
 
 const getAllUnidades = async (req, res) => {
   try {
@@ -37,7 +38,7 @@ const getUnidadById = async (req, res) => {
 };
 
 const createUnidad = async (req, res) => {
-  console.log("--- INICIO CREATE UNIDAD ---");
+  console.log("--- INICIO CREATE UNIDAD (AUDITADO) ---");
   try {
     const { nombre, descripcion } = req.body;
     if (!nombre?.trim())
@@ -52,17 +53,17 @@ const createUnidad = async (req, res) => {
     const id = await Unidad.create({
       nombre: nombre.trim(),
       descripcion: descripcion || "",
-      empresa_id: req.user.empresa_id, // 👈 Usamos el de req.user
+      empresa_id: req.user.empresa_id,
     });
 
-    console.log(`[UNIDADES] Unidad creada con ID: ${id}`);
-
-    // REGISTRO DE LOG
+    // REGISTRO DE LOG DETALLADO
     await registrarLog(
       req,
       "CREAR",
       "UNIDADES",
-      `Se creó la unidad de medida: ${nombre.trim()}`
+      `Se creó la unidad de medida: "${nombre.trim()}". Descripción: "${
+        descripcion || "Sin descripción"
+      }"`
     );
 
     res.status(201).json({ message: "Unidad creada exitosamente", id });
@@ -70,11 +71,10 @@ const createUnidad = async (req, res) => {
     console.error("[UNIDADES ERROR] Fallo al crear:", error);
     res.status(500).json({ message: "Error al crear unidad" });
   }
-  console.log("--- FIN CREATE UNIDAD ---");
 };
 
 const updateUnidad = async (req, res) => {
-  console.log("--- INICIO UPDATE UNIDAD ---");
+  console.log("--- INICIO UPDATE UNIDAD (AUDITADO) ---");
   try {
     const { id } = req.params;
     const { nombre, descripcion } = req.body;
@@ -82,8 +82,9 @@ const updateUnidad = async (req, res) => {
     if (!nombre?.trim())
       return res.status(400).json({ message: "El nombre es obligatorio" });
 
-    const existing = await Unidad.findById(id);
-    if (!existing)
+    // 2. OBTENER DATOS ANTERIORES PARA COMPARAR
+    const unidadAnterior = await Unidad.findById(id);
+    if (!unidadAnterior)
       return res.status(404).json({ message: "Unidad no encontrada" });
 
     if (await Unidad.nombreExists(nombre, id)) {
@@ -91,6 +92,14 @@ const updateUnidad = async (req, res) => {
         .status(400)
         .json({ message: "Ya existe otra unidad con ese nombre" });
     }
+
+    // 3. CALCULAR DIFERENCIAS
+    const detalleCambios = calcularDiferencias(unidadAnterior, req.body, [
+      "id",
+      "updated_at",
+      "created_at",
+      "empresa_id",
+    ]);
 
     const updated = await Unidad.updateById(id, {
       nombre: nombre.trim(),
@@ -100,14 +109,12 @@ const updateUnidad = async (req, res) => {
     if (!updated)
       return res.status(404).json({ message: "Unidad no encontrada" });
 
-    console.log(`[UNIDADES] Unidad ID ${id} actualizada.`);
-
-    // REGISTRO DE LOG
+    // 4. REGISTRO DE LOG DETALLADO
     await registrarLog(
       req,
       "EDITAR",
       "UNIDADES",
-      `Se actualizó la unidad ID ${id}. Nuevo nombre: ${nombre.trim()}`
+      `Se actualizó la unidad: ${unidadAnterior.nombre}. Cambios: ${detalleCambios}`
     );
 
     res.json({ message: "Unidad actualizada exitosamente" });

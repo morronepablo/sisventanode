@@ -1,6 +1,7 @@
 // controllers/comboController.js
 const db = require("../config/db");
 const { registrarLog } = require("../utils/logger"); // 👈 Importamos el logger
+const { calcularDiferencias } = require("../utils/differences"); // 👈 1. Importar utilidad
 
 const getCombos = async (req, res) => {
   try {
@@ -73,7 +74,7 @@ const getComboById = async (req, res) => {
 };
 
 const storeCombo = async (req, res) => {
-  console.log("--- INICIO CREATE COMBO ---");
+  console.log("--- INICIO CREATE COMBO (AUDITADO) ---");
   const connection = await db.getConnection();
   try {
     await connection.beginTransaction();
@@ -81,7 +82,6 @@ const storeCombo = async (req, res) => {
     const { nombre, codigo, precio_venta, productos } = req.body;
     const empresa_id = req.user.empresa_id;
 
-    // 1. Insertar el Combo
     const [resCombo] = await connection.execute(
       "INSERT INTO combos (nombre, codigo, precio_venta, empresa_id, created_at, updated_at) VALUES (?, ?, ?, ?, NOW(), NOW())",
       [nombre, codigo, precio_venta, empresa_id]
@@ -89,7 +89,6 @@ const storeCombo = async (req, res) => {
 
     const combo_id = resCombo.insertId;
 
-    // 2. Insertar los productos asociados
     if (productos && productos.length > 0) {
       for (const prod of productos) {
         if (prod.producto_id && prod.cantidad > 0) {
@@ -102,14 +101,13 @@ const storeCombo = async (req, res) => {
     }
 
     await connection.commit();
-    console.log(`[COMBOS] Combo registrado con éxito. ID: ${combo_id}`);
 
-    // 👈 REGISTRO DE LOG
+    // LOG DE CREACIÓN DETALLADO
     await registrarLog(
       req,
       "CREAR",
       "COMBOS",
-      `Se registró un nuevo combo: ${nombre} (Código: ${codigo}) con un precio de $${precio_venta}`
+      `Nuevo combo: ${nombre}. Código: ${codigo}. Precio: $${precio_venta}. Contiene ${productos.length} productos.`
     );
 
     res.json({
@@ -119,16 +117,14 @@ const storeCombo = async (req, res) => {
     });
   } catch (error) {
     await connection.rollback();
-    console.error("[COMBOS ERROR] Fallo al registrar:", error.message);
-    res.status(500).json({ message: "Error al registrar el combo" });
+    res.status(500).json({ message: "Error al registrar" });
   } finally {
     connection.release();
   }
-  console.log("--- FIN CREATE COMBO ---");
 };
 
 const updateCombo = async (req, res) => {
-  console.log("--- INICIO UPDATE COMBO ---");
+  console.log("--- INICIO UPDATE COMBO (AUDITADO) ---");
   const connection = await db.getConnection();
   try {
     await connection.beginTransaction();
@@ -137,11 +133,35 @@ const updateCombo = async (req, res) => {
     const { nombre, codigo, precio_venta, productos } = req.body;
     const empresa_id = req.user.empresa_id;
 
+    // 2. OBTENER ESTADO ANTERIOR (Combo y sus productos)
+    const [comboRows] = await connection.execute(
+      "SELECT * FROM combos WHERE id = ?",
+      [id]
+    );
+    if (comboRows.length === 0)
+      return res.status(404).json({ message: "No encontrado" });
+    const comboAnterior = comboRows[0];
+
+    const [productosAnteriores] = await connection.execute(
+      "SELECT producto_id, cantidad FROM combo_producto WHERE combo_id = ?",
+      [id]
+    );
+
+    // 3. CALCULAR DIFERENCIAS EN DATOS BÁSICOS
+    const detalleCambios = calcularDiferencias(comboAnterior, req.body, [
+      "id",
+      "empresa_id",
+      "created_at",
+      "updated_at",
+    ]);
+
+    // 4. ACTUALIZAR COMBO
     await connection.execute(
       "UPDATE combos SET nombre = ?, codigo = ?, precio_venta = ?, updated_at = NOW() WHERE id = ? AND empresa_id = ?",
       [nombre, codigo, precio_venta, id, empresa_id]
     );
 
+    // 5. ACTUALIZAR PRODUCTOS (Borrar y reinsertar)
     await connection.execute("DELETE FROM combo_producto WHERE combo_id = ?", [
       id,
     ]);
@@ -157,26 +177,29 @@ const updateCombo = async (req, res) => {
       }
     }
 
-    await connection.commit();
-    console.log(`[COMBOS] Combo ID ${id} actualizado.`);
+    // 6. COMPARAR CANTIDAD DE PRODUCTOS PARA EL LOG
+    let logProductos = "";
+    if (productosAnteriores.length !== productos.length) {
+      logProductos = ` | ITEMS: ${productosAnteriores.length} ➡️ ${productos.length}`;
+    }
 
-    // 👈 REGISTRO DE LOG
+    await connection.commit();
+
+    // 7. REGISTRO DE LOG DETALLADO
     await registrarLog(
       req,
       "EDITAR",
       "COMBOS",
-      `Se actualizaron los datos del combo: ${nombre} (ID: ${id})`
+      `Se actualizó el combo: ${comboAnterior.nombre}. Cambios: ${detalleCambios}${logProductos}`
     );
 
     res.json({ success: true });
   } catch (error) {
     await connection.rollback();
-    console.error("[COMBOS ERROR] Fallo al actualizar:", error.message);
     res.status(500).json({ message: error.message });
   } finally {
     connection.release();
   }
-  console.log("--- FIN UPDATE COMBO ---");
 };
 
 const deleteCombo = async (req, res) => {

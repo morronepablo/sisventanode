@@ -2,6 +2,7 @@
 const Categoria = require("../models/Categoria");
 const db = require("../config/db");
 const { registrarLog } = require("../utils/logger"); // 👈 Importamos el logger
+const { calcularDiferencias } = require("../utils/differences"); // 👈 1. Importar utilidad
 
 const getAllCategorias = async (req, res) => {
   try {
@@ -37,7 +38,7 @@ const getCategoriaById = async (req, res) => {
 };
 
 const createCategoria = async (req, res) => {
-  console.log("--- INICIO CREATE CATEGORIA ---");
+  console.log("--- INICIO CREATE CATEGORIA (AUDITADO) ---");
   try {
     const { nombre, descripcion } = req.body;
     if (!nombre?.trim())
@@ -54,28 +55,25 @@ const createCategoria = async (req, res) => {
       descripcion: descripcion || "",
     });
 
-    console.log(`[CATEGORIAS] Categoría creada con ID: ${id}`);
-
-    // REGISTRO DE LOG
+    // REGISTRO DE LOG DETALLADO
     await registrarLog(
       req,
       "CREAR",
       "CATEGORIAS",
-      `Se creó la categoría: ${nombre.trim()}`
+      `Se creó la categoría: "${nombre.trim()}". Descripción: "${
+        descripcion || "Sin descripción"
+      }"`
     );
 
     res.status(201).json({ message: "Categoría creada exitosamente", id });
   } catch (error) {
     console.error("[CATEGORIAS ERROR] Fallo al crear:", error);
-    res
-      .status(500)
-      .json({ message: "Error al crear categoría", error: error.message });
+    res.status(500).json({ message: "Error al crear categoría" });
   }
-  console.log("--- FIN CREATE CATEGORIA ---");
 };
 
 const updateCategoria = async (req, res) => {
-  console.log("--- INICIO UPDATE CATEGORIA ---");
+  console.log("--- INICIO UPDATE CATEGORIA (AUDITADO) ---");
   try {
     const { id } = req.params;
     const { nombre, descripcion } = req.body;
@@ -83,8 +81,9 @@ const updateCategoria = async (req, res) => {
     if (!nombre?.trim())
       return res.status(400).json({ message: "El nombre es obligatorio" });
 
-    const existing = await Categoria.findById(id);
-    if (!existing)
+    // 2. OBTENER DATOS ANTERIORES PARA COMPARAR
+    const categoriaAnterior = await Categoria.findById(id);
+    if (!categoriaAnterior)
       return res.status(404).json({ message: "Categoría no encontrada" });
 
     if (await Categoria.nombreExists(nombre, id)) {
@@ -92,6 +91,13 @@ const updateCategoria = async (req, res) => {
         .status(400)
         .json({ message: "Ya existe otra categoría con ese nombre" });
     }
+
+    // 3. CALCULAR DIFERENCIAS
+    const detalleCambios = calcularDiferencias(categoriaAnterior, req.body, [
+      "id",
+      "updated_at",
+      "created_at",
+    ]);
 
     const updated = await Categoria.updateById(id, {
       nombre: nombre.trim(),
@@ -101,24 +107,19 @@ const updateCategoria = async (req, res) => {
     if (!updated)
       return res.status(404).json({ message: "Categoría no encontrada" });
 
-    console.log(`[CATEGORIAS] Categoría ID ${id} actualizada.`);
-
-    // REGISTRO DE LOG
+    // 4. REGISTRO DE LOG DETALLADO
     await registrarLog(
       req,
       "EDITAR",
       "CATEGORIAS",
-      `Se actualizó la categoría ID ${id}. Nuevo nombre: ${nombre.trim()}`
+      `Se actualizó la categoría: ${categoriaAnterior.nombre}. Cambios: ${detalleCambios}`
     );
 
     res.json({ message: "Categoría actualizada exitosamente" });
   } catch (error) {
     console.error("[CATEGORIAS ERROR] Fallo al actualizar:", error);
-    res
-      .status(500)
-      .json({ message: "Error al actualizar categoría", error: error.message });
+    res.status(500).json({ message: "Error al actualizar categoría" });
   }
-  console.log("--- FIN UPDATE CATEGORIA ---");
 };
 
 const deleteCategoria = async (req, res) => {

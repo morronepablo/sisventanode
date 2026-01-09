@@ -7,6 +7,7 @@ const multer = require("multer");
 const csv = require("csv-parser");
 const bwipjs = require("bwip-js");
 const { registrarLog } = require("../utils/logger"); // 👈 Importamos el logger
+const { calcularDiferencias } = require("../utils/differences"); // 👈 Importar la utilidad
 
 // Usa fuentes nativas de PDF (Helvetica)
 const pdfMake = require("pdfmake");
@@ -171,36 +172,46 @@ const createProducto = async (req, res) => {
 };
 
 const updateProducto = async (req, res) => {
-  console.log("--- INICIO UPDATE PRODUCTO ---");
+  console.log("--- INICIO UPDATE PRODUCTO (AUDITADO) ---");
   try {
     const { id } = req.params;
-    const { codigo, nombre } = req.body;
+    const nuevosDatos = req.body;
 
-    const existing = await Producto.findById(id);
-    if (!existing)
+    // 1. OBTENER DATOS ACTUALES ANTES DE EDITAR
+    const productoAnterior = await Producto.findById(id);
+    if (!productoAnterior)
       return res.status(404).json({ message: "Producto no encontrado" });
+
+    // 2. CALCULAR QUÉ CAMBIÓ
+    // Ignoramos campos que no queremos ver en el log como la imagen o fechas
+    const detalleCambios = calcularDiferencias(productoAnterior, nuevosDatos, [
+      "updated_at",
+      "created_at",
+      "imagen",
+      "id",
+      "empresa_id",
+    ]);
 
     let imagenUrl = req.file
       ? `/src/assets/productos/${req.file.filename}`
-      : existing.imagen;
+      : productoAnterior.imagen;
 
-    await Producto.updateById(id, { ...req.body, imagen: imagenUrl });
+    // 3. ACTUALIZAR EN LA DB
+    await Producto.updateById(id, { ...nuevosDatos, imagen: imagenUrl });
 
-    // REGISTRO DE LOG
+    // 4. REGISTRAR LOG DETALLADO
     await registrarLog(
       req,
       "EDITAR",
       "PRODUCTOS",
-      `Se actualizó el producto: ${nombre} (ID: ${id})`
+      `Editó el producto: ${productoAnterior.nombre}. Cambios: ${detalleCambios}`
     );
 
-    console.log(`[PRODUCTOS] Producto ID ${id} actualizado.`);
     res.json({ message: "Producto actualizado correctamente" });
   } catch (error) {
-    console.error("[PRODUCTOS ERROR] Fallo al actualizar:", error);
+    console.error(error);
     res.status(500).json({ message: "Error interno" });
   }
-  console.log("--- FIN UPDATE PRODUCTO ---");
 };
 
 const deleteProducto = async (req, res) => {
@@ -550,108 +561,6 @@ const generarReporteStock = async (req, res) => {
       .json({ message: "Error al generar el reporte", error: error.message });
   }
 };
-
-// const generarEtiquetas = async (req, res) => {
-//   try {
-//     const { id } = req.params;
-//     const { cantidad = 10 } = req.query; // Cuántas etiquetas imprimir
-
-//     const producto = await Producto.findById(id);
-//     if (!producto) return res.status(404).send("Producto no encontrado");
-
-//     // Generar la imagen del código de barras en Buffer
-//     const barcodeBuffer = await bwipjs.toBuffer({
-//       bcid: "code128", // Tipo de código
-//       text: producto.codigo, // Texto del código
-//       scale: 3, // Escala
-//       height: 10, // Altura
-//       includetext: true, // Mostrar texto abajo
-//       textxalign: "center",
-//     });
-
-//     const barcodeBase64 = `data:image/png;base64,${barcodeBuffer.toString(
-//       "base64"
-//     )}`;
-
-//     // Armar la grilla de etiquetas (3 por fila)
-//     const etiquetas = [];
-//     const totalEtiquetas = parseInt(cantidad);
-
-//     for (let i = 0; i < totalEtiquetas; i++) {
-//       etiquetas.push({
-//         stack: [
-//           {
-//             text: producto.nombre.substring(0, 25),
-//             fontSize: 8,
-//             bold: true,
-//             alignment: "center",
-//           },
-//           {
-//             text: `$ ${parseFloat(producto.precio_venta).toLocaleString(
-//               "es-AR"
-//             )}`,
-//             fontSize: 12,
-//             bold: true,
-//             alignment: "center",
-//             color: "#1a73e8",
-//           },
-//           {
-//             image: barcodeBase64,
-//             width: 100,
-//             alignment: "center",
-//             margin: [0, 5, 0, 0],
-//           },
-//         ],
-//         margin: [5, 5, 5, 5],
-//         border: [true, true, true, true],
-//       });
-//     }
-
-//     // Agrupar en filas de 3
-//     const tableBody = [];
-//     for (let i = 0; i < etiquetas.length; i += 3) {
-//       tableBody.push([
-//         etiquetas[i] || {},
-//         etiquetas[i + 1] || {},
-//         etiquetas[i + 2] || {},
-//       ]);
-//     }
-
-//     const docDefinition = {
-//       pageSize: "A4",
-//       content: [
-//         {
-//           table: {
-//             widths: ["33%", "33%", "33%"],
-//             body: tableBody,
-//           },
-//           layout: {
-//             hLineWidth: () => 0.5,
-//             vLineWidth: () => 0.5,
-//             hLineColor: () => "#ccc",
-//             vLineColor: () => "#ccc",
-//           },
-//         },
-//       ],
-//       defaultStyle: { font: "Roboto" },
-//     };
-
-//     const pdfDoc = printer.createPdfKitDocument(docDefinition);
-//     res.setHeader("Content-Type", "application/pdf");
-//     pdfDoc.pipe(res);
-//     pdfDoc.end();
-
-//     await registrarLog(
-//       req,
-//       "IMPRIMIR",
-//       "PRODUCTOS",
-//       `Se generaron ${cantidad} etiquetas para el producto: ${producto.nombre}`
-//     );
-//   } catch (error) {
-//     console.error(error);
-//     res.status(500).send("Error al generar etiquetas");
-//   }
-// };
 
 const generarEtiquetas = async (req, res) => {
   try {

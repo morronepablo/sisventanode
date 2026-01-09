@@ -2,6 +2,7 @@
 const Proveedor = require("../models/Proveedor");
 const db = require("../config/db");
 const { registrarLog } = require("../utils/logger"); // 👈 1. Importamos el logger
+const { calcularDiferencias } = require("../utils/differences"); // 👈 1. Importar la utilidad
 
 const getListadoProveedores = async (req, res) => {
   try {
@@ -58,23 +59,21 @@ const getProveedorById = async (req, res) => {
 };
 
 const createProveedor = async (req, res) => {
-  console.log("--- INICIO CREATE PROVEEDOR ---");
+  console.log("--- INICIO CREATE PROVEEDOR (AUDITADO) ---");
   try {
     const empresa_id = req.user.empresa_id;
-    // Agregamos empresa_id a los datos antes de crear
     const datos = { ...req.body, empresa_id };
 
     const id = await Proveedor.create(datos);
-    console.log(`[PROVEEDORES] Creado ID: ${id} para empresa: ${empresa_id}`);
 
-    // 👈 REGISTRO DE LOG
+    // REGISTRO DE LOG CON DETALLE INICIAL
     await registrarLog(
       req,
       "CREAR",
       "PROVEEDORES",
-      `Se registró al proveedor: ${req.body.empresa} (Marca: ${
+      `Se registró al proveedor: ${req.body.empresa}. Marca: ${
         req.body.marca || "N/A"
-      })`
+      }. Contacto: ${req.body.contacto}`
     );
 
     res.status(201).json({ message: "Proveedor registrado con éxito", id });
@@ -82,28 +81,43 @@ const createProveedor = async (req, res) => {
     console.error("[PROVEEDORES ERROR] Create:", error.message);
     res.status(500).json({ message: "Error al registrar el proveedor" });
   }
-  console.log("--- FIN CREATE PROVEEDOR ---");
 };
 
 const updateProveedor = async (req, res) => {
-  console.log("--- INICIO UPDATE PROVEEDOR ---");
+  console.log("--- INICIO UPDATE PROVEEDOR (AUDITADO) ---");
   try {
     const { id } = req.params;
-    const actualizado = await Proveedor.updateById(id, req.body);
+    const nuevosDatos = req.body;
 
+    // 2. OBTENER DATOS ACTUALES ANTES DE EDITAR
+    const proveedorAnterior = await Proveedor.findById(id);
+    if (!proveedorAnterior) {
+      return res.status(404).json({ message: "Proveedor no encontrado" });
+    }
+
+    // 3. CALCULAR QUÉ CAMPOS CAMBIARON
+    // Ignoramos campos técnicos y de sistema
+    const detalleCambios = calcularDiferencias(proveedorAnterior, nuevosDatos, [
+      "id",
+      "empresa_id",
+      "created_at",
+      "updated_at",
+    ]);
+
+    // 4. REALIZAR LA ACTUALIZACIÓN
+    const actualizado = await Proveedor.updateById(id, nuevosDatos);
     if (!actualizado) {
       return res.status(404).json({ message: "Proveedor no encontrado" });
     }
 
-    // 👈 REGISTRO DE LOG
+    // 5. REGISTRO DE LOG DETALLADO
     await registrarLog(
       req,
       "EDITAR",
       "PROVEEDORES",
-      `Se actualizaron los datos del proveedor: ${req.body.empresa} (ID: ${id})`
+      `Se actualizaron los datos del proveedor: ${proveedorAnterior.empresa}. Cambios: ${detalleCambios}`
     );
 
-    console.log(`[PROVEEDORES] Proveedor ID ${id} actualizado con éxito.`);
     res.json({ message: "Proveedor actualizado con éxito" });
   } catch (error) {
     console.error("[PROVEEDORES ERROR] Update:", error.message);
