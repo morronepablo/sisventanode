@@ -6,36 +6,14 @@ const path = require("path");
 const multer = require("multer");
 const csv = require("csv-parser");
 const bwipjs = require("bwip-js");
-const { registrarLog } = require("../utils/logger"); // 👈 Importamos el logger
-const { calcularDiferencias } = require("../utils/differences"); // 👈 Importar la utilidad
-const { sendWS } = require("../utils/whatsapp"); // 👈 1. IMPORTAR WHATSAPP
+const { registrarLog } = require("../utils/logger");
+const { calcularDiferencias } = require("../utils/differences");
+const { sendWS } = require("../utils/whatsapp");
+const { cloudinary, storage } = require("../config/cloudinary"); // Configuración de Cloudinary
 
-// Usa fuentes nativas de PDF (Helvetica)
-const pdfMake = require("pdfmake");
-const printer = new pdfMake({
-  Roboto: {
-    normal: "Helvetica",
-    bold: "Helvetica-Bold",
-    italics: "Helvetica-Oblique",
-    bolditalics: "Helvetica-BoldOblique",
-  },
-});
+// --- CONFIGURACIÓN DE SUBIDA (MULTER) ---
 
-const uploadDir = path.join(process.cwd(), "src/assets/productos/");
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, uploadDir);
-  },
-  filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-    cb(null, "imagen-" + uniqueSuffix + path.extname(file.originalname));
-  },
-});
-
+// Almacenamiento en la nube para imágenes de productos
 const upload = multer({
   storage: storage,
   limits: { fileSize: 5 * 1024 * 1024 },
@@ -48,8 +26,9 @@ const upload = multer({
   },
 });
 
+// Almacenamiento temporal local para procesamiento de CSV
 const uploadCsv = multer({
-  storage: storage,
+  dest: "uploads/csv/",
   limits: { fileSize: 2 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const isCsv =
@@ -64,18 +43,26 @@ const uploadCsv = multer({
   },
 });
 
+// Configuración de PDFMake con fuentes nativas de Linux/Render
+const pdfMake = require("pdfmake");
+const printer = new pdfMake({
+  Roboto: {
+    normal: "Helvetica",
+    bold: "Helvetica-Bold",
+    italics: "Helvetica-Oblique",
+    bolditalics: "Helvetica-BoldOblique",
+  },
+});
+
+// --- FUNCIONES AUXILIARES ---
+
 const getEmpresaPhone = async (empresa_id) => {
   const [rows] = await db.execute(
     "SELECT telefono FROM empresas WHERE id = ?",
     [empresa_id]
   );
   if (rows.length > 0 && rows[0].telefono) {
-    // Limpiamos el número: solo dejamos dígitos
     let phone = rows[0].telefono.replace(/\D/g, "");
-
-    // Lógica para Argentina:
-    // Si el número empieza con 11 o similar (sin el 54), se lo agregamos.
-    // Si no empieza con 54, asumimos que falta el código de país.
     if (!phone.startsWith("54")) {
       phone = "549" + phone;
     }
@@ -84,10 +71,11 @@ const getEmpresaPhone = async (empresa_id) => {
   return null;
 };
 
+// --- CONTROLADORES ---
+
 const getAllProductos = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
-    // Consulta con subconsultas para verificar uso en TODAS las tablas relacionadas
     const query = `
       SELECT 
         p.*, 
@@ -108,7 +96,6 @@ const getAllProductos = async (req, res) => {
     `;
     const [productos] = await db.execute(query, [empresa_id]);
 
-    // Agregamos la propiedad booleana para el frontend
     const result = productos.map((prod) => ({
       ...prod,
       puede_eliminarse: prod.total_uso === 0,
@@ -123,7 +110,8 @@ const getAllProductos = async (req, res) => {
 
 const getProductosBajoStock = async (req, res) => {
   try {
-    const productos = await Producto.getBajoStock();
+    const empresa_id = req.user.empresa_id;
+    const productos = await Producto.getBajoStock(empresa_id);
     res.json(productos);
   } catch (error) {
     res
@@ -145,20 +133,10 @@ const getProductoById = async (req, res) => {
 };
 
 const createProducto = async (req, res) => {
-  console.log("--- INICIO CREATE PRODUCTO ---");
+  console.log("--- INICIO CREATE PRODUCTO (CLOUDINARY) ---");
   try {
-    const {
-      categoria_id,
-      unidad_id,
-      codigo,
-      nombre,
-      precio_compra,
-      aplicar_porcentaje,
-      valor_porcentaje,
-      precio_venta,
-      stock, // 👈 Asegurarnos de recibir estos
-      stock_minimo, // 👈 campos para la validación
-    } = req.body;
+    const { codigo, nombre, stock, stock_minimo } = req.body;
+    const empresa_id = req.user.empresa_id;
 
     if (await Producto.codigoExists(codigo)) {
       return res
@@ -166,58 +144,137 @@ const createProducto = async (req, res) => {
         .json({ message: "Ya existe un producto con ese código" });
     }
 
-    let imagenUrl = req.file
-      ? `/src/assets/productos/${req.file.filename}`
-      : null;
+    // Usamos req.file.path que es la URL de Cloudinary
+    let imagenUrl = req.file ? req.file.path : null;
 
     const id = await Producto.create({
       ...req.body,
       imagen: imagenUrl,
-      empresa_id: req.user.empresa_id,
+      empresa_id: empresa_id,
     });
 
-    console.log(`[PRODUCTOS] Producto creado con ID: ${id}`);
-
-    // 👈 WHATSAPP DINÁMICO
+    // Notificación WhatsApp
     if (parseFloat(stock) <= parseFloat(stock_minimo)) {
       const telefonoDestino = await getEmpresaPhone(empresa_id);
       if (telefonoDestino) {
-        const mensaje = `⚠️ *STOCK CRÍTICO* ⚠️\nSe creó: *${nombre}*\nStock: ${stock} / Mínimo: ${stock_minimo}`;
+        const mensaje = `⚠️ *STOCK CRÍTICO* ⚠️\nSe registró: *${nombre}*\nStock inicial: ${stock} / Mínimo: ${stock_minimo}`;
         sendWS(telefonoDestino, mensaje);
       }
     }
 
-    // REGISTRO DE LOG
     await registrarLog(
       req,
       "CREAR",
       "PRODUCTOS",
-      `Se registró el producto: ${nombre} (Código: ${codigo})`
+      `Se registró el producto: ${nombre} (Código: ${codigo}) con imagen en Cloudinary.`
     );
-
     res.status(201).json({ message: "Producto creado exitosamente", id });
   } catch (error) {
-    console.error("[PRODUCTOS ERROR] Fallo al crear:", error);
+    console.error(error);
     res.status(500).json({ message: "Error al crear producto" });
   }
-  console.log("--- FIN CREATE PRODUCTO ---");
 };
 
+// const updateProducto = async (req, res) => {
+//   console.log("--- INICIO UPDATE PRODUCTO (CLOUDINARY + AUDITORÍA) ---");
+//   try {
+//     const { id } = req.params;
+//     const nuevosDatos = req.body;
+//     const empresa_id = req.user.empresa_id;
+
+//     const productoAnterior = await Producto.findById(id);
+//     if (!productoAnterior)
+//       return res.status(404).json({ message: "Producto no encontrado" });
+
+//     // Auditoría de cambios
+//     const detalleCambios = calcularDiferencias(productoAnterior, nuevosDatos, [
+//       "updated_at",
+//       "created_at",
+//       "imagen",
+//       "id",
+//       "empresa_id",
+//     ]);
+
+//     // Si hay archivo nuevo, usamos req.file.path (Cloudinary), sino la imagen vieja
+//     let imagenUrl = req.file ? req.file.path : productoAnterior.imagen;
+
+//     await Producto.updateById(id, { ...nuevosDatos, imagen: imagenUrl });
+
+//     // Notificación WhatsApp
+//     if (
+//       parseFloat(nuevosDatos.stock) <=
+//       parseFloat(nuevosDatos.stock_minimo || productoAnterior.stock_minimo)
+//     ) {
+//       const telefonoDestino = await getEmpresaPhone(empresa_id);
+//       if (telefonoDestino) {
+//         const mensaje = `⚠️ *AVISO DE STOCK* ⚠️\n\nEl stock del producto *${
+//           productoAnterior.nombre
+//         }* está bajo el mínimo:\n\n*Stock actual:* ${
+//           nuevosDatos.stock
+//         }\n*Mínimo:* ${
+//           nuevosDatos.stock_minimo || productoAnterior.stock_minimo
+//         }`;
+//         sendWS(telefonoDestino, mensaje);
+//       }
+//     }
+
+//     await registrarLog(
+//       req,
+//       "EDITAR",
+//       "PRODUCTOS",
+//       `Editó el producto: ${productoAnterior.nombre}. Cambios: ${detalleCambios}`
+//     );
+//     res.json({ message: "Producto actualizado correctamente" });
+//   } catch (error) {
+//     console.error(error);
+//     res.status(500).json({ message: "Error interno" });
+//   }
+// };
+
 const updateProducto = async (req, res) => {
-  console.log("--- INICIO UPDATE PRODUCTO (AUDITADO) ---");
+  console.log("--- INICIO UPDATE PRODUCTO (LIMPIEZA NUBE) ---");
   try {
     const { id } = req.params;
     const nuevosDatos = req.body;
-
-    // 1. OBTENER EL empresa_id DEL USUARIO LOGUEADO (Esto es lo que faltaba)
     const empresa_id = req.user.empresa_id;
 
-    // 2. OBTENER DATOS ACTUALES ANTES DE EDITAR
     const productoAnterior = await Producto.findById(id);
     if (!productoAnterior)
-      return res.status(404).json({ message: "Producto no encontrado" });
+      return res.status(404).json({ message: "No encontrado" });
 
-    // 3. CALCULAR QUÉ CAMBIÓ
+    let imagenUrl = productoAnterior.imagen;
+
+    // --- LÓGICA DE LIMPIEZA DE CLOUDINARY ---
+    if (req.file) {
+      // 1. Si existe una imagen anterior y es de Cloudinary (contiene 'res.cloudinary.com')
+      if (
+        productoAnterior.imagen &&
+        productoAnterior.imagen.includes("res.cloudinary.com")
+      ) {
+        try {
+          // Extraemos el public_id de la URL.
+          // Ejemplo URL: .../productos_sistema_ventas/v12345/nombre_imagen.jpg
+          // Necesitamos: "productos_sistema_ventas/nombre_imagen"
+          const parts = productoAnterior.imagen.split("/");
+          const folderName = parts[parts.length - 2]; // 'productos_sistema_ventas'
+          const fileName = parts[parts.length - 1].split(".")[0]; // 'nombre_imagen'
+          const publicId = `${folderName}/${fileName}`;
+
+          console.log(`[CLOUDINARY] Borrando imagen anterior: ${publicId}`);
+          await cloudinary.uploader.destroy(publicId);
+        } catch (error) {
+          console.error("Error al borrar imagen vieja en Cloudinary:", error);
+          // No bloqueamos el proceso, solo avisamos en consola
+        }
+      }
+      // 2. Asignamos la nueva URL que Multer ya subió a Cloudinary
+      imagenUrl = req.file.path;
+    }
+
+    // Actualizamos en la base de datos
+    await Producto.updateById(id, { ...nuevosDatos, imagen: imagenUrl });
+
+    // Auditoría (Log detallado)
     const detalleCambios = calcularDiferencias(productoAnterior, nuevosDatos, [
       "updated_at",
       "created_at",
@@ -226,194 +283,134 @@ const updateProducto = async (req, res) => {
       "empresa_id",
     ]);
 
-    let imagenUrl = req.file
-      ? `/src/assets/productos/${req.file.filename}`
-      : productoAnterior.imagen;
-
-    // 4. ACTUALIZAR EN LA DB
-    await Producto.updateById(id, { ...nuevosDatos, imagen: imagenUrl });
-
-    // 5. LÓGICA DE WHATSAPP (Ahora empresa_id ya está definido)
-    if (
-      parseFloat(nuevosDatos.stock) <=
-      parseFloat(nuevosDatos.stock_minimo || productoAnterior.stock_minimo)
-    ) {
-      const telefonoDestino = await getEmpresaPhone(empresa_id); // 👈 Ya no dará error
-      if (telefonoDestino) {
-        const mensaje = `⚠️ *AVISO DE STOCK* ⚠️\n\nEl stock del producto *${
-          productoAnterior.nombre
-        }* ha sido actualizado y se encuentra bajo el mínimo:\n\n*Stock actual:* ${
-          nuevosDatos.stock
-        }\n*Mínimo:* ${
-          nuevosDatos.stock_minimo || productoAnterior.stock_minimo
-        }`;
-        sendWS(telefonoDestino, mensaje);
-      }
-    }
-
-    // 6. REGISTRAR LOG DETALLADO
     await registrarLog(
       req,
       "EDITAR",
       "PRODUCTOS",
-      `Editó el producto: ${productoAnterior.nombre}. Cambios: ${detalleCambios}`
+      `Se actualizó el producto ${productoAnterior.nombre}. Cambios: ${detalleCambios}`
     );
 
-    res.json({ message: "Producto actualizado correctamente" });
+    res.json({
+      success: true,
+      message: "Producto e imagen actualizados correctamente",
+    });
   } catch (error) {
-    console.error("Error en updateProducto:", error);
+    console.error(error);
     res.status(500).json({ message: "Error interno" });
   }
 };
 
 const deleteProducto = async (req, res) => {
-  console.log("--- INICIO DELETE PRODUCTO ---");
   try {
     const { id } = req.params;
+    const existing = await Producto.findById(id);
+    const nombreProd = existing ? existing.nombre : "ID " + id;
 
-    // 1. Verificación de seguridad en el servidor antes de borrar
-    const queryCheck = `
+    const [check] = await db.execute(
+      `
       SELECT (
         (SELECT COUNT(*) FROM detalle_ventas WHERE producto_id = ?) +
         (SELECT COUNT(*) FROM detalle_compras WHERE producto_id = ?) +
         (SELECT COUNT(*) FROM ajustes WHERE producto_id = ?) +
         (SELECT COUNT(*) FROM combo_producto WHERE producto_id = ?)
-      ) as uso`;
-
-    const [check] = await db.execute(queryCheck, [id, id, id, id]);
+      ) as uso`,
+      [id, id, id, id]
+    );
 
     if (check[0].uso > 0) {
       return res.status(400).json({
-        message:
-          "No se puede eliminar el producto porque tiene historial de movimientos o pertenece a un combo.",
+        message: "No se puede eliminar: tiene historial de movimientos.",
       });
     }
 
-    const existing = await Producto.findById(id);
-    const nombreProd = existing ? existing.nombre : "ID " + id;
-
-    const deleted = await Producto.deleteById(id);
-    if (!deleted)
-      return res.status(404).json({ message: "Producto no encontrado" });
-
+    await Producto.deleteById(id);
     await registrarLog(
       req,
       "ELIMINAR",
       "PRODUCTOS",
       `Se eliminó el producto: ${nombreProd}`
     );
-
-    res.json({ success: true, message: "Producto eliminado exitosamente" });
+    res.json({ success: true, message: "Producto eliminado" });
   } catch (error) {
-    console.error("[PRODUCTOS ERROR] Fallo al eliminar:", error);
     res.status(500).json({ message: "Error al eliminar producto" });
   }
-  console.log("--- FIN DELETE PRODUCTO ---");
 };
 
 const importarProductos = async (req, res) => {
   console.log("--- INICIO IMPORTACIÓN CSV ---");
-  try {
-    if (!req.file)
-      return res.status(400).json({ message: "Archivo CSV obligatorio" });
+  const empresa_id = req.user.empresa_id;
+  const resultados = [];
+  let addedCount = 0;
+  let productosBajos = [];
 
-    // (Lógica de importación abreviada para claridad, pero mantiene tu funcionalidad original)
-    // Supongamos que addedProducts es el contador de tu bucle de importación
-    let addedProducts = 0;
-    /* ... aquí va tu bucle for await ... */
+  if (!req.file)
+    return res.status(400).json({ message: "Archivo CSV obligatorio" });
 
-    // REGISTRO DE LOG
-    await registrarLog(
-      req,
-      "IMPORTAR",
-      "PRODUCTOS",
-      `Importación masiva completada. Se añadieron ${addedProducts} productos.`
-    );
+  fs.createReadStream(req.file.path)
+    .pipe(csv())
+    .on("data", (data) => resultados.push(data))
+    .on("end", async () => {
+      try {
+        for (const row of resultados) {
+          const exists = await Producto.codigoExists(row.codigo);
+          if (!exists) {
+            await Producto.create({
+              ...row,
+              empresa_id: empresa_id,
+              imagen: null,
+            });
+            addedCount++;
+            if (parseFloat(row.stock) <= parseFloat(row.stock_minimo)) {
+              productosBajos.push(row.nombre);
+            }
+          }
+        }
 
-    res.json({ message: "Proceso finalizado" });
-  } catch (error) {
-    res.status(500).json({ message: "Error interno" });
-  }
-  console.log("--- FIN IMPORTACIÓN CSV ---");
-};
+        // Aviso WhatsApp masivo
+        if (productosBajos.length > 0) {
+          const tel = await getEmpresaPhone(empresa_id);
+          if (tel) {
+            const msg = `📦 *IMPORTACIÓN COMPLETADA* 📦\nSe añadieron ${addedCount} productos. Los siguientes están bajo stock:\n- ${productosBajos
+              .slice(0, 5)
+              .join("\n- ")} ${
+              productosBajos.length > 5 ? "\n...entre otros." : ""
+            }`;
+            sendWS(tel, msg);
+          }
+        }
 
-const countProductos = async (req, res) => {
-  try {
-    const [rows] = await db.execute(
-      "SELECT COUNT(*) AS total FROM productos WHERE empresa_id = ?",
-      [req.user.empresa_id]
-    );
-    res.json({ total: rows[0].total });
-  } catch (error) {
-    res.status(500).json({ total: 0 });
-  }
+        await registrarLog(
+          req,
+          "IMPORTAR",
+          "PRODUCTOS",
+          `Importación masiva: ${addedCount} productos añadidos.`
+        );
+        fs.unlinkSync(req.file.path); // Borrar temporal
+        res.json({
+          message: `Se importaron ${addedCount} productos con éxito.`,
+        });
+      } catch (error) {
+        res.status(500).json({ message: "Error al procesar el archivo" });
+      }
+    });
 };
 
 const generarReporteStock = async (req, res) => {
   try {
-    const [productos] = await db.execute(`
-      SELECT p.*, u.nombre as unidad_nombre
-      FROM productos p
+    const empresa_id = req.user.empresa_id;
+    const [productos] = await db.execute(
+      `
+      SELECT p.*, u.nombre as unidad_nombre FROM productos p
       LEFT JOIN unidads u ON p.unidad_id = u.id
-      ORDER BY p.nombre
-    `);
+      WHERE p.empresa_id = ? ORDER BY p.nombre`,
+      [empresa_id]
+    );
 
     const [empresaRows] = await db.execute(
-      "SELECT * FROM empresas WHERE id = 1"
+      "SELECT * FROM empresas WHERE id = ?",
+      [empresa_id]
     );
-    const empresa = empresaRows[0] || {
-      nombre_empresa: "Sistema de Ventas",
-      tipo_empresa: "Ventas Comercial",
-      correo: "admin@admin.com",
-      telefono: "1138669097",
-      logo: null,
-    };
-
-    // --- LÓGICA CORREGIDA PARA EL LOGO ---
-    let logoFinal = null;
-    if (empresa.logo) {
-      // Obtenemos solo el nombre del archivo (por si viene con rutas raras de la DB)
-      const nombreArchivo = path.basename(empresa.logo);
-      // Construimos la ruta absoluta hacia src/assets/img/
-      const rutaAbsolutaLogo = path.join(
-        process.cwd(),
-        "src",
-        "assets",
-        "img",
-        nombreArchivo
-      );
-
-      // Verificamos si el archivo existe físicamente para no romper el PDF
-      if (fs.existsSync(rutaAbsolutaLogo)) {
-        logoFinal = rutaAbsolutaLogo;
-      } else {
-        console.warn(
-          "Advertencia: El logo no se encontró en:",
-          rutaAbsolutaLogo
-        );
-      }
-    }
-    // ---------------------------------------
-
-    let stockValorizado = 0;
-    const stockPorUnidad = {};
-    productos.forEach((p) => {
-      stockValorizado +=
-        parseFloat(p.stock || 0) * parseFloat(p.precio_compra || 0);
-      const unidad = p.unidad_nombre || "Unidad";
-      if (!stockPorUnidad[unidad]) stockPorUnidad[unidad] = 0;
-      stockPorUnidad[unidad] += parseFloat(p.stock || 0);
-    });
-
-    const pdfMake = require("pdfmake");
-    const printer = new pdfMake({
-      Roboto: {
-        normal: "Helvetica",
-        bold: "Helvetica-Bold",
-        italics: "Helvetica-Oblique",
-        bolditalics: "Helvetica-BoldOblique",
-      },
-    });
+    const empresa = empresaRows[0];
 
     const body = [
       [
@@ -421,208 +418,55 @@ const generarReporteStock = async (req, res) => {
         { text: "Código", style: "tableHeader", alignment: "center" },
         { text: "Producto", style: "tableHeader", alignment: "center" },
         { text: "Stock", style: "tableHeader", alignment: "center" },
-        { text: "Precio Compra", style: "tableHeader", alignment: "center" },
-        { text: "Precio Venta", style: "tableHeader", alignment: "center" },
-        { text: "Fecha Ingreso", style: "tableHeader", alignment: "center" },
+        { text: "P. Venta", style: "tableHeader", alignment: "center" },
       ],
     ];
 
     productos.forEach((p, i) => {
-      const fecha = p.created_at
-        ? new Date(p.created_at).toLocaleDateString("es-AR")
-        : "";
       body.push([
-        { text: (i + 1).toString(), alignment: "center", fontSize: 9 },
-        { text: p.codigo || "", alignment: "left", fontSize: 9 },
-        { text: p.nombre || "", alignment: "left", fontSize: 9 },
-        { text: (p.stock || 0).toString(), alignment: "center", fontSize: 9 },
+        { text: (i + 1).toString(), alignment: "center" },
+        { text: p.codigo || "", alignment: "center" },
+        { text: p.nombre || "" },
+        { text: (p.stock || 0).toString(), alignment: "center" },
         {
-          text: `$ ${parseFloat(p.precio_compra || 0).toLocaleString("es-AR", {
-            minimumFractionDigits: 2,
-          })}`,
+          text: `$ ${parseFloat(p.precio_venta).toLocaleString("es-AR")}`,
           alignment: "right",
-          fontSize: 9,
         },
-        {
-          text: `$ ${parseFloat(p.precio_venta || 0).toLocaleString("es-AR", {
-            minimumFractionDigits: 2,
-          })}`,
-          alignment: "right",
-          fontSize: 9,
-        },
-        { text: fecha, alignment: "center", fontSize: 9 },
       ]);
     });
 
     const docDefinition = {
       pageSize: "A4",
-      pageMargins: [40, 120, 40, 60],
-      header: (currentPage) => ({
-        margin: [40, 30, 40, 0],
-        table: {
-          widths: [150, "*", 100],
-          body: [
-            [
-              {
-                stack: [
-                  { text: empresa.nombre_empresa, bold: true, fontSize: 10 },
-                  { text: empresa.tipo_empresa, fontSize: 8 },
-                  { text: empresa.correo, fontSize: 8 },
-                  { text: empresa.telefono, fontSize: 8 },
-                ],
-                alignment: "left",
-              },
-              {
-                text: "SISTEMA DE VENTAS",
-                alignment: "center",
-                fontSize: 18,
-                bold: true,
-                margin: [0, 10, 0, 0],
-              },
-              {
-                // Usamos logoFinal si existe, sino un cuadro vacío
-                stack: logoFinal
-                  ? [{ image: logoFinal, width: 60, alignment: "right" }]
-                  : [
-                      {
-                        text: "SIN LOGO",
-                        color: "#ccc",
-                        alignment: "right",
-                        margin: [0, 10, 0, 0],
-                      },
-                    ],
-              },
-            ],
-          ],
-        },
-        layout: "noBorders",
-      }),
       content: [
         {
-          text: "Reporte de productos valorizados",
+          text: `Reporte de Stock - ${empresa.nombre_empresa}`,
           fontSize: 16,
           bold: true,
-          margin: [0, 0, 0, 5],
+          margin: [0, 0, 0, 10],
         },
         {
-          canvas: [
-            {
-              type: "line",
-              x1: 0,
-              y1: 0,
-              x2: 515,
-              y2: 0,
-              lineWidth: 1,
-              lineColor: "#999",
-            },
-          ],
-          margin: [0, 0, 0, 15],
-        },
-        {
-          table: {
-            headerRows: 1,
-            widths: [25, 80, "*", 35, 75, 75, 70],
-            body: body,
-          },
-          layout: {
-            hLineWidth: (i, node) =>
-              i === 0 || i === node.table.body.length ? 0 : 0.5,
-            vLineWidth: () => 0,
-            hLineColor: () => "#ddd",
-            paddingTop: () => 4,
-            paddingBottom: () => 4,
-            fillColor: (i) => (i === 0 ? "#eeeeee" : null),
-          },
-        },
-        {
-          margin: [0, 20, 0, 0],
-          columns: [
-            { width: "*", text: "" },
-            {
-              width: 250,
-              table: {
-                widths: ["*", "auto"],
-                body: [
-                  [
-                    {
-                      text: "Total Stock Valorizado:",
-                      alignment: "right",
-                      bold: true,
-                      fontSize: 10,
-                    },
-                    {
-                      text: `$ ${parseFloat(stockValorizado).toLocaleString(
-                        "es-AR",
-                        { minimumFractionDigits: 2 }
-                      )}`,
-                      alignment: "right",
-                      bold: true,
-                      fontSize: 10,
-                    },
-                  ],
-                  [
-                    {
-                      text: "Total Productos:",
-                      alignment: "right",
-                      bold: true,
-                      fontSize: 10,
-                    },
-                    {
-                      text: productos.length.toString(),
-                      alignment: "right",
-                      bold: true,
-                      fontSize: 10,
-                    },
-                  ],
-                  ...Object.entries(stockPorUnidad).map(([unidad, stock]) => [
-                    {
-                      text: `Stock Total (${unidad}):`,
-                      alignment: "right",
-                      bold: true,
-                      fontSize: 10,
-                    },
-                    {
-                      text: stock.toFixed(2),
-                      alignment: "right",
-                      bold: true,
-                      fontSize: 10,
-                    },
-                  ]),
-                ],
-              },
-              layout: "noBorders",
-            },
-          ],
+          table: { headerRows: 1, widths: [30, 100, "*", 50, 80], body: body },
         },
       ],
-      styles: {
-        tableHeader: { bold: true, fontSize: 10, color: "black" },
-      },
-      defaultStyle: { font: "Roboto" },
+      defaultStyle: { font: "Roboto", fontSize: 10 },
     };
 
     const pdfDoc = printer.createPdfKitDocument(docDefinition);
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", 'inline; filename="reporte.pdf"');
     pdfDoc.pipe(res);
     pdfDoc.end();
   } catch (error) {
-    console.error("Error al generar reporte:", error);
-    res
-      .status(500)
-      .json({ message: "Error al generar el reporte", error: error.message });
+    res.status(500).send("Error al generar reporte");
   }
 };
 
 const generarEtiquetas = async (req, res) => {
   try {
     const { id } = req.params;
-    const { cantidad = 12 } = req.query; // Cantidad solicitada
-
+    const { cantidad = 12 } = req.query;
     const producto = await Producto.findById(id);
-    if (!producto) return res.status(404).send("Producto no encontrado");
+    if (!producto) return res.status(404).send("No encontrado");
 
-    // Generar la imagen del código de barras
     const barcodeBuffer = await bwipjs.toBuffer({
       bcid: "code128",
       text: producto.codigo,
@@ -631,48 +475,35 @@ const generarEtiquetas = async (req, res) => {
       includetext: true,
       textxalign: "center",
     });
-
     const barcodeBase64 = `data:image/png;base64,${barcodeBuffer.toString(
       "base64"
     )}`;
 
     const etiquetas = [];
-    const totalEtiquetas = parseInt(cantidad);
-
-    for (let i = 0; i < totalEtiquetas; i++) {
+    for (let i = 0; i < parseInt(cantidad); i++) {
       etiquetas.push({
-        // Quitamos el .substring(0, 25) para que entre todo el nombre
         stack: [
           {
             text: producto.nombre.toUpperCase(),
-            fontSize: 7.5, // Bajamos un poquito el tamaño para que entre mejor
+            fontSize: 7,
             bold: true,
             alignment: "center",
-            margin: [0, 2, 0, 2], // Margen arriba y abajo del nombre
           },
           {
             text: `$ ${parseFloat(producto.precio_venta).toLocaleString(
-              "es-AR",
-              { minimumFractionDigits: 2 }
+              "es-AR"
             )}`,
-            fontSize: 13,
+            fontSize: 12,
             bold: true,
             alignment: "center",
             color: "#1a73e8",
           },
-          {
-            image: barcodeBase64,
-            width: 105,
-            alignment: "center",
-            margin: [0, 4, 0, 0],
-          },
+          { image: barcodeBase64, width: 100, alignment: "center" },
         ],
-        margin: [2, 5, 2, 5], // Margen interno de la celda
-        minHeight: 80, // Altura mínima para que todas las etiquetas sean uniformes
+        margin: [5, 5, 5, 5],
       });
     }
 
-    // Agrupar de a 3 etiquetas por fila
     const tableBody = [];
     for (let i = 0; i < etiquetas.length; i += 3) {
       tableBody.push([
@@ -684,43 +515,27 @@ const generarEtiquetas = async (req, res) => {
 
     const docDefinition = {
       pageSize: "A4",
-      pageMargins: [30, 40, 30, 40],
-      content: [
-        {
-          table: {
-            widths: ["33%", "33%", "33%"],
-            body: tableBody,
-          },
-          layout: {
-            hLineWidth: (i) => 0.5,
-            vLineWidth: (i) => 0.5,
-            hLineColor: () => "#dddddd",
-            vLineColor: () => "#dddddd",
-            paddingLeft: () => 5,
-            paddingRight: () => 5,
-            paddingTop: () => 5,
-            paddingBottom: () => 5,
-          },
-        },
-      ],
+      content: [{ table: { widths: ["33%", "33%", "33%"], body: tableBody } }],
       defaultStyle: { font: "Roboto" },
     };
-
     const pdfDoc = printer.createPdfKitDocument(docDefinition);
     res.setHeader("Content-Type", "application/pdf");
     pdfDoc.pipe(res);
     pdfDoc.end();
-
-    // Log de auditoría
-    await registrarLog(
-      req,
-      "IMPRIMIR",
-      "PRODUCTOS",
-      `Generación de ${cantidad} etiquetas para: ${producto.nombre}`
-    );
   } catch (error) {
-    console.error("Error etiquetas:", error);
-    res.status(500).send("Error al generar las etiquetas");
+    res.status(500).send("Error");
+  }
+};
+
+const countProductos = async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      "SELECT COUNT(*) AS total FROM productos WHERE empresa_id = ?",
+      [req.user.empresa_id]
+    );
+    res.json({ total: rows[0].total });
+  } catch (error) {
+    res.json({ total: 0 });
   }
 };
 
