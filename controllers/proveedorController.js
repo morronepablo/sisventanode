@@ -1,6 +1,9 @@
 // controllers/proveedorController.js
 const Proveedor = require("../models/Proveedor");
 const db = require("../config/db");
+const pdf = require("html-pdf");
+const path = require("path");
+const fs = require("fs");
 const { registrarLog } = require("../utils/logger"); // 👈 1. Importamos el logger
 const { calcularDiferencias } = require("../utils/differences"); // 👈 1. Importar la utilidad
 
@@ -256,6 +259,76 @@ const deleteProveedor = async (req, res) => {
   console.log("--- FIN DELETE PROVEEDOR ---");
 };
 
+const getInformeCuentasPorPagar = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+    const query = `
+      SELECT 
+        p.id, p.empresa, p.marca, p.contacto, p.telefono,
+        SUM(c.precio_total) as total_comprado,
+        SUM(c.deuda) as saldo_pendiente,
+        COUNT(c.id) as facturas_pendientes
+      FROM proveedors p
+      INNER JOIN compras c ON p.id = c.proveedor_id
+      WHERE p.empresa_id = ? AND c.deuda > 0
+      GROUP BY p.id
+      ORDER BY saldo_pendiente DESC
+    `;
+    const [rows] = await db.execute(query, [empresa_id]);
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ message: "Error al generar el informe." });
+  }
+};
+
+const generarReporteCuentasPorPagarPDF = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+    const [empRows] = await db.execute("SELECT * FROM empresas WHERE id = ?", [
+      empresa_id,
+    ]);
+    const empresa = empRows[0];
+
+    const query = `
+      SELECT p.empresa, p.marca, SUM(c.deuda) as saldo
+      FROM proveedors p
+      INNER JOIN compras c ON p.id = c.proveedor_id
+      WHERE p.empresa_id = ? AND c.deuda > 0
+      GROUP BY p.id ORDER BY saldo DESC`;
+    const [datos] = await db.execute(query, [empresa_id]);
+
+    let filas = "";
+    let totalDeuda = 0;
+    datos.forEach((d, i) => {
+      totalDeuda += parseFloat(d.saldo);
+      filas += `<tr><td>${i + 1}</td><td>${d.empresa}</td><td>${
+        d.marca || "-"
+      }</td><td style="text-align:right; color:#d33; font-weight:bold">$ ${parseFloat(
+        d.saldo
+      ).toLocaleString("es-AR")}</td></tr>`;
+    });
+
+    const html = `<html><head><style>body{font-family:Helvetica;font-size:12px}.header{border-bottom:2px solid #007bff} table{width:100%; border-collapse:collapse; margin-top:20px} th{background:#343a40; color:#fff; padding:8px} td{padding:8px; border:1px solid #eee}</style></head>
+    <body><div class="header"><h1>${
+      empresa.nombre_empresa
+    }</h1><h3>Informe de Cuentas por Pagar (Deudas a Proveedores)</h3></div>
+    <table><thead><tr><th>#</th><th>Proveedor</th><th>Marca</th><th>Saldo a Pagar</th></tr></thead><tbody>${filas}</tbody></table>
+    <h2 style="text-align:right; margin-top:30px;">TOTAL COMPROMISOS: $ ${totalDeuda.toLocaleString(
+      "es-AR"
+    )}</h2>
+    </body></html>`;
+
+    pdf
+      .create(html, { format: "A4", orientation: "portrait", border: "10mm" })
+      .toBuffer((err, buffer) => {
+        res.setHeader("Content-Type", "application/pdf");
+        res.send(buffer);
+      });
+  } catch (e) {
+    res.status(500).send("Error interno");
+  }
+};
+
 const countProveedores = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
@@ -301,6 +374,8 @@ module.exports = {
   getProveedoresConDeuda,
   getMovimientos,
   deleteProveedor,
+  getInformeCuentasPorPagar,
+  generarReporteCuentasPorPagarPDF,
   countProveedores,
   getProveedoresSummary,
 };

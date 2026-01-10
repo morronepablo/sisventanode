@@ -742,6 +742,303 @@ const getReciboPagoTicket = async (req, res) => {
   }
 };
 
+const getInformeCobranzas = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+    const query = `
+      SELECT 
+        c.id, c.nombre_cliente, c.telefono,
+        SUM(CASE WHEN ct.tipo = 'deuda' THEN ct.importe ELSE 0 END) as total_deuda,
+        SUM(CASE WHEN ct.tipo = 'pago' THEN ct.importe ELSE 0 END) as total_pagos,
+        (SUM(CASE WHEN ct.tipo = 'deuda' THEN ct.importe ELSE 0 END) - 
+         SUM(CASE WHEN ct.tipo = 'pago' THEN ct.importe ELSE 0 END)) as saldo_pend,
+        MIN(CASE WHEN ct.tipo = 'deuda' THEN ct.fecha ELSE NULL END) as fecha_deuda_antigua
+      FROM clientes c
+      INNER JOIN compras_cta_cte ct ON c.id = ct.cliente_id
+      WHERE c.empresa_id = ?
+      GROUP BY c.id
+      HAVING saldo_pend > 0
+      ORDER BY saldo_pend DESC
+    `;
+    const [rows] = await db.execute(query, [empresa_id]);
+
+    const result = rows.map((r) => {
+      const hoy = new Date();
+      const fechaD = new Date(r.fecha_deuda_antigua);
+      const dias = Math.floor((hoy - fechaD) / (1000 * 60 * 60 * 24));
+      return { ...r, dias_mora: dias > 0 ? dias : 0 };
+    });
+
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const generarReporteCobranzasPDF = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+    const [empRows] = await db.execute("SELECT * FROM empresas WHERE id = ?", [
+      empresa_id,
+    ]);
+    const empresa = empRows[0];
+
+    // Reutilizamos la lógica del ranking
+    const query = `
+      SELECT c.nombre_cliente, c.telefono,
+        (SUM(CASE WHEN ct.tipo = 'deuda' THEN ct.importe ELSE 0 END) - 
+         SUM(CASE WHEN ct.tipo = 'pago' THEN ct.importe ELSE 0 END)) as saldo
+      FROM clientes c
+      INNER JOIN compras_cta_cte ct ON c.id = ct.cliente_id
+      WHERE c.empresa_id = ? GROUP BY c.id HAVING saldo > 0 ORDER BY saldo DESC`;
+
+    const [deudores] = await db.execute(query, [empresa_id]);
+
+    let filas = "";
+    let totalCartera = 0;
+    deudores.forEach((d, i) => {
+      totalCartera += parseFloat(d.saldo);
+      filas += `<tr><td>${i + 1}</td><td>${d.nombre_cliente}</td><td>${
+        d.telefono || "-"
+      }</td><td style="text-align:right; color:red; font-weight:bold">$ ${parseFloat(
+        d.saldo
+      ).toLocaleString("es-AR")}</td></tr>`;
+    });
+
+    const html = `<html><head><style>body{font-family:Helvetica;size:12px}.header{border-bottom:2px solid #dc3545} table{width:100%; border-collapse:collapse; margin-top:20px} th{background:#343a40; color:#fff; padding:8px} td{padding:8px; border:1px solid #eee}</style></head>
+    <body><div class="header"><h1>${
+      empresa.nombre_empresa
+    }</h1><h3>Ranking de Cuentas por Cobrar (Deudores)</h3></div>
+    <table><thead><tr><th>#</th><th>Cliente</th><th>Teléfono</th><th>Saldo Pendiente</th></tr></thead><tbody>${filas}</tbody></table>
+    <h2 style="text-align:right">TOTAL CARTERA DEUDORA: $ ${totalCartera.toLocaleString(
+      "es-AR"
+    )}</h2>
+    </body></html>`;
+
+    pdf
+      .create(html, { format: "A4", border: "10mm" })
+      .toBuffer((err, buffer) => {
+        res.setHeader("Content-Type", "application/pdf");
+        res.send(buffer);
+      });
+  } catch (e) {
+    res.status(500).send(e.message);
+  }
+};
+
+const reclamarDeuda = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const empresa_id = req.user.empresa_id;
+
+    // 1. Obtener datos del cliente y su saldo actual
+    const query = `
+      SELECT 
+        c.nombre_cliente, c.telefono,
+        (SUM(CASE WHEN ct.tipo = 'deuda' THEN ct.importe ELSE 0 END) - 
+         SUM(CASE WHEN ct.tipo = 'pago' THEN ct.importe ELSE 0 END)) as saldo
+      FROM clientes c
+      INNER JOIN compras_cta_cte ct ON c.id = ct.cliente_id
+      WHERE c.id = ? AND c.empresa_id = ?
+      GROUP BY c.id`;
+
+    const [rows] = await db.execute(query, [id, empresa_id]);
+
+    if (rows.length === 0)
+      return res
+        .status(404)
+        .json({ message: "Cliente no encontrado o sin deuda" });
+
+    const cliente = rows[0];
+    const [empresa] = await db.execute(
+      "SELECT nombre_empresa FROM empresas WHERE id = ?",
+      [empresa_id]
+    );
+
+    // 2. Validar que tenga teléfono
+    if (!cliente.telefono) {
+      return res
+        .status(400)
+        .json({ message: "El cliente no tiene un teléfono registrado." });
+    }
+
+    // 3. Construir el mensaje
+    const mensaje =
+      `🔔 *RECORDATORIO DE PAGO* 🔔\n\n` +
+      `Estimado/a *${cliente.nombre_cliente}*,\n` +
+      `Le informamos que registra un saldo pendiente de *${new Intl.NumberFormat(
+        "es-AR",
+        { style: "currency", currency: "ARS" }
+      ).format(cliente.saldo)}* en nuestra tienda.\n\n` +
+      `Le agradeceríamos que se acerque a la brevedad para regularizar su situación.\n\n` +
+      `Atentamente,\n` +
+      `*${empresa[0].nombre_empresa}*`;
+
+    // 4. Enviar mediante el bot (sendWS ya limpia el número internamente)
+    await sendWS(cliente.telefono, mensaje);
+
+    // 5. Registrar en Log
+    await registrarLog(
+      req,
+      "WHATSAPP",
+      "CLIENTES",
+      `Se envió reclamo de deuda automático a ${cliente.nombre_cliente}. Monto: $${cliente.saldo}`
+    );
+
+    res.json({
+      success: true,
+      message: "Mensaje de reclamo enviado correctamente.",
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Error al enviar el mensaje" });
+  }
+};
+
+const generarEstadoCuentaPDF = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const empresa_id = req.user.empresa_id;
+
+    // 1. Datos de Empresa y Cliente
+    const [empRows] = await db.execute("SELECT * FROM empresas WHERE id = ?", [
+      empresa_id,
+    ]);
+    const [cliRows] = await db.execute("SELECT * FROM clientes WHERE id = ?", [
+      id,
+    ]);
+    const empresa = empRows[0];
+    const cliente = cliRows[0];
+
+    if (!cliente) return res.status(404).send("Cliente no encontrado");
+
+    // 2. Obtener toda la historia (Ventas y Pagos)
+    // Buscamos deudas y pagos en la tabla compras_cta_cte
+    const [movimientos] = await db.execute(
+      `SELECT fecha, tipo, importe, metodo_pago, created_at 
+       FROM compras_cta_cte 
+       WHERE cliente_id = ? AND empresa_id = ? 
+       ORDER BY fecha ASC, created_at ASC`,
+      [id, empresa_id]
+    );
+
+    // 3. Preparar Logo
+    let logoBase64 = "";
+    try {
+      if (empresa.logo) {
+        const logoPath = path.join(
+          __dirname,
+          "../src/assets/img",
+          empresa.logo
+        );
+        if (fs.existsSync(logoPath)) {
+          const bitmap = fs.readFileSync(logoPath);
+          logoBase64 = `data:image/png;base64,${bitmap.toString("base64")}`;
+        }
+      }
+    } catch (e) {}
+
+    // 4. Construir filas y calcular Saldo Progresivo
+    let filas = "";
+    let saldoAcumulado = 0;
+
+    movimientos.forEach((m) => {
+      const esDeuda = m.tipo === "deuda";
+      const monto = parseFloat(m.importe);
+
+      if (esDeuda) saldoAcumulado += monto;
+      else saldoAcumulado -= monto;
+
+      filas += `
+        <tr>
+          <td style="text-align:center">${new Date(m.fecha).toLocaleDateString(
+            "es-AR"
+          )}</td>
+          <td>${
+            esDeuda
+              ? "COMPRA (Venta Ticket)"
+              : "PAGO (" + m.metodo_pago.toUpperCase() + ")"
+          }</td>
+          <td style="text-align:right">${
+            esDeuda ? "$ " + monto.toLocaleString("es-AR") : "-"
+          }</td>
+          <td style="text-align:right">${
+            !esDeuda ? "$ " + monto.toLocaleString("es-AR") : "-"
+          }</td>
+          <td style="text-align:right; font-weight:bold">$ ${saldoAcumulado.toLocaleString(
+            "es-AR"
+          )}</td>
+        </tr>`;
+    });
+
+    const html = `
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <style>
+          body { font-family: Helvetica; font-size: 11px; color: #333; }
+          .header { border-bottom: 2px solid #007bff; padding: 10px; margin-bottom: 20px; }
+          .table { width: 100%; border-collapse: collapse; }
+          .table th { background-color: #f4f4f4; padding: 8px; border: 1px solid #ddd; }
+          .table td { padding: 8px; border: 1px solid #eee; }
+          .footer { position: fixed; bottom: 0; width: 100%; text-align: center; font-size: 9px; color: #999; }
+          .resumen { text-align: right; margin-top: 20px; font-size: 14px; }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <table style="width:100%">
+            <tr>
+              <td><h1>ESTADO DE CUENTA</h1><p>${empresa.nombre_empresa}</p></td>
+              <td style="text-align:right">${
+                logoBase64 ? `<img src="${logoBase64}" style="width:60px">` : ""
+              }</td>
+            </tr>
+          </table>
+        </div>
+        
+        <div style="margin-bottom: 20px;">
+          <strong>CLIENTE:</strong> ${cliente.nombre_cliente}<br>
+          <strong>CUIL/DNI:</strong> ${cliente.cuil_codigo}<br>
+          <strong>FECHA EMISIÓN:</strong> ${new Date().toLocaleDateString(
+            "es-AR"
+          )}
+        </div>
+
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Fecha</th>
+              <th>Concepto</th>
+              <th>Debe (Compras)</th>
+              <th>Haber (Pagos)</th>
+              <th>Saldo Acumulado</th>
+            </tr>
+          </thead>
+          <tbody>${filas}</tbody>
+        </table>
+
+        <div class="resumen">
+          <strong>SALDO TOTAL PENDIENTE: $ ${saldoAcumulado.toLocaleString(
+            "es-AR"
+          )}</strong>
+        </div>
+
+        <div class="footer">Este documento es un resumen informativo de cuenta corriente.</div>
+      </body>
+      </html>`;
+
+    pdf
+      .create(html, { format: "A4", border: "10mm" })
+      .toBuffer((err, buffer) => {
+        res.setHeader("Content-Type", "application/pdf");
+        res.send(buffer);
+      });
+  } catch (e) {
+    res.status(500).send("Error al generar el estado de cuenta.");
+  }
+};
+
 const countClientes = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
@@ -807,6 +1104,10 @@ module.exports = {
   getHistorialCliente,
   updateCliente,
   getReciboPagoTicket,
+  getInformeCobranzas,
+  generarReporteCobranzasPDF,
+  reclamarDeuda,
+  generarEstadoCuentaPDF,
   countClientes,
   getClientesSummary,
 };

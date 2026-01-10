@@ -1,5 +1,8 @@
 // controllers/arqueoController.js
 const Arqueo = require("../models/Arqueo");
+const path = require("path");
+const fs = require("fs");
+const pdf = require("html-pdf");
 const db = require("../config/db");
 const { registrarLog } = require("../utils/logger"); // 👈 Importamos el logger
 
@@ -218,6 +221,173 @@ const countArqueos = async (req, res) => {
   }
 };
 
+const generarReporte = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    // 1. Obtener datos de la empresa
+    const [empresaRows] = await db.execute(
+      "SELECT * FROM empresas WHERE id = ?",
+      [empresa_id]
+    );
+    const empresa = empresaRows[0];
+    if (!empresa) return res.status(404).send("Empresa no encontrada");
+
+    // 2. SQL CORREGIDO: Sumamos solo de movimiento_cajas para evitar duplicados
+    const query = `
+      SELECT a.*, u.name as usuario_nombre,
+        (SELECT IFNULL(SUM(monto), 0) FROM movimiento_cajas WHERE arqueo_id = a.id AND tipo = 'Ingreso') as ingresos_totales,
+        (SELECT IFNULL(SUM(monto), 0) FROM movimiento_cajas WHERE arqueo_id = a.id AND tipo = 'Egreso') as egresos_totales
+      FROM arqueos a 
+      INNER JOIN users u ON a.usuario_id = u.id 
+      WHERE a.empresa_id = ? 
+      ORDER BY a.fecha_apertura DESC`;
+
+    const [arqueos] = await db.execute(query, [empresa_id]);
+
+    let logoBase64 = "";
+    try {
+      const logoPath = path.join(__dirname, "../src/assets/img", empresa.logo);
+      if (fs.existsSync(logoPath)) {
+        const bitmap = fs.readFileSync(logoPath);
+        logoBase64 = `data:image/png;base64,${bitmap.toString("base64")}`;
+      }
+    } catch (e) {}
+
+    const fmt = (val) =>
+      parseFloat(val || 0).toLocaleString("es-AR", {
+        minimumFractionDigits: 2,
+      });
+    const fmtFecha = (date) =>
+      date
+        ? new Date(date)
+            .toLocaleString("es-AR", { hour12: false })
+            .substring(0, 16)
+        : "-";
+
+    // 3. Construir Filas
+    let filas = "";
+    arqueos.forEach((arq, i) => {
+      const inicial = parseFloat(arq.monto_inicial || 0);
+      const ing = parseFloat(arq.ingresos_totales || 0);
+      const egr = parseFloat(arq.egresos_totales || 0);
+      const final = parseFloat(arq.monto_final || 0);
+
+      const teorico = inicial + ing - egr;
+      const diferencia = arq.fecha_cierre ? teorico - final : teorico;
+
+      filas += `
+        <tr>
+          <td style="text-align:center">${i + 1}</td>
+          <td style="text-align:center">${fmtFecha(arq.fecha_apertura)}</td>
+          <td style="text-align:right">$ ${fmt(inicial)}</td>
+          <td style="text-align:center">${
+            arq.fecha_cierre ? fmtFecha(arq.fecha_cierre) : "–"
+          }</td>
+          <td style="text-align:right">${
+            arq.fecha_cierre ? "$ " + fmt(final) : "–"
+          }</td>
+          <td style="text-align:right">$ ${fmt(arq.ventas_efectivo)}</td>
+          <td style="text-align:right">$ ${fmt(arq.ventas_tarjeta)}</td>
+          <td style="text-align:right">$ ${fmt(arq.ventas_mercadopago)}</td>
+          <td style="font-size: 7.5px; color: #666;">${
+            arq.description || arq.descripcion || ""
+          }</td>
+          
+          <!-- COLUMNA MOVIMIENTOS ESTILO WEB -->
+          <td style="padding: 0;">
+             <table style="width: 100%; border: none; border-collapse: collapse; margin: 0; padding: 0;">
+                <tr style="font-size: 7px; font-weight: bold; text-align: center;">
+                    <td style="border:none; color: #28a745; padding-bottom: 2px;">Ingresos</td>
+                    <td style="border:none; color: #dc3545; padding-bottom: 2px;">Egresos</td>
+                    <td style="border:none; color: #fd7e14; padding-bottom: 2px;">Dif.</td>
+                </tr>
+                <tr style="font-size: 7.5px; text-align: center;">
+                    <td style="border:none; color: #28a745;">$ ${fmt(ing)}</td>
+                    <td style="border:none; color: #dc3545;">$ ${fmt(egr)}</td>
+                    <td style="border:none; color: #fd7e14; font-weight: bold;">$ ${fmt(
+                      diferencia
+                    )}</td>
+                </tr>
+             </table>
+          </td>
+
+          <td style="text-align:center">${arq.usuario_nombre}</td>
+        </tr>`;
+    });
+
+    const htmlContent = `
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <style>
+          body { font-family: 'Helvetica', Arial, sans-serif; font-size: 9px; color: #333; margin: 0; padding: 0; }
+          .header { border-bottom: 2px solid #007bff; padding: 10px; margin-bottom: 10px; }
+          .table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+          .table th { background-color: #343a40; color: #fff; padding: 6px 2px; font-size: 8px; border: 1px solid #333; text-transform: uppercase; }
+          .table td { padding: 4px 2px; border: 1px solid #ccc; vertical-align: middle; font-size: 9px; word-wrap: break-word; }
+          #pageFooter { position: fixed; bottom: -15px; left: 0; right: 0; text-align: center; font-size: 8px; color: #999; }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <table style="width:100%">
+            <tr>
+              <td style="width:70%">
+                <h1 style="margin:0; font-size: 16px;">${
+                  empresa.nombre_empresa
+                }</h1>
+                <p style="margin:2px 0; font-size: 10px;">Reporte de Arqueos - Histórico de Caja</p>
+              </td>
+              <td style="text-align:right">
+                ${
+                  logoBase64
+                    ? `<img src="${logoBase64}" style="width:55px">`
+                    : ""
+                }
+              </td>
+            </tr>
+          </table>
+        </div>
+        <table class="table">
+          <thead>
+            <tr>
+              <th style="width:18px">#</th>
+              <th style="width:75px">Apertura</th>
+              <th style="width:65px">M. Inicial</th>
+              <th style="width:75px">Cierre</th>
+              <th style="width:65px">M. Final</th>
+              <th style="width:50px">Efect.</th>
+              <th style="width:50px">Tarj.</th>
+              <th style="width:50px">M.Pago</th>
+              <th style="width:70px">Descripción</th>
+              <th style="width:160px">Movimientos</th>
+              <th style="width:45px">Usuario</th>
+            </tr>
+          </thead>
+          <tbody>${filas}</tbody>
+        </table>
+        <div id="pageFooter">Generado el ${new Date().toLocaleString()} - Sistema de Ventas</div>
+      </body>
+      </html>`;
+
+    const options = {
+      format: "A4",
+      orientation: "landscape",
+      border: { top: "10mm", right: "5mm", bottom: "12mm", left: "5mm" },
+    };
+
+    const pdf = require("html-pdf");
+    pdf.create(htmlContent, options).toBuffer((err, buffer) => {
+      if (err) return res.status(500).send("Error");
+      res.setHeader("Content-Type", "application/pdf");
+      res.send(buffer);
+    });
+  } catch (e) {
+    res.status(500).send("Error interno");
+  }
+};
+
 const getArqueosSummary = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
@@ -248,6 +418,7 @@ module.exports = {
   updateArqueo,
   storeMovimiento,
   closeArqueo,
+  generarReporte,
   countArqueos,
   getArqueosSummary,
 };

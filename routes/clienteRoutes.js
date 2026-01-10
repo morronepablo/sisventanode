@@ -17,6 +17,10 @@ const {
   getComprasCliente,
   getHistorialCliente,
   updateCliente,
+  getInformeCobranzas,
+  generarReporteCobranzasPDF,
+  reclamarDeuda,
+  generarEstadoCuentaPDF,
 } = require("../controllers/clienteController");
 const authMiddleware = require("../middlewares/authMiddleware");
 
@@ -28,10 +32,13 @@ router.get("/reporte", generarReporte);
 router.get("/count", countClientes);
 router.get("/summary", getClientesSummary);
 router.get("/con-deuda", getClientesConDeuda);
+router.get("/informes/cobranzas", getInformeCobranzas);
+router.get("/informes/cobranzas-pdf", generarReporteCobranzasPDF);
 
 // Rutas de Gestión de Pagos y Tickets
 router.get("/pagos/ticket/:pagoId", getReciboPagoTicket);
 router.put("/pagos/:pagoId", updatePago);
+router.post("/reclamar-deuda/:id", reclamarDeuda);
 
 // Rutas principales de Clientes
 router.get("/", getListadoClientes);
@@ -45,5 +52,6 @@ router.get("/:id/pagos", getGestionPagos);
 router.post("/:id/pagos", registrarPago);
 router.get("/:id/compras", getComprasCliente); // 👈 2. RUTA DE COMPRAS (LA ANTERIOR)
 router.get("/:id/historial", getHistorialCliente); // 👈 3. RUTA DE HISTORIAL (LA NUEVA)
+router.get("/:id/estado-cuenta-pdf", generarEstadoCuentaPDF);
 
 module.exports = router;

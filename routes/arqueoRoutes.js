@@ -9,6 +9,7 @@ const {
   updateArqueo,
   storeMovimiento,
   closeArqueo,
+  generarReporte,
   countArqueos,
   getArqueosSummary,
 } = require("../controllers/arqueoController");
@@ -20,6 +21,7 @@ router.use(authMiddleware);
 // Ahora todas estas rutas son seguras y alimentan al logger
 router.get("/count", countArqueos);
 router.get("/summary", getArqueosSummary);
+router.get("/reporte", generarReporte);
 router.get("/", getAllArqueos);
 router.get("/estado-abierto", checkArqueoAbierto);
 router.post("/", createArqueo);

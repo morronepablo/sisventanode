@@ -46,7 +46,6 @@ client.on("ready", () => {
   console.log("-------------------------------------------------------");
 });
 
-// Función universal para enviar mensajes
 const sendWS = async (numero, mensaje) => {
   try {
     if (qrCodeData !== "CONNECTED") {
@@ -54,11 +53,31 @@ const sendWS = async (numero, mensaje) => {
         "Intento de envío fallido: WhatsApp no está vinculado."
       );
     }
-    // Limpiamos el número por si viene con espacios o símbolos
-    const cleanNumber = numero.replace(/\D/g, "");
-    const chatId = `${cleanNumber}@c.us`;
-    await client.sendMessage(chatId, mensaje);
-    console.log(`Mensaje enviado a ${numero}`);
+
+    // 1. Limpiamos el número (solo números)
+    let cleanNumber = numero.replace(/\D/g, "");
+
+    // 2. Lógica para Argentina: Asegurar formato correcto para búsqueda
+    // Si empieza con 11 (local) le ponemos el 549
+    if (cleanNumber.length === 10 && cleanNumber.startsWith("11")) {
+      cleanNumber = "549" + cleanNumber;
+    }
+
+    // 3. BUSCAMOS EL ID REAL DEL CONTACTO (La clave para evitar el error 'No LID')
+    // Esto resuelve si el número lleva el 9 o no automáticamente
+    const numberId = await client.getNumberId(cleanNumber);
+
+    if (numberId) {
+      // Si WhatsApp encontró al usuario, usamos su ID oficial (_serialized)
+      await client.sendMessage(numberId._serialized, mensaje);
+      console.log(
+        `✅ Mensaje enviado a ${cleanNumber} (ID: ${numberId._serialized})`
+      );
+    } else {
+      console.log(
+        `❌ El número ${cleanNumber} no parece tener WhatsApp o está mal formateado.`
+      );
+    }
   } catch (error) {
     console.error("Error al enviar mensaje de WhatsApp:", error);
   }
