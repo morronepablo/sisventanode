@@ -1,6 +1,8 @@
 // server.js
 require("dotenv").config();
 const express = require("express");
+const http = require("http"); // 👈 1. Importar módulo HTTP nativo
+const { Server } = require("socket.io"); // 👈 2. Importar Server de socket.io
 const bodyParser = require("body-parser");
 const cors = require("cors");
 const helmet = require("helmet");
@@ -10,6 +12,26 @@ const db = require("./config/db");
 const { getQR, logoutWS } = require("./utils/whatsapp");
 
 const app = express();
+const server = http.createServer(app); // 👈 3. Crear servidor HTTP usando Express
+
+// 4. Configurar Socket.io con CORS (muy importante)
+const io = new Server(server, {
+  cors: {
+    origin: "*", // En producción pon la URL de Vercel
+    methods: ["GET", "POST"],
+  },
+});
+
+// 5. Hacer que 'io' sea accesible desde los controladores
+app.set("socketio", io);
+
+io.on("connection", (socket) => {
+  console.log("👤 Usuario conectado al canal de tiempo real:", socket.id);
+
+  socket.on("disconnect", () => {
+    console.log("user disconnected");
+  });
+});
 
 // Aumentar el límite del body-parser
 app.use(bodyParser.json({ limit: "50mb" }));
@@ -104,6 +126,12 @@ app.get("/", (req, res) => {
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`);
+// app.listen(PORT, () => {
+//   console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`);
+// });
+
+// ❌ ANTES DECÍA: app.listen(PORT, ...
+// ✅ AHORA DEBE DECIR:
+server.listen(PORT, () => {
+  console.log(`🚀 Servidor con Real-Time en http://localhost:${PORT}`);
 });

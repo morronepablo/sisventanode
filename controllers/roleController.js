@@ -189,6 +189,10 @@ const createRole = async (req, res) => {
       name,
     ]);
 
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
+
     // REGISTRO DE LOG
     await registrarLog(
       req,
@@ -238,6 +242,10 @@ const updateRole = async (req, res) => {
       [name, id]
     );
 
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
+
     // 4. REGISTRO DE LOG DETALLADO
     await registrarLog(
       req,
@@ -283,6 +291,10 @@ const deleteRole = async (req, res) => {
     const roleName = roleRows.length > 0 ? roleRows[0].name : "ID " + id;
 
     const [result] = await db.execute("DELETE FROM roles WHERE id = ?", [id]);
+
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
 
     await registrarLog(
       req,

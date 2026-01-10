@@ -52,6 +52,10 @@ const createCliente = async (req, res) => {
       empresa_id,
     });
 
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
+
     await registrarLog(
       req,
       "CREAR",
@@ -217,6 +221,10 @@ const registrarPago = async (req, res) => {
       sendWS(telefonoDestino, msg);
     }
 
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
+
     // 5. LOG DE AUDITORÍA
     await registrarLog(
       req,
@@ -339,6 +347,10 @@ const updatePago = async (req, res) => {
 
       sendWS(telefonoDestino, msg);
     }
+
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
 
     await registrarLog(
       req,
@@ -577,6 +589,10 @@ const updateCliente = async (req, res) => {
         empresa_id,
       ]
     );
+
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
 
     await registrarLog(
       req,

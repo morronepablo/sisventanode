@@ -162,6 +162,10 @@ const createProducto = async (req, res) => {
       }
     }
 
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
+
     await registrarLog(
       req,
       "CREAR",
@@ -283,6 +287,10 @@ const updateProducto = async (req, res) => {
       "empresa_id",
     ]);
 
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
+
     await registrarLog(
       req,
       "EDITAR",
@@ -324,6 +332,11 @@ const deleteProducto = async (req, res) => {
     }
 
     await Producto.deleteById(id);
+
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
+
     await registrarLog(
       req,
       "ELIMINAR",

@@ -56,6 +56,10 @@ const createUnidad = async (req, res) => {
       empresa_id: req.user.empresa_id,
     });
 
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
+
     // REGISTRO DE LOG DETALLADO
     await registrarLog(
       req,
@@ -109,6 +113,10 @@ const updateUnidad = async (req, res) => {
     if (!updated)
       return res.status(404).json({ message: "Unidad no encontrada" });
 
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
+
     // 4. REGISTRO DE LOG DETALLADO
     await registrarLog(
       req,
@@ -147,6 +155,10 @@ const deleteUnidad = async (req, res) => {
     const nombreUnidad = unidadABorrar ? unidadABorrar.nombre : "ID " + id;
 
     const deleted = await Unidad.deleteById(id);
+
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
 
     await registrarLog(
       req,

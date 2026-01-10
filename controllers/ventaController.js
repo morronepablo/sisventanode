@@ -140,6 +140,10 @@ const storeVenta = async (req, res) => {
     // 2. Guardar la venta
     const venta_id = await Venta.store(req.body, req.user.id, empresa_id);
 
+    // 👈 EMITIR EVENTO EN TIEMPO REAL
+    const io = req.app.get("socketio");
+    io.emit("update-dashboard");
+
     console.log(`[VENTAS] Venta guardada con éxito. ID: ${venta_id}`);
 
     // 3. OBTENER EL TELÉFONO (Esto es lo que faltaba definir)
@@ -1877,6 +1881,67 @@ const updateTmpVentaQuantity = async (req, res) => {
   }
 };
 
+const enviarTicketPorWhatsApp = async (req, res) => {
+  try {
+    const { id } = req.params; // ID de la venta
+    const empresa_id = req.user.empresa_id;
+
+    // 1. Obtener datos de la venta y del cliente
+    const [rows] = await db.execute(
+      `SELECT v.id, v.precio_total, c.nombre_cliente, c.telefono 
+       FROM ventas v 
+       INNER JOIN clientes c ON v.cliente_id = c.id 
+       WHERE v.id = ? AND v.empresa_id = ?`,
+      [id, empresa_id]
+    );
+
+    if (rows.length === 0)
+      return res.status(404).json({ message: "Venta no encontrada" });
+    const venta = rows[0];
+
+    // 2. Validar si es Consumidor Final o no tiene teléfono
+    if (venta.telefono === "99999999" || !venta.telefono) {
+      return res
+        .status(400)
+        .json({
+          message:
+            "El cliente es Consumidor Final o no tiene un teléfono válido.",
+        });
+    }
+
+    // 3. Preparar la URL del ticket (Usando el token para que el cliente pueda verlo)
+    const token = req.query.token || req.headers.authorization?.split(" ")[1];
+    const baseUrl =
+      process.env.NODE_ENV === "production"
+        ? "https://sistema-ventas-backend-3nn3.onrender.com"
+        : "http://localhost:3001";
+
+    const linkTicket = `${baseUrl}/api/ventas/ticket/${venta.id}?token=${token}`;
+
+    // 4. Construir el mensaje
+    const mensaje =
+      `¡Hola *${venta.nombre_cliente}*! 👋\n\n` +
+      `Gracias por tu compra. Te adjuntamos el link para que puedas descargar tu comprobante electrónico:\n\n` +
+      `📄 *Ticket:* T-${venta.id.toString().padStart(8, "0")}\n` +
+      `💰 *Monto:* $${parseFloat(venta.precio_total).toLocaleString(
+        "es-AR"
+      )}\n\n` +
+      `🔗 *Link:* ${linkTicket}\n\n` +
+      `¡Esperamos verte pronto!`;
+
+    // 5. Enviar mensaje
+    await sendWS(venta.telefono, mensaje);
+
+    res.json({
+      success: true,
+      message: "Ticket enviado por WhatsApp con éxito.",
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Error al enviar el ticket." });
+  }
+};
+
 const countVentas = async (req, res) => {
   try {
     const [rows] = await db.execute("SELECT COUNT(*) AS total FROM ventas");
@@ -2119,6 +2184,7 @@ module.exports = {
   getVentaById,
   getVentaTicket,
   updateTmpVentaQuantity,
+  enviarTicketPorWhatsApp,
   countVentas,
   getVentasSummary,
   getVentasDashboard,

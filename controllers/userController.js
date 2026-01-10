@@ -106,6 +106,10 @@ const createUser = async (req, res) => {
       console.log(`[USUARIOS] Roles asignados al ID: ${userId}`);
     }
 
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
+
     // 3. REGISTRO DE LOG
     await registrarLog(
       req,
@@ -175,6 +179,10 @@ const updateUser = async (req, res) => {
       logRoles = ` | ROLES ANTERIORES: [${nombresRolesAnteriores}] ➡️ Sincronizados nuevos roles.`;
     }
 
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
+
     // 6. REGISTRO DE LOG DETALLADO
     await registrarLog(
       req,
@@ -235,6 +243,10 @@ const deleteUser = async (req, res) => {
     if (!deleted) {
       return res.status(404).json({ message: "Usuario no encontrado" });
     }
+
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
 
     await registrarLog(
       req,

@@ -102,6 +102,10 @@ const storeCombo = async (req, res) => {
 
     await connection.commit();
 
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
+
     // LOG DE CREACIÓN DETALLADO
     await registrarLog(
       req,
@@ -185,6 +189,10 @@ const updateCombo = async (req, res) => {
 
     await connection.commit();
 
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
+
     // 7. REGISTRO DE LOG DETALLADO
     await registrarLog(
       req,
@@ -233,6 +241,10 @@ const deleteCombo = async (req, res) => {
       id,
       empresa_id,
     ]);
+
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
 
     await registrarLog(
       req,

@@ -22,6 +22,7 @@ const {
   getInformeMovimientoStock,
   generarInformeMovimientoStockPDF,
   getVentasDashboard,
+  enviarTicketPorWhatsApp,
 } = require("../controllers/ventaController");
 const authMiddleware = require("../middlewares/authMiddleware");
 
@@ -56,5 +57,6 @@ router.get("/deuda-cliente/:id", getDeudaCliente);
 router.post("/", storeVenta);
 router.get("/", getListadoVentas);
 router.get("/:id", getVentaById);
+router.post("/:id/enviar-whatsapp", authMiddleware, enviarTicketPorWhatsApp);
 
 module.exports = router;

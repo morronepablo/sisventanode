@@ -213,6 +213,10 @@ const storeDevolucion = async (req, res) => {
       `[DEVOLUCIONES] Proceso completado exitosamente para ID: ${devolucion_id}`
     );
 
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
+
     // --- REGISTRO DE LOG ---
     await registrarLog(
       req,

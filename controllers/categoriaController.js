@@ -55,6 +55,10 @@ const createCategoria = async (req, res) => {
       descripcion: descripcion || "",
     });
 
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
+
     // REGISTRO DE LOG DETALLADO
     await registrarLog(
       req,
@@ -91,6 +95,10 @@ const updateCategoria = async (req, res) => {
         .status(400)
         .json({ message: "Ya existe otra categoría con ese nombre" });
     }
+
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
 
     // 3. CALCULAR DIFERENCIAS
     const detalleCambios = calcularDiferencias(categoriaAnterior, req.body, [
@@ -144,6 +152,10 @@ const deleteCategoria = async (req, res) => {
     const nombreCat = categoriaABorrar ? categoriaABorrar.nombre : "ID " + id;
 
     const deleted = await Categoria.deleteById(id);
+
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
 
     await registrarLog(
       req,

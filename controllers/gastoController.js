@@ -84,6 +84,10 @@ const storeGasto = async (req, res) => {
     await connection.commit();
     console.log("[GASTOS] Transacción completada con éxito.");
 
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
+
     // --- REGISTRO DE LOG ---
     await registrarLog(
       req,
@@ -165,6 +169,10 @@ const deleteGasto = async (req, res) => {
     await connection.execute("DELETE FROM gastos WHERE id = ?", [id]);
 
     await connection.commit();
+
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
 
     // 4. LOG DE AUDITORÍA
     await registrarLog(

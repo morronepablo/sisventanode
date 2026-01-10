@@ -91,6 +91,10 @@ const storeCompra = async (req, res) => {
       `[COMPRAS] Compra guardada con éxito para empresa ${empresa_id}`
     );
 
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
+
     // REGISTRO DE LOG
     await registrarLog(
       req,
@@ -144,6 +148,10 @@ const updatePrecioCompra = async (req, res) => {
   try {
     const { producto_id, precio_compra } = req.body;
     await Compra.updatePrecioProducto(producto_id, precio_compra);
+
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
 
     // REGISTRO DE LOG
     await registrarLog(

@@ -69,6 +69,10 @@ const createProveedor = async (req, res) => {
 
     const id = await Proveedor.create(datos);
 
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
+
     // REGISTRO DE LOG CON DETALLE INICIAL
     await registrarLog(
       req,
@@ -112,6 +116,10 @@ const updateProveedor = async (req, res) => {
     if (!actualizado) {
       return res.status(404).json({ message: "Proveedor no encontrado" });
     }
+
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
 
     // 5. REGISTRO DE LOG DETALLADO
     await registrarLog(
@@ -159,6 +167,10 @@ const postRegistrarPago = async (req, res) => {
       (acc, item) => acc + parseFloat(item.monto || 0),
       0
     );
+
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
 
     // 3. REGISTRO DE LOG CORREGIDO
     await registrarLog(
@@ -241,6 +253,10 @@ const deleteProveedor = async (req, res) => {
     if (result.affectedRows === 0) {
       return res.status(404).json({ message: "Proveedor no encontrado" });
     }
+
+    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
 
     // 3. LOG DE AUDITORÍA
     await registrarLog(
