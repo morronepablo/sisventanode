@@ -28,6 +28,12 @@ app.set("socketio", io);
 io.on("connection", (socket) => {
   console.log("👤 Usuario conectado al canal de tiempo real:", socket.id);
 
+  // Recibe el código desde el celular y lo emite a todos (a la PC)
+  socket.on("barcode-scanned", (code) => {
+    console.log("Scanner dice:", code);
+    io.emit("remote-scan-result", code);
+  });
+
   socket.on("disconnect", () => {
     console.log("user disconnected");
   });
