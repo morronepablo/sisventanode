@@ -92,6 +92,38 @@ const createArqueo = async (req, res) => {
   console.log("--- FIN APERTURA DE CAJA ---");
 };
 
+// const getArqueoById = async (req, res) => {
+//   const { id } = req.params;
+//   try {
+//     const [arqueo] = await db.execute("SELECT * FROM arqueos WHERE id = ?", [
+//       id,
+//     ]);
+//     if (arqueo.length === 0)
+//       return res.status(404).json({ message: "Arqueo no encontrado" });
+
+//     const [movimientos] = await db.execute(
+//       "SELECT * FROM movimiento_cajas WHERE arqueo_id = ? ORDER BY id DESC",
+//       [id]
+//     );
+
+//     const queryTotales = `
+//             SELECT
+//                 (IFNULL((SELECT SUM(tarjeta) FROM ventas WHERE arqueo_id = ?), 0) + IFNULL((SELECT SUM(monto) FROM pagos WHERE arqueo_id = ? AND metodo_pago = 'tarjeta'), 0)) as total_tarjeta_sistema,
+//                 (IFNULL((SELECT SUM(mercadopago) FROM ventas WHERE arqueo_id = ?), 0) + IFNULL((SELECT SUM(monto) FROM pagos WHERE arqueo_id = ? AND metodo_pago = 'mercadopago'), 0)) as total_mp_sistema,
+//                 (IFNULL((SELECT SUM(transferencia) FROM ventas WHERE arqueo_id = ?), 0) + IFNULL((SELECT SUM(monto) FROM pagos WHERE arqueo_id = ? AND metodo_pago = 'transferencia'), 0)) as total_transf_sistema
+//         `;
+//     const [totales] = await db.execute(queryTotales, [id, id, id, id, id, id]);
+
+//     res.json({
+//       arqueo: arqueo[0],
+//       movimientos: movimientos,
+//       totales_sistema: totales[0],
+//     });
+//   } catch (error) {
+//     res.status(500).json({ message: error.message });
+//   }
+// };
+
 const getArqueoById = async (req, res) => {
   const { id } = req.params;
   try {
@@ -106,12 +138,13 @@ const getArqueoById = async (req, res) => {
       [id]
     );
 
+    // Consulta corregida para traer los totales que el sistema ya conoce
     const queryTotales = `
-            SELECT 
-                (IFNULL((SELECT SUM(tarjeta) FROM ventas WHERE arqueo_id = ?), 0) + IFNULL((SELECT SUM(monto) FROM pagos WHERE arqueo_id = ? AND metodo_pago = 'tarjeta'), 0)) as total_tarjeta_sistema,
-                (IFNULL((SELECT SUM(mercadopago) FROM ventas WHERE arqueo_id = ?), 0) + IFNULL((SELECT SUM(monto) FROM pagos WHERE arqueo_id = ? AND metodo_pago = 'mercadopago'), 0)) as total_mp_sistema,
-                (IFNULL((SELECT SUM(transferencia) FROM ventas WHERE arqueo_id = ?), 0) + IFNULL((SELECT SUM(monto) FROM pagos WHERE arqueo_id = ? AND metodo_pago = 'transferencia'), 0)) as total_transf_sistema
-        `;
+      SELECT 
+        ((SELECT IFNULL(SUM(tarjeta), 0) FROM ventas WHERE arqueo_id = ?) + (SELECT IFNULL(SUM(monto), 0) FROM pagos WHERE arqueo_id = ? AND metodo_pago = 'tarjeta')) as total_tarjeta_sistema,
+        ((SELECT IFNULL(SUM(mercadopago), 0) FROM ventas WHERE arqueo_id = ?) + (SELECT IFNULL(SUM(monto), 0) FROM pagos WHERE arqueo_id = ? AND metodo_pago = 'mercadopago')) as total_mp_sistema,
+        ((SELECT IFNULL(SUM(transferencia), 0) FROM ventas WHERE arqueo_id = ?) + (SELECT IFNULL(SUM(monto), 0) FROM pagos WHERE arqueo_id = ? AND metodo_pago = 'transferencia')) as total_transf_sistema
+    `;
     const [totales] = await db.execute(queryTotales, [id, id, id, id, id, id]);
 
     res.json({
@@ -183,29 +216,111 @@ const storeMovimiento = async (req, res) => {
   console.log("--- FIN MOVIMIENTO MANUAL CAJA ---");
 };
 
+// const closeArqueo = async (req, res) => {
+//   console.log("--- INICIO CIERRE DE CAJA ---");
+//   try {
+//     const { id } = req.params;
+//     const { fecha_cierre, monto_final } = req.body;
+
+//     const cerrado = await Arqueo.close(id, req.body);
+//     if (!cerrado) return res.status(404).json({ message: "No se pudo cerrar" });
+
+//     // REGISTRO DE LOG
+//     await registrarLog(
+//       req,
+//       "EDITAR",
+//       "ARQUEO_CAJA",
+//       `Cierre de caja realizado. ID Arqueo: ${id}. Monto final reportado: $${monto_final}`
+//     );
+
+//     res.json({ message: "Arqueo cerrado exitosamente" });
+//   } catch (error) {
+//     console.error("[ARQUEO ERROR] Fallo al cerrar caja:", error);
+//     res.status(500).json({ message: "Error al cerrar arqueo" });
+//   }
+//   console.log("--- FIN CIERRE DE CAJA ---");
+// };
+
 const closeArqueo = async (req, res) => {
-  console.log("--- INICIO CIERRE DE CAJA ---");
+  console.log("--- INICIO CIERRE DE CAJA CIEGO ---");
+  const { id } = req.params;
+  const {
+    fecha_cierre,
+    monto_final, // Este es el total que el cajero contó (Real)
+    ventas_efectivo,
+    ventas_tarjeta,
+    ventas_mercadopago,
+    ventas_transferencia,
+  } = req.body;
+
+  const connection = await db.getConnection();
+
   try {
-    const { id } = req.params;
-    const { fecha_cierre, monto_final } = req.body;
+    await connection.beginTransaction();
 
-    const cerrado = await Arqueo.close(id, req.body);
-    if (!cerrado) return res.status(404).json({ message: "No se pudo cerrar" });
+    // 1. Obtener Monto Inicial
+    const [arq] = await connection.execute(
+      "SELECT monto_inicial FROM arqueos WHERE id = ?",
+      [id]
+    );
+    const inicial = parseFloat(arq[0].monto_inicial || 0);
 
-    // REGISTRO DE LOG
-    await registrarLog(
-      req,
-      "EDITAR",
-      "ARQUEO_CAJA",
-      `Cierre de caja realizado. ID Arqueo: ${id}. Monto final reportado: $${monto_final}`
+    // 2. Calcular Ingresos y Egresos registrados en el sistema para este arqueo
+    const [movs] = await connection.execute(
+      "SELECT SUM(CASE WHEN tipo = 'Ingreso' THEN monto ELSE -monto END) as neto FROM movimiento_cajas WHERE arqueo_id = ?",
+      [id]
+    );
+    const netoMovimientos = parseFloat(movs[0].neto || 0);
+
+    // 3. Monto Esperado = Inicial + (Ventas + Entradas - Salidas)
+    const monto_esperado = inicial + netoMovimientos;
+
+    // 4. Diferencia = Lo que el cajero contó - Lo que el sistema esperaba
+    const diferencia = monto_final - monto_esperado;
+
+    // 5. Actualizar Arqueo
+    await connection.execute(
+      `UPDATE arqueos SET 
+        monto_final = ?, 
+        monto_esperado = ?, 
+        diferencia = ?, 
+        ventas_efectivo = ?, 
+        ventas_tarjeta = ?, 
+        ventas_mercadopago = ?, 
+        ventas_transferencia = ?, 
+        fecha_cierre = ?,
+        estado = 'Cerrado'
+       WHERE id = ?`,
+      [
+        monto_final,
+        monto_esperado,
+        diferencia,
+        ventas_efectivo,
+        ventas_tarjeta,
+        ventas_mercadopago,
+        ventas_transferencia,
+        fecha_cierre,
+        id,
+      ]
     );
 
-    res.json({ message: "Arqueo cerrado exitosamente" });
+    await connection.commit();
+    console.log(
+      `[ARQUEO] Cerrado. Esperado: ${monto_esperado}, Real: ${monto_final}, Dif: ${diferencia}`
+    );
+
+    res.json({
+      success: true,
+      message: "Arqueo cerrado exitosamente",
+      diferencia: diferencia,
+    });
   } catch (error) {
-    console.error("[ARQUEO ERROR] Fallo al cerrar caja:", error);
-    res.status(500).json({ message: "Error al cerrar arqueo" });
+    await connection.rollback();
+    console.error("[ARQUEO ERROR]", error);
+    res.status(500).json({ success: false, message: error.message });
+  } finally {
+    connection.release();
   }
-  console.log("--- FIN CIERRE DE CAJA ---");
 };
 
 const countArqueos = async (req, res) => {

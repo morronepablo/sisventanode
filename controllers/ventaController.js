@@ -1940,139 +1940,113 @@ const enviarTicketPorWhatsApp = async (req, res) => {
   }
 };
 
-// const getReporteRentabilidad = async (req, res) => {
-//   try {
-//     const { desde, hasta } = req.query;
-//     const empresa_id = req.user.empresa_id;
-
-//     // 1. Totales generales
-//     const [totales] = await db.execute(
-//       `
-//       SELECT
-//         SUM(dv.cantidad * dv.precio_venta) as total_ventas,
-//         SUM(dv.cantidad * dv.precio_compra) as total_costo
-//       FROM detalle_ventas dv
-//       JOIN ventas v ON dv.venta_id = v.id
-//       WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
-//     `,
-//       [empresa_id, desde, hasta]
-//     );
-
-//     // 2. Ranking de productos más rentables
-//     const [ranking] = await db.execute(
-//       `
-//       SELECT
-//         COALESCE(p.nombre, c.nombre) as nombre,
-//         SUM(dv.cantidad) as cantidad,
-//         SUM(dv.cantidad * dv.precio_venta) as total_venta,
-//         SUM(dv.cantidad * (dv.precio_venta - dv.precio_compra)) as ganancia
-//       FROM detalle_ventas dv
-//       JOIN ventas v ON dv.venta_id = v.id
-//       LEFT JOIN productos p ON dv.producto_id = p.id
-//       LEFT JOIN combos c ON dv.combo_id = c.id
-//       WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
-//       GROUP BY dv.producto_id, dv.combo_id, nombre
-//       ORDER BY ganancia DESC
-//       LIMIT 15
-//     `,
-//       [empresa_id, desde, hasta]
-//     );
-
-//     const totalVentas = parseFloat(totales[0].total_ventas || 0);
-//     const totalCosto = parseFloat(totales[0].total_costo || 0);
-
-//     res.json({
-//       totalVentas,
-//       totalCosto,
-//       gananciaNeta: totalVentas - totalCosto,
-//       rankingProductos: ranking.map((r) => ({
-//         ...r,
-//         margen: r.total_venta > 0 ? (r.ganancia / r.total_venta) * 100 : 0,
-//       })),
-//     });
-//   } catch (error) {
-//     res.status(500).json({ message: error.message });
-//   }
-// };
-
 const getReporteRentabilidad = async (req, res) => {
   try {
     const { desde, hasta } = req.query;
     const empresa_id = req.user.empresa_id;
 
-    // 1. Totales generales (Siguen basándose en lo vendido)
+    // 1. Totales generales
     const [totales] = await db.execute(
-      `
-      SELECT 
+      `SELECT 
         IFNULL(SUM(dv.cantidad * dv.precio_venta), 0) as total_ventas,
         IFNULL(SUM(dv.cantidad * dv.precio_compra), 0) as total_costo
       FROM detalle_ventas dv
       JOIN ventas v ON dv.venta_id = v.id
-      WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
-    `,
+      WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?`,
       [empresa_id, desde, hasta]
-    );
-
-    // 2. Ranking de TODOS los productos (Análisis de Inventario + Ventas)
-    // Usamos LEFT JOIN para traer productos que NO se vendieron en ese rango
-    const [ranking] = await db.execute(
-      `
-      SELECT 
-        p.nombre,
-        p.precio_compra as costo_actual,
-        p.precio_venta as precio_actual,
-        IFNULL(SUM(dv_f.cantidad), 0) as cantidad_vendida,
-        IFNULL(SUM(dv_f.cantidad * dv_f.precio_venta), 0) as total_venta_periodo,
-        IFNULL(SUM(dv_f.cantidad * (dv_f.precio_venta - dv_f.precio_compra)), 0) as ganancia_periodo
-      FROM productos p
-      LEFT JOIN (
-        SELECT dv.* 
-        FROM detalle_ventas dv
-        JOIN ventas v ON dv.venta_id = v.id
-        WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
-      ) dv_f ON p.id = dv_f.producto_id
-      WHERE p.empresa_id = ?
-      GROUP BY p.id, p.nombre
-      ORDER BY cantidad_vendida ASC, p.nombre ASC
-    `,
-      [empresa_id, desde, hasta, empresa_id]
     );
 
     const totalVentas = parseFloat(totales[0].total_ventas);
     const totalCosto = parseFloat(totales[0].total_costo);
+    const gananciaNetaTotal = totalVentas - totalCosto;
+
+    // 2. Ranking de PRODUCTOS (Incluyendo combos + Unidades de medida)
+    const [ranking] = await db.execute(
+      `SELECT 
+        t.producto_id,
+        t.nombre,
+        t.unidad,
+        SUM(t.cantidad_total) as cantidad_vendida,
+        SUM(t.ganancia_total) as ganancia_periodo,
+        SUM(t.venta_total) as total_venta_periodo
+      FROM (
+          -- A. VENTAS DIRECTAS
+          SELECT 
+            p.id as producto_id, p.nombre, IFNULL(u.nombre, 'Unid.') as unidad,
+            SUM(dv.cantidad) as cantidad_total,
+            SUM(dv.cantidad * (dv.precio_venta - dv.precio_compra)) as ganancia_total,
+            SUM(dv.cantidad * dv.precio_venta) as venta_total
+          FROM detalle_ventas dv
+          JOIN ventas v ON dv.venta_id = v.id
+          JOIN productos p ON dv.producto_id = p.id
+          LEFT JOIN unidads u ON p.unidad_id = u.id
+          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
+          GROUP BY p.id, p.nombre, u.nombre
+
+          UNION ALL
+
+          -- B. VENTAS POR COMBOS
+          SELECT 
+            p.id as producto_id, p.nombre, IFNULL(u.nombre, 'Unid.') as unidad,
+            SUM(dv.cantidad * cp.cantidad) as cantidad_total,
+            SUM((dv.cantidad * cp.cantidad) * (p.precio_venta - p.precio_compra)) as ganancia_total,
+            SUM((dv.cantidad * cp.cantidad) * p.precio_venta) as venta_total
+          FROM detalle_ventas dv
+          JOIN ventas v ON dv.venta_id = v.id
+          JOIN combo_producto cp ON dv.combo_id = cp.combo_id
+          JOIN productos p ON cp.producto_id = p.id
+          LEFT JOIN unidads u ON p.unidad_id = u.id
+          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
+          GROUP BY p.id, p.nombre, u.nombre
+      ) t
+      GROUP BY t.producto_id, t.nombre, t.unidad`,
+      [empresa_id, desde, hasta, empresa_id, desde, hasta]
+    );
+
+    // 3. Traer todos los productos (con sus unidades)
+    const [todosLosProductos] = await db.execute(
+      `SELECT p.id, p.nombre, IFNULL(u.nombre, 'Unid.') as unidad 
+       FROM productos p 
+       LEFT JOIN unidads u ON p.unidad_id = u.id 
+       WHERE p.empresa_id = ?`,
+      [empresa_id]
+    );
+
+    const rankingCompleto = todosLosProductos.map((p) => {
+      const ventaData = ranking.find((r) => r.producto_id === p.id);
+      const cantidad = ventaData ? parseFloat(ventaData.cantidad_vendida) : 0;
+      const ganancia = ventaData ? parseFloat(ventaData.ganancia_periodo) : 0;
+      const total_venta = ventaData
+        ? parseFloat(ventaData.total_venta_periodo)
+        : 0;
+
+      let margen = 0;
+      if (total_venta > 0) margen = (ganancia / total_venta) * 100;
+
+      let participacion = 0;
+      if (gananciaNetaTotal > 0 && ganancia > 0)
+        participacion = (ganancia / gananciaNetaTotal) * 100;
+
+      return {
+        nombre: p.nombre,
+        unidad: p.unidad, // 👈 Enviamos la unidad al frontend
+        cantidad,
+        ganancia,
+        total_venta,
+        margen,
+        participacion,
+      };
+    });
 
     res.json({
       totalVentas,
       totalCosto,
-      gananciaNeta: totalVentas - totalCosto,
-      rankingProductos: ranking.map((r) => {
-        // Si no se vendió, calculamos el margen teórico basado en el precio actual
-        // Esto ayuda a saber cuánto margen tiene para hacer una oferta
-        const ganancia = parseFloat(r.ganancia_periodo);
-        const venta = parseFloat(r.total_venta_periodo);
-
-        let margen = 0;
-        if (venta > 0) {
-          margen = (ganancia / venta) * 100;
-        } else {
-          // Margen teórico (Precio Actual - Costo Actual)
-          const margenTeorico = r.precio_actual - r.costo_actual;
-          margen =
-            r.precio_actual > 0 ? (margenTeorico / r.precio_actual) * 100 : 0;
-        }
-
-        return {
-          nombre: r.nombre,
-          cantidad: r.cantidad_vendida,
-          total_venta: venta,
-          ganancia: ganancia,
-          margen: margen,
-        };
-      }),
+      gananciaNeta: gananciaNetaTotal,
+      rankingProductos: rankingCompleto.sort((a, b) => b.ganancia - a.ganancia),
     });
   } catch (error) {
-    console.error("Error en reporte rentabilidad:", error);
-    res.status(500).json({ message: "Error interno del servidor" });
+    console.error(error);
+    res.status(500).json({ message: "Error interno" });
   }
 };
 
