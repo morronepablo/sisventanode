@@ -7,8 +7,10 @@ const {
   createProducto,
   updateProducto,
   deleteProducto,
+  getHistorialPrecios,
   countProductos,
   generarReporteStock,
+  updatePreciosMasivo,
   generarEtiquetas,
   importarProductos,
   upload,
@@ -28,7 +30,9 @@ router.use(authMiddleware);
 router.get("/count", countProductos);
 router.get("/", getAllProductos);
 router.get("/bajo-stock", getProductosBajoStock);
+router.post("/update-masivo", updatePreciosMasivo);
 router.get("/:id", getProductoById);
+router.get("/:id/historial-precios", getHistorialPrecios);
 
 router.post("/", upload.single("imagen"), createProducto);
 router.post("/importar", uploadCsv.single("csv_file"), importarProductos);

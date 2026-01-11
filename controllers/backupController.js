@@ -67,6 +67,7 @@ const resetSystem = async (req, res) => {
       "detalle_ventas",
       "devoluciones",
       "gastos",
+      "historial_precios",
       "logs",
       "movimiento_cajas",
       "movimientos",

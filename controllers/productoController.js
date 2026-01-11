@@ -179,106 +179,66 @@ const createProducto = async (req, res) => {
   }
 };
 
-// const updateProducto = async (req, res) => {
-//   console.log("--- INICIO UPDATE PRODUCTO (CLOUDINARY + AUDITORÍA) ---");
-//   try {
-//     const { id } = req.params;
-//     const nuevosDatos = req.body;
-//     const empresa_id = req.user.empresa_id;
-
-//     const productoAnterior = await Producto.findById(id);
-//     if (!productoAnterior)
-//       return res.status(404).json({ message: "Producto no encontrado" });
-
-//     // Auditoría de cambios
-//     const detalleCambios = calcularDiferencias(productoAnterior, nuevosDatos, [
-//       "updated_at",
-//       "created_at",
-//       "imagen",
-//       "id",
-//       "empresa_id",
-//     ]);
-
-//     // Si hay archivo nuevo, usamos req.file.path (Cloudinary), sino la imagen vieja
-//     let imagenUrl = req.file ? req.file.path : productoAnterior.imagen;
-
-//     await Producto.updateById(id, { ...nuevosDatos, imagen: imagenUrl });
-
-//     // Notificación WhatsApp
-//     if (
-//       parseFloat(nuevosDatos.stock) <=
-//       parseFloat(nuevosDatos.stock_minimo || productoAnterior.stock_minimo)
-//     ) {
-//       const telefonoDestino = await getEmpresaPhone(empresa_id);
-//       if (telefonoDestino) {
-//         const mensaje = `⚠️ *AVISO DE STOCK* ⚠️\n\nEl stock del producto *${
-//           productoAnterior.nombre
-//         }* está bajo el mínimo:\n\n*Stock actual:* ${
-//           nuevosDatos.stock
-//         }\n*Mínimo:* ${
-//           nuevosDatos.stock_minimo || productoAnterior.stock_minimo
-//         }`;
-//         sendWS(telefonoDestino, mensaje);
-//       }
-//     }
-
-//     await registrarLog(
-//       req,
-//       "EDITAR",
-//       "PRODUCTOS",
-//       `Editó el producto: ${productoAnterior.nombre}. Cambios: ${detalleCambios}`
-//     );
-//     res.json({ message: "Producto actualizado correctamente" });
-//   } catch (error) {
-//     console.error(error);
-//     res.status(500).json({ message: "Error interno" });
-//   }
-// };
-
 const updateProducto = async (req, res) => {
-  console.log("--- INICIO UPDATE PRODUCTO (LIMPIEZA NUBE) ---");
+  console.log(
+    "--- INICIO UPDATE PRODUCTO (COMPLETO: NUBE + HISTORIAL + WS + IO) ---"
+  );
   try {
     const { id } = req.params;
     const nuevosDatos = req.body;
     const empresa_id = req.user.empresa_id;
 
+    // 1. OBTENER DATOS ACTUALES ANTES DE EDITAR
     const productoAnterior = await Producto.findById(id);
     if (!productoAnterior)
       return res.status(404).json({ message: "No encontrado" });
 
+    // 2. NUEVO: LÓGICA DE HISTORIAL DE PRECIOS
+    // Si el precio de venta que viene en el formulario es distinto al que estaba en la DB
+    if (
+      nuevosDatos.precio_venta &&
+      parseFloat(nuevosDatos.precio_venta) !==
+        parseFloat(productoAnterior.precio_venta)
+    ) {
+      await db.execute(
+        "INSERT INTO historial_precios (producto_id, precio_anterior, precio_nuevo, fecha_cambio) VALUES (?, ?, ?, NOW())",
+        [id, productoAnterior.precio_venta, nuevosDatos.precio_venta]
+      );
+      console.log(
+        `[HISTORIAL] Cambio de precio detectado y registrado para ID: ${id}`
+      );
+    }
+
     let imagenUrl = productoAnterior.imagen;
 
-    // --- LÓGICA DE LIMPIEZA DE CLOUDINARY ---
+    // 3. LÓGICA DE LIMPIEZA DE CLOUDINARY
     if (req.file) {
-      // 1. Si existe una imagen anterior y es de Cloudinary (contiene 'res.cloudinary.com')
+      // Si existe una imagen anterior y es de Cloudinary (contiene 'res.cloudinary.com')
       if (
         productoAnterior.imagen &&
         productoAnterior.imagen.includes("res.cloudinary.com")
       ) {
         try {
           // Extraemos el public_id de la URL.
-          // Ejemplo URL: .../productos_sistema_ventas/v12345/nombre_imagen.jpg
-          // Necesitamos: "productos_sistema_ventas/nombre_imagen"
           const parts = productoAnterior.imagen.split("/");
-          const folderName = parts[parts.length - 2]; // 'productos_sistema_ventas'
-          const fileName = parts[parts.length - 1].split(".")[0]; // 'nombre_imagen'
+          const folderName = parts[parts.length - 2];
+          const fileName = parts[parts.length - 1].split(".")[0];
           const publicId = `${folderName}/${fileName}`;
 
           console.log(`[CLOUDINARY] Borrando imagen anterior: ${publicId}`);
           await cloudinary.uploader.destroy(publicId);
         } catch (error) {
           console.error("Error al borrar imagen vieja en Cloudinary:", error);
-          // No bloqueamos el proceso, solo avisamos en consola
         }
       }
-      // 2. Asignamos la nueva URL que Multer ya subió a Cloudinary
+      // Asignamos la nueva URL de Cloudinary
       imagenUrl = req.file.path;
     }
 
-    // Actualizamos en la base de datos
+    // 4. ACTUALIZAR PRODUCTO EN LA BASE DE DATOS
     await Producto.updateById(id, { ...nuevosDatos, imagen: imagenUrl });
 
-    // Auditoría (Log detallado)
+    // 5. CALCULAR DIFERENCIAS PARA AUDITORÍA
     const detalleCambios = calcularDiferencias(productoAnterior, nuevosDatos, [
       "updated_at",
       "created_at",
@@ -287,10 +247,29 @@ const updateProducto = async (req, res) => {
       "empresa_id",
     ]);
 
-    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    // 6. NOTIFICACIÓN WHATSAPP POR STOCK BAJO
+    if (
+      parseFloat(nuevosDatos.stock) <=
+      parseFloat(nuevosDatos.stock_minimo || productoAnterior.stock_minimo)
+    ) {
+      const telefonoDestino = await getEmpresaPhone(empresa_id);
+      if (telefonoDestino) {
+        const mensaje = `⚠️ *AVISO DE STOCK* ⚠️\n\nEl stock del producto *${
+          productoAnterior.nombre
+        }* se encuentra bajo el mínimo:\n\n*Stock actual:* ${
+          nuevosDatos.stock
+        }\n*Mínimo:* ${
+          nuevosDatos.stock_minimo || productoAnterior.stock_minimo
+        }`;
+        sendWS(telefonoDestino, mensaje);
+      }
+    }
+
+    // 7. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
     const io = req.app.get("socketio");
     if (io) io.emit("update-dashboard");
 
+    // 8. REGISTRAR LOG DE AUDITORÍA
     await registrarLog(
       req,
       "EDITAR",
@@ -300,11 +279,14 @@ const updateProducto = async (req, res) => {
 
     res.json({
       success: true,
-      message: "Producto e imagen actualizados correctamente",
+      message:
+        "Producto, imagen e historial de precios actualizados correctamente.",
     });
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: "Error interno" });
+    console.error("[UPDATE PRODUCTO ERROR]:", error);
+    res
+      .status(500)
+      .json({ message: "Error interno al actualizar el producto" });
   }
 };
 
@@ -406,6 +388,94 @@ const importarProductos = async (req, res) => {
         res.status(500).json({ message: "Error al procesar el archivo" });
       }
     });
+};
+
+const updatePreciosMasivo = async (req, res) => {
+  console.log("--- INICIO ACTUALIZACIÓN MASIVA DE COSTOS Y VENTAS ---");
+  const connection = await db.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    const { categoria_id, porcentaje } = req.body;
+    const empresa_id = req.user.empresa_id;
+    const factor = 1 + parseFloat(porcentaje) / 100;
+
+    // 1. Buscamos los productos (incluyendo campos de porcentaje)
+    let query = `
+      SELECT id, nombre, precio_compra, precio_venta, aplicar_porcentaje, valor_porcentaje 
+      FROM productos 
+      WHERE empresa_id = ?`;
+    let params = [empresa_id];
+
+    if (categoria_id) {
+      query += " AND categoria_id = ?";
+      params.push(categoria_id);
+    }
+
+    const [productos] = await connection.execute(query, params);
+
+    for (const p of productos) {
+      const costoAnterior = parseFloat(p.precio_compra);
+      const ventaAnterior = parseFloat(p.precio_venta);
+
+      // A. Calculamos el NUEVO COSTO (Precio de Compra)
+      const nuevoCosto = costoAnterior * factor;
+      let nuevoPrecioVenta = 0;
+
+      // B. Calculamos el NUEVO PRECIO DE VENTA
+      if (p.aplicar_porcentaje === 1 || p.aplicar_porcentaje === true) {
+        // Si tiene porcentaje activo: Nuevo Costo + % de Ganancia definido en el producto
+        nuevoPrecioVenta =
+          nuevoCosto * (1 + parseFloat(p.valor_porcentaje) / 100);
+      } else {
+        // Si NO tiene porcentaje activo: Aumentamos el precio de venta en la misma proporción que el costo
+        nuevoPrecioVenta = ventaAnterior * factor;
+      }
+
+      // 2. Guardar en el historial de precios (solo registramos el PVP para el gráfico)
+      if (nuevoPrecioVenta !== ventaAnterior) {
+        await connection.execute(
+          "INSERT INTO historial_precios (producto_id, precio_anterior, precio_nuevo, fecha_cambio) VALUES (?, ?, ?, NOW())",
+          [p.id, ventaAnterior, nuevoPrecioVenta]
+        );
+      }
+
+      // 3. Actualizar el producto con ambos precios
+      await connection.execute(
+        `UPDATE productos 
+         SET precio_compra = ?, precio_venta = ?, updated_at = NOW() 
+         WHERE id = ?`,
+        [nuevoCosto, nuevoPrecioVenta, p.id]
+      );
+    }
+
+    await connection.commit();
+
+    // Emitir señal de tiempo real para que el Dashboard se actualice
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
+
+    // LOG DE AUDITORÍA
+    await registrarLog(
+      req,
+      "EDITAR",
+      "PRODUCTOS",
+      `Ajuste masivo: +${porcentaje}% en costos. Se recalcularon precios de venta para ${productos.length} productos.`
+    );
+
+    res.json({
+      success: true,
+      message: `Se actualizaron costos y ventas de ${productos.length} productos.`,
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error(error);
+    res
+      .status(500)
+      .json({ message: "Error al procesar la actualización masiva" });
+  } finally {
+    connection.release();
+  }
 };
 
 const generarReporteStock = async (req, res) => {
@@ -540,6 +610,19 @@ const generarEtiquetas = async (req, res) => {
   }
 };
 
+const getHistorialPrecios = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [rows] = await db.execute(
+      "SELECT precio_nuevo as precio, DATE_FORMAT(fecha_cambio, '%d/%m/%y') as fecha FROM historial_precios WHERE producto_id = ? ORDER BY fecha_cambio ASC",
+      [id]
+    );
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const countProductos = async (req, res) => {
   try {
     const [rows] = await db.execute(
@@ -559,10 +642,12 @@ module.exports = {
   createProducto,
   updateProducto,
   deleteProducto,
+  getHistorialPrecios,
   countProductos,
   generarReporteStock,
   generarEtiquetas,
   importarProductos,
+  updatePreciosMasivo,
   upload,
   uploadCsv,
 };
