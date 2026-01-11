@@ -23,6 +23,7 @@ const {
   generarInformeMovimientoStockPDF,
   getVentasDashboard,
   enviarTicketPorWhatsApp,
+  getReporteRentabilidad,
 } = require("../controllers/ventaController");
 const authMiddleware = require("../middlewares/authMiddleware");
 
@@ -47,6 +48,7 @@ router.get("/informes/productos", getInformeProductos);
 router.get("/informes/clientes", getInformeClientes);
 router.get("/informes/forma-pagos", getInformeMetodosPago);
 router.get("/informes/movimiento-stock", getInformeMovimientoStock);
+router.get("/reporte-rentabilidad", getReporteRentabilidad);
 
 router.get("/tmp", getTmpVentas);
 router.post("/tmp", postTmpVenta);

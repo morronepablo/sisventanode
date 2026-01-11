@@ -1901,12 +1901,10 @@ const enviarTicketPorWhatsApp = async (req, res) => {
 
     // 2. Validar si es Consumidor Final o no tiene teléfono
     if (venta.telefono === "99999999" || !venta.telefono) {
-      return res
-        .status(400)
-        .json({
-          message:
-            "El cliente es Consumidor Final o no tiene un teléfono válido.",
-        });
+      return res.status(400).json({
+        message:
+          "El cliente es Consumidor Final o no tiene un teléfono válido.",
+      });
     }
 
     // 3. Preparar la URL del ticket (Usando el token para que el cliente pueda verlo)
@@ -1939,6 +1937,142 @@ const enviarTicketPorWhatsApp = async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Error al enviar el ticket." });
+  }
+};
+
+// const getReporteRentabilidad = async (req, res) => {
+//   try {
+//     const { desde, hasta } = req.query;
+//     const empresa_id = req.user.empresa_id;
+
+//     // 1. Totales generales
+//     const [totales] = await db.execute(
+//       `
+//       SELECT
+//         SUM(dv.cantidad * dv.precio_venta) as total_ventas,
+//         SUM(dv.cantidad * dv.precio_compra) as total_costo
+//       FROM detalle_ventas dv
+//       JOIN ventas v ON dv.venta_id = v.id
+//       WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
+//     `,
+//       [empresa_id, desde, hasta]
+//     );
+
+//     // 2. Ranking de productos más rentables
+//     const [ranking] = await db.execute(
+//       `
+//       SELECT
+//         COALESCE(p.nombre, c.nombre) as nombre,
+//         SUM(dv.cantidad) as cantidad,
+//         SUM(dv.cantidad * dv.precio_venta) as total_venta,
+//         SUM(dv.cantidad * (dv.precio_venta - dv.precio_compra)) as ganancia
+//       FROM detalle_ventas dv
+//       JOIN ventas v ON dv.venta_id = v.id
+//       LEFT JOIN productos p ON dv.producto_id = p.id
+//       LEFT JOIN combos c ON dv.combo_id = c.id
+//       WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
+//       GROUP BY dv.producto_id, dv.combo_id, nombre
+//       ORDER BY ganancia DESC
+//       LIMIT 15
+//     `,
+//       [empresa_id, desde, hasta]
+//     );
+
+//     const totalVentas = parseFloat(totales[0].total_ventas || 0);
+//     const totalCosto = parseFloat(totales[0].total_costo || 0);
+
+//     res.json({
+//       totalVentas,
+//       totalCosto,
+//       gananciaNeta: totalVentas - totalCosto,
+//       rankingProductos: ranking.map((r) => ({
+//         ...r,
+//         margen: r.total_venta > 0 ? (r.ganancia / r.total_venta) * 100 : 0,
+//       })),
+//     });
+//   } catch (error) {
+//     res.status(500).json({ message: error.message });
+//   }
+// };
+
+const getReporteRentabilidad = async (req, res) => {
+  try {
+    const { desde, hasta } = req.query;
+    const empresa_id = req.user.empresa_id;
+
+    // 1. Totales generales (Siguen basándose en lo vendido)
+    const [totales] = await db.execute(
+      `
+      SELECT 
+        IFNULL(SUM(dv.cantidad * dv.precio_venta), 0) as total_ventas,
+        IFNULL(SUM(dv.cantidad * dv.precio_compra), 0) as total_costo
+      FROM detalle_ventas dv
+      JOIN ventas v ON dv.venta_id = v.id
+      WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
+    `,
+      [empresa_id, desde, hasta]
+    );
+
+    // 2. Ranking de TODOS los productos (Análisis de Inventario + Ventas)
+    // Usamos LEFT JOIN para traer productos que NO se vendieron en ese rango
+    const [ranking] = await db.execute(
+      `
+      SELECT 
+        p.nombre,
+        p.precio_compra as costo_actual,
+        p.precio_venta as precio_actual,
+        IFNULL(SUM(dv_f.cantidad), 0) as cantidad_vendida,
+        IFNULL(SUM(dv_f.cantidad * dv_f.precio_venta), 0) as total_venta_periodo,
+        IFNULL(SUM(dv_f.cantidad * (dv_f.precio_venta - dv_f.precio_compra)), 0) as ganancia_periodo
+      FROM productos p
+      LEFT JOIN (
+        SELECT dv.* 
+        FROM detalle_ventas dv
+        JOIN ventas v ON dv.venta_id = v.id
+        WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
+      ) dv_f ON p.id = dv_f.producto_id
+      WHERE p.empresa_id = ?
+      GROUP BY p.id, p.nombre
+      ORDER BY cantidad_vendida ASC, p.nombre ASC
+    `,
+      [empresa_id, desde, hasta, empresa_id]
+    );
+
+    const totalVentas = parseFloat(totales[0].total_ventas);
+    const totalCosto = parseFloat(totales[0].total_costo);
+
+    res.json({
+      totalVentas,
+      totalCosto,
+      gananciaNeta: totalVentas - totalCosto,
+      rankingProductos: ranking.map((r) => {
+        // Si no se vendió, calculamos el margen teórico basado en el precio actual
+        // Esto ayuda a saber cuánto margen tiene para hacer una oferta
+        const ganancia = parseFloat(r.ganancia_periodo);
+        const venta = parseFloat(r.total_venta_periodo);
+
+        let margen = 0;
+        if (venta > 0) {
+          margen = (ganancia / venta) * 100;
+        } else {
+          // Margen teórico (Precio Actual - Costo Actual)
+          const margenTeorico = r.precio_actual - r.costo_actual;
+          margen =
+            r.precio_actual > 0 ? (margenTeorico / r.precio_actual) * 100 : 0;
+        }
+
+        return {
+          nombre: r.nombre,
+          cantidad: r.cantidad_vendida,
+          total_venta: venta,
+          ganancia: ganancia,
+          margen: margen,
+        };
+      }),
+    });
+  } catch (error) {
+    console.error("Error en reporte rentabilidad:", error);
+    res.status(500).json({ message: "Error interno del servidor" });
   }
 };
 
@@ -2185,6 +2319,7 @@ module.exports = {
   getVentaTicket,
   updateTmpVentaQuantity,
   enviarTicketPorWhatsApp,
+  getReporteRentabilidad,
   countVentas,
   getVentasSummary,
   getVentasDashboard,
