@@ -2,6 +2,7 @@
 const db = require("../config/db");
 
 const Venta = {
+  // 1. Obtener todas las ventas filtradas por empresa
   getAll: async (empresa_id) => {
     try {
       const query = `
@@ -20,6 +21,7 @@ const Venta = {
     }
   },
 
+  // 2. Obtener detalles de una venta específica
   getDetallesByVentaId: async (ventaId) => {
     try {
       const query = `
@@ -42,6 +44,7 @@ const Venta = {
     }
   },
 
+  // 3. Obtener ítems del carrito temporal
   getTmpItems: async (usuario_id) => {
     try {
       const query = `
@@ -60,11 +63,12 @@ const Venta = {
     }
   },
 
-  // 👈 ESTA ES LA FUNCIÓN QUE FALTABA O DABA ERROR
+  // 4. Eliminar ítem del carrito
   deleteTmpItem: async (id) => {
     return await db.execute("DELETE FROM tmp_ventas WHERE id = ?", [id]);
   },
 
+  // 5. PROCESO PRINCIPAL DE VENTA (MULTICAJA + STOCK COMBOS + FIDELIZACIÓN)
   store: async (datos, usuario_id, empresa_id) => {
     const MY_CAJA = Number(process.env.CAJA_ID || 1);
     const connection = await db.getConnection();
@@ -80,22 +84,34 @@ const Venta = {
         es_cuenta_corriente,
         descuento_porcentaje,
         descuento_monto,
+        puntos_canjeados, // 👈 Nuevo dato enviado desde el frontend
       } = datos;
 
-      // A. BUSCAR EL ARQUEO ABIERTO DE ESTA CAJA ESPECÍFICA
+      // --- 🏆 CÁLCULO DE PUNTOS (Fidelización) ---
+      let puntosGanados = 0;
+      const canjeados = Number(puntos_canjeados || 0);
+
+      // Solo sumamos puntos si NO es Consumidor Final (ID 1)
+      if (Number(cliente_id) !== 1) {
+        puntosGanados = Math.floor(precio_total / 100); // 1 Punto cada $100
+      }
+
+      // A. BUSCAR EL ARQUEO ABIERTO DE ESTA CAJA
       const [arqueoRows] = await connection.execute(
         "SELECT id FROM arqueos WHERE empresa_id = ? AND caja_id = ? AND (fecha_cierre IS NULL OR fecha_cierre = '' OR estado = 'Abierto') LIMIT 1",
         [empresa_id, MY_CAJA]
       );
       const current_arqueo_id = arqueoRows.length > 0 ? arqueoRows[0].id : null;
 
-      // B. INSERTAR CABECERA DE VENTA
+      // B. INSERTAR CABECERA DE VENTA (Incluyendo puntos)
       const [resVenta] = await connection.execute(
-        `INSERT INTO ventas (fecha, precio_total, cliente_id, arqueo_id, empresa_id, caja_id, usuario_id, efectivo, tarjeta, mercadopago, transferencia, es_cuenta_corriente, descuento_porcentaje, descuento_monto, created_at, updated_at) 
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        `INSERT INTO ventas (fecha, precio_total, puntos_ganados, puntos_canjeados, cliente_id, arqueo_id, empresa_id, caja_id, usuario_id, efectivo, tarjeta, mercadopago, transferencia, es_cuenta_corriente, descuento_porcentaje, descuento_monto, created_at, updated_at) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
         [
           fecha,
           precio_total,
+          puntosGanados,
+          canjeados,
           cliente_id,
           current_arqueo_id,
           empresa_id,
@@ -112,7 +128,15 @@ const Venta = {
       );
       const venta_id = resVenta.insertId;
 
-      // C. PROCESAR ITEMS (Stock, Movimientos y Detalle)
+      // --- 🏆 ACTUALIZAR PUNTOS DEL CLIENTE ---
+      if (Number(cliente_id) !== 1) {
+        await connection.execute(
+          "UPDATE clientes SET puntos = puntos + ? - ? WHERE id = ?",
+          [puntosGanados, canjeados, cliente_id]
+        );
+      }
+
+      // C. PROCESAR ITEMS TEMPORALES
       const [tmpItems] = await connection.execute(
         `SELECT t.*, 
                 p.precio_compra as p_costo, p.precio_venta as p_venta, p.aplicar_porcentaje, p.valor_porcentaje,
@@ -140,7 +164,6 @@ const Venta = {
             "UPDATE productos SET stock = stock - ? WHERE id = ?",
             [item.cantidad, item.producto_id]
           );
-
           await connection.execute(
             "INSERT INTO movimientos (producto_id, empresa_id, tipo, origen, origen_id, venta_id, cantidad, fecha, usuario_id, created_at, updated_at) VALUES (?, ?, 'salida', 'venta', ?, ?, ?, ?, ?, NOW(), NOW())",
             [
@@ -206,7 +229,7 @@ const Venta = {
         );
       }
 
-      // D. MOVIMIENTO DE CAJA (Solo efectivo neto)
+      // D. MOVIMIENTO DE CAJA (Neto)
       const efectivoReal = parseFloat(pagos.efectivo || 0);
       if (current_arqueo_id && efectivoReal > 0) {
         await connection.execute(

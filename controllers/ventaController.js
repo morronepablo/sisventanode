@@ -443,39 +443,40 @@ const getInformeProductos = async (req, res) => {
           SUM(ganancia_neta) as ganancia,
           SUM(total_neto) as total
       FROM (
-          -- 1. PRODUCTOS VENDIDOS INDIVIDUALMENTE
+          -- 1. PRODUCTOS VENDIDOS INDIVIDUALMENTE (Usamos precios congelados dv.precio_...)
           SELECT 
               p.codigo, p.nombre, IFNULL(u.nombre, 'Unidad') as unidad,
               dv.cantidad as cantidad_neta,
-              p.precio_compra as costo_unitario,
-              p.precio_venta as precio_venta_unitario,
-              (dv.cantidad * (p.precio_venta - p.precio_compra)) as ganancia_neta,
-              (dv.cantidad * p.precio_venta) as total_neto
+              dv.precio_compra as costo_unitario,
+              dv.precio_venta as precio_venta_unitario,
+              (dv.cantidad * (dv.precio_venta - dv.precio_compra)) as ganancia_neta,
+              (dv.cantidad * dv.precio_venta) as total_neto
           FROM detalle_ventas dv
           JOIN ventas v ON dv.venta_id = v.id
           JOIN productos p ON dv.producto_id = p.id
           LEFT JOIN unidads u ON p.unidad_id = u.id
-          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
+          WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ?
 
           UNION ALL
 
-          -- 2. COMBOS VENDIDOS (Tratados como un solo producto)
+          -- 2. PRODUCTOS VENDIDOS DENTRO DE COMBOS (Explosión para exactitud)
           SELECT 
-              c.codigo, c.nombre, 'Combo' as unidad,
-              dv.cantidad as cantidad_neta,
-              -- El costo del combo es la suma del costo de sus componentes
-              (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id) as costo_unitario,
-              c.precio_venta as precio_venta_unitario,
-              (dv.cantidad * (c.precio_venta - (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id))) as ganancia_neta,
-              (dv.cantidad * c.precio_venta) as total_neto
+              p.codigo, p.nombre, IFNULL(u.nombre, 'Unidad') as unidad,
+              (dv.cantidad * cp.cantidad) as cantidad_neta,
+              p.precio_compra as costo_unitario,
+              p.precio_venta as precio_venta_unitario,
+              ((dv.cantidad * cp.cantidad) * (p.precio_venta - p.precio_compra)) as ganancia_neta,
+              ((dv.cantidad * cp.cantidad) * p.precio_venta) as total_neto
           FROM detalle_ventas dv
           JOIN ventas v ON dv.venta_id = v.id
-          JOIN combos c ON dv.combo_id = c.id
-          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
+          JOIN combo_producto cp ON dv.combo_id = cp.combo_id
+          JOIN productos p ON cp.producto_id = p.id
+          LEFT JOIN unidads u ON p.unidad_id = u.id
+          WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ?
 
           UNION ALL
 
-          -- 3. DEVOLUCIONES DE PRODUCTOS (RESTAN)
+          -- 3. DEVOLUCIONES (Restan)
           SELECT 
               p.codigo, p.nombre, IFNULL(u.nombre, 'Unidad') as unidad,
               (dd.cantidad * -1) as cantidad_neta,
@@ -487,22 +488,7 @@ const getInformeProductos = async (req, res) => {
           JOIN devoluciones dev ON dd.devolucion_id = dev.id
           JOIN productos p ON dd.producto_id = p.id
           LEFT JOIN unidads u ON p.unidad_id = u.id
-          WHERE dev.empresa_id = ? AND dev.fecha BETWEEN ? AND ?
-
-          UNION ALL
-
-          -- 4. DEVOLUCIONES DE COMBOS (RESTAN)
-          SELECT 
-              c.codigo, c.nombre, 'Combo' as unidad,
-              (dd.cantidad * -1) as cantidad_neta,
-              (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id) as costo_unitario,
-              c.precio_venta as precio_venta_unitario,
-              (dd.cantidad * (c.precio_venta - (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id)) * -1) as ganancia_neta,
-              (dd.cantidad * c.precio_venta * -1) as total_neto
-          FROM detalle_devoluciones dd
-          JOIN devoluciones dev ON dd.devolucion_id = dev.id
-          JOIN combos c ON dd.combo_id = c.id
-          WHERE dev.empresa_id = ? AND dev.fecha BETWEEN ? AND ?
+          WHERE dev.empresa_id = ? AND DATE(dev.fecha) BETWEEN ? AND ?
       ) as t
       GROUP BY codigo, nombre, unidad, costo_unitario, precio_venta_unitario
       HAVING total <> 0
@@ -512,16 +498,13 @@ const getInformeProductos = async (req, res) => {
     const [rows] = await db.execute(query, [
       empresa_id,
       fecha_inicio,
-      fecha_fin, // Ventas Prods
+      fecha_fin, // Bloque 1
       empresa_id,
       fecha_inicio,
-      fecha_fin, // Ventas Combos
+      fecha_fin, // Bloque 2
       empresa_id,
       fecha_inicio,
-      fecha_fin, // Dev Prods
-      empresa_id,
-      fecha_inicio,
-      fecha_fin, // Dev Combos
+      fecha_fin, // Bloque 3
     ]);
 
     res.json(rows);
@@ -535,191 +518,84 @@ const generarInformeProductosPDF = async (req, res) => {
   try {
     const { fecha_inicio, fecha_fin } = req.query;
     const empresa_id = req.query.empresa_id || 1;
-
     const fInicio = fecha_inicio.split("-").reverse().join("/");
     const fFin = fecha_fin.split("-").reverse().join("/");
 
-    // MISMA QUERY QUE USAMOS EN EL DETALLE PARA QUE LOS DATOS SEAN IDÉNTICOS
     const query = `
       SELECT 
-          codigo, nombre, unidad,
-          SUM(cantidad_neta) as cantidad,
-          costo_unitario as costo,
-          precio_venta_unitario as venta,
-          SUM(ganancia_neta) as ganancia,
-          SUM(total_neto) as total
+          codigo, nombre, unidad, SUM(cantidad_neta) as cantidad,
+          costo_unitario as costo, precio_venta_unitario as venta,
+          SUM(ganancia_neta) as ganancia, SUM(total_neto) as total
       FROM (
-          -- 1. PRODUCTOS VENDIDOS INDIVIDUALMENTE
-          SELECT 
-              p.codigo, p.nombre, IFNULL(u.nombre, 'Unidad') as unidad,
-              dv.cantidad as cantidad_neta,
-              p.precio_compra as costo_unitario,
-              p.precio_venta as precio_venta_unitario,
-              (dv.cantidad * (p.precio_venta - p.precio_compra)) as ganancia_neta,
-              (dv.cantidad * p.precio_venta) as total_neto
-          FROM detalle_ventas dv
-          JOIN ventas v ON dv.venta_id = v.id
-          JOIN productos p ON dv.producto_id = p.id
-          LEFT JOIN unidads u ON p.unidad_id = u.id
-          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
-
+          SELECT p.codigo, p.nombre, IFNULL(u.nombre, 'Unid') as unidad, dv.cantidad as cantidad_neta, dv.precio_compra as costo_unitario, dv.precio_venta as precio_venta_unitario, (dv.cantidad * (dv.precio_venta - dv.precio_compra)) as ganancia_neta, (dv.cantidad * dv.precio_venta) as total_neto
+          FROM detalle_ventas dv JOIN ventas v ON dv.venta_id = v.id JOIN productos p ON dv.producto_id = p.id LEFT JOIN unidads u ON p.unidad_id = u.id
+          WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ?
           UNION ALL
-
-          -- 2. COMBOS VENDIDOS (Tratados como un solo producto)
-          SELECT 
-              c.codigo, c.nombre, 'Combo' as unidad,
-              dv.cantidad as cantidad_neta,
-              (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id) as costo_unitario,
-              c.precio_venta as precio_venta_unitario,
-              (dv.cantidad * (c.precio_venta - (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id))) as ganancia_neta,
-              (dv.cantidad * c.precio_venta) as total_neto
-          FROM detalle_ventas dv
-          JOIN ventas v ON dv.venta_id = v.id
-          JOIN combos c ON dv.combo_id = c.id
-          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
-
+          SELECT p.codigo, p.nombre, IFNULL(u.nombre, 'Unid') as unidad, (dv.cantidad * cp.cantidad) as cantidad_neta, p.precio_compra as costo_unitario, p.precio_venta as precio_venta_unitario, ((dv.cantidad * cp.cantidad) * (p.precio_venta - p.precio_compra)) as ganancia_neta, ((dv.cantidad * cp.cantidad) * p.precio_venta) as total_neto
+          FROM detalle_ventas dv JOIN ventas v ON dv.venta_id = v.id JOIN combo_producto cp ON dv.combo_id = cp.combo_id JOIN productos p ON cp.producto_id = p.id LEFT JOIN unidads u ON p.unidad_id = u.id
+          WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ?
           UNION ALL
-
-          -- 3. DEVOLUCIONES DE PRODUCTOS (RESTAN)
-          SELECT 
-              p.codigo, p.nombre, IFNULL(u.nombre, 'Unidad') as unidad,
-              (dd.cantidad * -1) as cantidad_neta,
-              p.precio_compra as costo_unitario,
-              p.precio_venta as precio_venta_unitario,
-              (dd.cantidad * (p.precio_venta - p.precio_compra) * -1) as ganancia_neta,
-              (dd.cantidad * p.precio_venta * -1) as total_neto
-          FROM detalle_devoluciones dd
-          JOIN devoluciones dev ON dd.devolucion_id = dev.id
-          JOIN productos p ON dd.producto_id = p.id
-          LEFT JOIN unidads u ON p.unidad_id = u.id
-          WHERE dev.empresa_id = ? AND dev.fecha BETWEEN ? AND ?
-
-          UNION ALL
-
-          -- 4. DEVOLUCIONES DE COMBOS (RESTAN)
-          SELECT 
-              c.codigo, c.nombre, 'Combo' as unidad,
-              (dd.cantidad * -1) as cantidad_neta,
-              (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id) as costo_unitario,
-              c.precio_venta as precio_venta_unitario,
-              (dd.cantidad * (c.precio_venta - (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id)) * -1) as ganancia_neta,
-              (dd.cantidad * c.precio_venta * -1) as total_neto
-          FROM detalle_devoluciones dd
-          JOIN devoluciones dev ON dd.devolucion_id = dev.id
-          JOIN combos c ON dd.combo_id = c.id
-          WHERE dev.empresa_id = ? AND dev.fecha BETWEEN ? AND ?
-      ) as t
-      GROUP BY codigo, nombre, unidad, costo_unitario, precio_venta_unitario
-      HAVING total <> 0
-      ORDER BY total DESC
-    `;
+          SELECT p.codigo, p.nombre, IFNULL(u.nombre, 'Unid') as unidad, (dd.cantidad * -1) as cantidad_neta, p.precio_compra as costo_unitario, p.precio_venta as precio_venta_unitario, (dd.cantidad * (p.precio_venta - p.precio_compra) * -1) as ganancia_neta, (dd.cantidad * p.precio_venta * -1) as total_neto
+          FROM detalle_devoluciones dd JOIN devoluciones dev ON dd.devolucion_id = dev.id JOIN productos p ON dd.producto_id = p.id LEFT JOIN unidads u ON p.unidad_id = u.id
+          WHERE dev.empresa_id = ? AND DATE(dev.fecha) BETWEEN ? AND ?
+      ) as t GROUP BY codigo, nombre, unidad, costo_unitario, precio_venta_unitario ORDER BY total DESC`;
 
     const [productos] = await db.execute(query, [
       empresa_id,
       fecha_inicio,
-      fecha_fin, // Ventas Prods
+      fecha_fin,
       empresa_id,
       fecha_inicio,
-      fecha_fin, // Ventas Combos
+      fecha_fin,
       empresa_id,
       fecha_inicio,
-      fecha_fin, // Dev Prods
-      empresa_id,
-      fecha_inicio,
-      fecha_fin, // Dev Combos
+      fecha_fin,
     ]);
 
+    // Helper de formato con 2 decimales forzados
+    const fmt = (val) =>
+      parseFloat(val).toLocaleString("es-AR", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      });
+
     let filas = "";
-    let totalCant = 0;
-    let totalGanancia = 0;
-    let totalGral = 0;
+    let tCant = 0;
+    let tGan = 0;
+    let tTot = 0;
 
     productos.forEach((p) => {
-      totalCant += parseFloat(p.cantidad);
-      totalGanancia += parseFloat(p.ganancia);
-      totalGral += parseFloat(p.total);
-
-      filas += `
-        <tr>
-            <td style="text-align: center;">${p.codigo}</td>
-            <td style="text-align: left;">${p.nombre}</td>
-            <td style="text-align: center;">${p.cantidad}</td>
-            <td style="text-align: center;">${p.unidad}</td>
-            <td style="text-align: right;">$ ${parseFloat(
-              p.costo
-            ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
-            <td style="text-align: right;">$ ${parseFloat(
-              p.venta
-            ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
-            <td style="text-align: right;">$ ${parseFloat(
-              p.ganancia
-            ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
-            <td style="text-align: right;">$ ${parseFloat(
-              p.total
-            ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
+      tCant += parseFloat(p.cantidad);
+      tGan += parseFloat(p.ganancia);
+      tTot += parseFloat(p.total);
+      filas += `<tr>
+            <td style="text-align:center">${p.codigo}</td>
+            <td>${p.nombre}</td>
+            <td style="text-align:center">${p.cantidad} ${p.unidad}</td>
+            <td style="text-align:right">$ ${fmt(p.costo)}</td>
+            <td style="text-align:right">$ ${fmt(p.venta)}</td>
+            <td style="text-align:right">$ ${fmt(p.ganancia)}</td>
+            <td style="text-align:right">$ ${fmt(p.total)}</td>
         </tr>`;
     });
 
-    const html = `
-      <html>
-      <head>
-          <meta charset="UTF-8">
-          <style>
-              body { font-family: sans-serif; font-size: 11px; }
-              .header { text-align: center; color: #1a73e8; }
-              .table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-              .table th { background-color: #1a73e8; color: white; padding: 8px; border: 1px solid #1a73e8; }
-              .table td { padding: 8px; border: 1px solid #eee; }
-              .total-row { font-weight: bold; background-color: #f1f1f1; }
-          </style>
-      </head>
-      <body>
-          <div class="header">
-              <h1>Informe de Ventas por Productos</h1>
-              <p>Período: ${fInicio} - ${fFin}</p>
-          </div>
-          <table class="table">
-              <thead>
-                  <tr>
-                      <th>CÓDIGO</th>
-                      <th>PRODUCTO</th>
-                      <th>CANT.</th>
-                      <th>UNIDAD</th>
-                      <th>COSTO</th>
-                      <th>VENTA</th>
-                      <th>GANANCIA</th>
-                      <th>TOTAL</th>
-                  </tr>
-              </thead>
-              <tbody>
-                  ${filas}
-                  <tr class="total-row">
-                      <td colspan="2" style="text-align: center;">TOTALES</td>
-                      <td style="text-align: center;">${totalCant}</td>
-                      <td colspan="3"></td>
-                      <td style="text-align: right;">$ ${totalGanancia.toLocaleString(
-                        "es-AR",
-                        { minimumFractionDigits: 2 }
-                      )}</td>
-                      <td style="text-align: right;">$ ${totalGral.toLocaleString(
-                        "es-AR",
-                        { minimumFractionDigits: 2 }
-                      )}</td>
-                  </tr>
-              </tbody>
-          </table>
-      </body>
-      </html>`;
+    const html = `<html><head><meta charset="UTF-8"><style>body{font-family:sans-serif;font-size:10px;color:#333;}table{width:100%;border-collapse:collapse;}th{background:#1a73e8;color:white;padding:5px;}td{padding:5px;border:1px solid #ddd;}.total{font-weight:bold;background:#eee;}</style></head>
+      <body><h1 style="text-align:center;color:#1a73e8">Informe de Ventas por Producto</h1><p style="text-align:center">Período: ${fInicio} - ${fFin}</p>
+      <table><thead><tr><th>CÓDIGO</th><th>PRODUCTO</th><th>CANT.</th><th>COSTO</th><th>VENTA</th><th>GANANCIA</th><th>TOTAL</th></tr></thead><tbody>${filas}
+      <tr class="total"><td colspan="2">TOTALES</td><td style="text-align:center">${tCant}</td><td></td><td></td><td style="text-align:right">$ ${fmt(
+      tGan
+    )}</td><td style="text-align:right">$ ${fmt(tTot)}</td></tr>
+      </tbody></table></body></html>`;
 
-    const options = { format: "A4", orientation: "landscape", border: "10mm" };
-    pdf.create(html, options).toBuffer((err, buffer) => {
-      if (err) return res.status(500).send("Error al generar PDF");
-      res.setHeader("Content-Type", "application/pdf");
-      res.send(buffer);
-    });
+    pdf
+      .create(html, { format: "A4", orientation: "landscape", border: "10mm" })
+      .toBuffer((err, buffer) => {
+        if (err) return res.status(500).send("Error");
+        res.setHeader("Content-Type", "application/pdf");
+        res.send(buffer);
+      });
   } catch (error) {
-    console.error("ERROR PDF:", error);
-    res.status(500).send(error.message);
+    res.status(500).send("Error");
   }
 };
 
@@ -735,77 +611,40 @@ const getInformeClientes = async (req, res) => {
           SUM(total_neto) as total,
           (SUM(total_neto) - SUM(costo_total)) as ganancia
       FROM (
-          -- 1. VENTAS DE PRODUCTOS INDIVIDUALES
+          -- A. VENTAS REALES (Usamos precio_total de cabecera para incluir descuentos)
           SELECT 
               IFNULL(cl.nombre_cliente, 'Consumidor Final') as nombre,
-              v.cliente_id,
-              (dv.cantidad * p.precio_compra) as costo_total,
-              (dv.cantidad * p.precio_venta) as total_neto
-          FROM detalle_ventas dv
-          JOIN ventas v ON dv.venta_id = v.id
-          JOIN productos p ON dv.producto_id = p.id
+              v.precio_total as total_neto,
+              (SELECT IFNULL(SUM(dv.cantidad * dv.precio_compra), 0) FROM detalle_ventas dv WHERE dv.venta_id = v.id) as costo_total
+          FROM ventas v
           LEFT JOIN clientes cl ON v.cliente_id = cl.id
-          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
+          WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ?
 
           UNION ALL
 
-          -- 2. VENTAS DE COMBOS
+          -- B. DEVOLUCIONES (Restan al total y al costo)
           SELECT 
               IFNULL(cl.nombre_cliente, 'Consumidor Final') as nombre,
-              v.cliente_id,
-              (dv.cantidad * (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id)) as costo_total,
-              (dv.cantidad * c.precio_venta) as total_neto
-          FROM detalle_ventas dv
-          JOIN ventas v ON dv.venta_id = v.id
-          JOIN combos c ON dv.combo_id = c.id
-          LEFT JOIN clientes cl ON v.cliente_id = cl.id
-          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
-
-          UNION ALL
-
-          -- 3. DEVOLUCIONES DE PRODUCTOS (RESTAN)
-          SELECT 
-              IFNULL(cl.nombre_cliente, 'Consumidor Final') as nombre,
-              dev.cliente_id,
-              (dd.cantidad * p.precio_compra * -1) as costo_total,
-              (dd.cantidad * p.precio_venta * -1) as total_neto
-          FROM detalle_devoluciones dd
-          JOIN devoluciones dev ON dd.devolucion_id = dev.id
-          JOIN productos p ON dd.producto_id = p.id
+              dev.precio_total * -1 as total_neto,
+              (SELECT IFNULL(SUM(dd.cantidad * p.precio_compra), 0) 
+               FROM detalle_devoluciones dd 
+               JOIN productos p ON dd.producto_id = p.id 
+               WHERE dd.devolucion_id = dev.id) * -1 as costo_total
+          FROM devoluciones dev
           LEFT JOIN clientes cl ON dev.cliente_id = cl.id
-          WHERE dev.empresa_id = ? AND dev.fecha BETWEEN ? AND ?
-
-          UNION ALL
-
-          -- 4. DEVOLUCIONES DE COMBOS (RESTAN)
-          SELECT 
-              IFNULL(cl.nombre_cliente, 'Consumidor Final') as nombre,
-              dev.cliente_id,
-              (dd.cantidad * (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id) * -1) as costo_total,
-              (dd.cantidad * c.precio_venta * -1) as total_neto
-          FROM detalle_devoluciones dd
-          JOIN devoluciones dev ON dd.devolucion_id = dev.id
-          JOIN combos c ON dd.combo_id = c.id
-          LEFT JOIN clientes cl ON dev.cliente_id = cl.id
-          WHERE dev.empresa_id = ? AND dev.fecha BETWEEN ? AND ?
+          WHERE dev.empresa_id = ? AND DATE(dev.fecha) BETWEEN ? AND ?
       ) as t
-      GROUP BY cliente_id, nombre
+      GROUP BY nombre
       ORDER BY total DESC
     `;
 
     const [rows] = await db.execute(query, [
       empresa_id,
       fecha_inicio,
-      fecha_fin, // Ventas Prods
+      fecha_fin, // Parámetros Ventas
       empresa_id,
       fecha_inicio,
-      fecha_fin, // Ventas Combos
-      empresa_id,
-      fecha_inicio,
-      fecha_fin, // Dev Prods
-      empresa_id,
-      fecha_inicio,
-      fecha_fin, // Dev Combos
+      fecha_fin, // Parámetros Devoluciones
     ]);
 
     res.json(rows);
@@ -823,79 +662,18 @@ const generarInformeClientesPDF = async (req, res) => {
     const fInicio = fecha_inicio.split("-").reverse().join("/");
     const fFin = fecha_fin.split("-").reverse().join("/");
 
-    // REPLICAMOS LA QUERY EXACTA DEL DETALLE (4 BLOQUES: VENTAS + COMBOS - DEVOLUCIONES)
+    // MISMA QUERY EXACTA QUE EL LISTADO PARA QUE LOS NÚMEROS SEAN IDENTICOS
     const query = `
-      SELECT 
-          nombre,
-          SUM(costo_total) as costo,
-          SUM(total_neto) as total,
-          (SUM(total_neto) - SUM(costo_total)) as ganancia
+      SELECT nombre, SUM(costo_total) as costo, SUM(total_neto) as total, (SUM(total_neto) - SUM(costo_total)) as ganancia
       FROM (
-          -- 1. VENTAS DE PRODUCTOS INDIVIDUALES
-          SELECT 
-              IFNULL(cl.nombre_cliente, 'Consumidor Final') as nombre,
-              v.cliente_id,
-              (dv.cantidad * p.precio_compra) as costo_total,
-              (dv.cantidad * p.precio_venta) as total_neto
-          FROM detalle_ventas dv
-          JOIN ventas v ON dv.venta_id = v.id
-          JOIN productos p ON dv.producto_id = p.id
-          LEFT JOIN clientes cl ON v.cliente_id = cl.id
-          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
-
+          SELECT IFNULL(cl.nombre_cliente, 'Consumidor Final') as nombre, v.precio_total as total_neto, (SELECT IFNULL(SUM(dv.cantidad * dv.precio_compra), 0) FROM detalle_ventas dv WHERE dv.venta_id = v.id) as costo_total
+          FROM ventas v LEFT JOIN clientes cl ON v.cliente_id = cl.id WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ?
           UNION ALL
-
-          -- 2. VENTAS DE COMBOS
-          SELECT 
-              IFNULL(cl.nombre_cliente, 'Consumidor Final') as nombre,
-              v.cliente_id,
-              (dv.cantidad * (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id)) as costo_total,
-              (dv.cantidad * c.precio_venta) as total_neto
-          FROM detalle_ventas dv
-          JOIN ventas v ON dv.venta_id = v.id
-          JOIN combos c ON dv.combo_id = c.id
-          LEFT JOIN clientes cl ON v.cliente_id = cl.id
-          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
-
-          UNION ALL
-
-          -- 3. DEVOLUCIONES DE PRODUCTOS (RESTAN)
-          SELECT 
-              IFNULL(cl.nombre_cliente, 'Consumidor Final') as nombre,
-              dev.cliente_id,
-              (dd.cantidad * p.precio_compra * -1) as costo_total,
-              (dd.cantidad * p.precio_venta * -1) as total_neto
-          FROM detalle_devoluciones dd
-          JOIN devoluciones dev ON dd.devolucion_id = dev.id
-          JOIN productos p ON dd.producto_id = p.id
-          LEFT JOIN clientes cl ON dev.cliente_id = cl.id
-          WHERE dev.empresa_id = ? AND dev.fecha BETWEEN ? AND ?
-
-          UNION ALL
-
-          -- 4. DEVOLUCIONES DE COMBOS (RESTAN)
-          SELECT 
-              IFNULL(cl.nombre_cliente, 'Consumidor Final') as nombre,
-              dev.cliente_id,
-              (dd.cantidad * (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id) * -1) as costo_total,
-              (dd.cantidad * c.precio_venta * -1) as total_neto
-          FROM detalle_devoluciones dd
-          JOIN devoluciones dev ON dd.devolucion_id = dev.id
-          JOIN combos c ON dd.combo_id = c.id
-          LEFT JOIN clientes cl ON dev.cliente_id = cl.id
-          WHERE dev.empresa_id = ? AND dev.fecha BETWEEN ? AND ?
-      ) as t
-      GROUP BY cliente_id, nombre
-      ORDER BY total DESC
-    `;
+          SELECT IFNULL(cl.nombre_cliente, 'Consumidor Final') as nombre, dev.precio_total * -1 as total_neto, (SELECT IFNULL(SUM(dd.cantidad * p.precio_compra), 0) FROM detalle_devoluciones dd JOIN productos p ON dd.producto_id = p.id WHERE dd.devolucion_id = dev.id) * -1 as costo_total
+          FROM devoluciones dev LEFT JOIN clientes cl ON dev.cliente_id = cl.id WHERE dev.empresa_id = ? AND DATE(dev.fecha) BETWEEN ? AND ?
+      ) as t GROUP BY nombre ORDER BY total DESC`;
 
     const [clientes] = await db.execute(query, [
-      empresa_id,
-      fecha_inicio,
-      fecha_fin,
-      empresa_id,
-      fecha_inicio,
-      fecha_fin,
       empresa_id,
       fecha_inicio,
       fecha_fin,
