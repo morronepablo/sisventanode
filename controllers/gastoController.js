@@ -35,8 +35,10 @@ const getListadoGastos = async (req, res) => {
 
 // Registrar un nuevo gasto
 const storeGasto = async (req, res) => {
-  console.log("--- INICIO REGISTRO DE GASTO ---");
+  console.log("--- INICIO REGISTRO DE GASTO (MULTICAJA) ---");
   const connection = await db.getConnection();
+  const MY_CAJA = Number(process.env.CAJA_ID || 1); // 👈 Identidad de la terminal
+
   try {
     await connection.beginTransaction();
     const { monto, descripcion, fecha, categoria_gasto_id, metodo_pago } =
@@ -44,17 +46,17 @@ const storeGasto = async (req, res) => {
     const empresa_id = req.user.empresa_id;
     const usuario_id = req.user.id;
 
-    // 1. Buscar si hay un arqueo abierto
+    // 1. Buscar si hay un arqueo abierto EN ESTA CAJA ESPECÍFICA
     const [arqueo] = await connection.execute(
-      "SELECT id FROM arqueos WHERE empresa_id = ? AND (fecha_cierre IS NULL OR fecha_cierre = '') LIMIT 1",
-      [empresa_id]
+      "SELECT id FROM arqueos WHERE empresa_id = ? AND caja_id = ? AND (fecha_cierre IS NULL OR fecha_cierre = '' OR estado = 'Abierto') LIMIT 1",
+      [empresa_id, MY_CAJA]
     );
     const arqueo_id = arqueo.length > 0 ? arqueo[0].id : null;
 
-    // 2. Insertar Gasto
+    // 2. Insertar Gasto (Incluyendo caja_id)
     const [result] = await connection.execute(
-      `INSERT INTO gastos (monto, descripcion, fecha, categoria_gasto_id, metodo_pago, usuario_id, empresa_id, arqueo_id) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO gastos (monto, descripcion, fecha, categoria_gasto_id, metodo_pago, usuario_id, empresa_id, arqueo_id, caja_id) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         monto,
         descripcion,
@@ -64,27 +66,30 @@ const storeGasto = async (req, res) => {
         usuario_id,
         empresa_id,
         arqueo_id,
+        MY_CAJA, // 👈 Se guarda la caja que origina el gasto
       ]
     );
     const gasto_id = result.insertId;
-    console.log(`[GASTOS] Gasto insertado con ID: ${gasto_id}`);
+    console.log(
+      `[GASTOS] Gasto insertado con ID: ${gasto_id} en Caja ${MY_CAJA}`
+    );
 
-    // 3. Si el pago fue en EFECTIVO y hay caja abierta, registrar el Egreso
+    // 3. Si el pago fue en EFECTIVO y hay caja abierta, registrar el Egreso en movimiento_cajas
     if (metodo_pago === "efectivo" && arqueo_id) {
       await connection.execute(
-        `INSERT INTO movimiento_cajas (tipo, monto, descripcion, arqueo_id, created_at, updated_at) 
-         VALUES ('Egreso', ?, ?, ?, NOW(), NOW())`,
-        [monto, `Gasto: ${descripcion}`, arqueo_id]
+        `INSERT INTO movimiento_cajas (tipo, monto, descripcion, arqueo_id, caja_id, created_at, updated_at) 
+         VALUES ('Egreso', ?, ?, ?, ?, NOW(), NOW())`,
+        [monto, `Gasto: ${descripcion}`, arqueo_id, MY_CAJA]
       );
       console.log(
-        `[GASTOS] Egreso de caja registrado para Arqueo ID: ${arqueo_id}`
+        `[GASTOS] Egreso de caja registrado para Arqueo ID: ${arqueo_id} (Caja ${MY_CAJA})`
       );
     }
 
     await connection.commit();
     console.log("[GASTOS] Transacción completada con éxito.");
 
-    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    // EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
     const io = req.app.get("socketio");
     if (io) io.emit("update-dashboard");
 
@@ -93,7 +98,7 @@ const storeGasto = async (req, res) => {
       req,
       "CREAR",
       "GASTOS",
-      `Se registró un gasto por $${monto} (${metodo_pago}). Descripción: ${descripcion}`
+      `Se registró un gasto por $${monto} (${metodo_pago}) en Caja ${MY_CAJA}. Descripción: ${descripcion}`
     );
 
     res.json({ success: true, message: "Gasto registrado correctamente" });
@@ -136,12 +141,14 @@ const getGastoById = async (req, res) => {
 const deleteGasto = async (req, res) => {
   console.log("--- INICIO ELIMINACIÓN DE GASTO (CON CAJA) ---");
   const connection = await db.getConnection();
+  const MY_CAJA = Number(process.env.CAJA_ID || 1); // 👈 Identidad de la terminal
+
   try {
     await connection.beginTransaction();
     const { id } = req.params;
     const empresa_id = req.user.empresa_id;
 
-    // 1. Obtener datos del gasto antes de borrar
+    // 1. Obtener datos del gasto antes de borrar para saber si afectó la caja
     const [rows] = await connection.execute(
       "SELECT * FROM gastos WHERE id = ? AND empresa_id = ?",
       [id, empresa_id]
@@ -153,15 +160,20 @@ const deleteGasto = async (req, res) => {
 
     const gasto = rows[0];
 
-    // 2. Si el gasto fue en EFECTIVO, borrar el movimiento de caja relacionado
+    // 2. Si el gasto fue en EFECTIVO, borrar el movimiento de caja relacionado filtrando por arqueo y CAJA
     if (gasto.metodo_pago === "efectivo" && gasto.arqueo_id) {
       await connection.execute(
         `DELETE FROM movimiento_cajas 
-         WHERE arqueo_id = ? AND monto = ? AND tipo = 'Egreso' AND descripcion LIKE ?`,
-        [gasto.arqueo_id, gasto.monto, `%Gasto: ${gasto.descripcion}%`]
+         WHERE arqueo_id = ? AND caja_id = ? AND monto = ? AND tipo = 'Egreso' AND descripcion LIKE ?`,
+        [
+          gasto.arqueo_id,
+          gasto.caja_id,
+          gasto.monto,
+          `%Gasto: ${gasto.descripcion}%`,
+        ]
       );
       console.log(
-        `[GASTOS] Movimiento de caja eliminado para sincronizar arqueo.`
+        `[GASTOS] Movimiento de caja eliminado para sincronizar arqueo de la Caja ${gasto.caja_id}`
       );
     }
 
@@ -170,7 +182,7 @@ const deleteGasto = async (req, res) => {
 
     await connection.commit();
 
-    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    // EMITIR EVENTO EN TIEMPO REAL
     const io = req.app.get("socketio");
     if (io) io.emit("update-dashboard");
 
@@ -179,7 +191,7 @@ const deleteGasto = async (req, res) => {
       req,
       "ELIMINAR",
       "GASTOS",
-      `Se eliminó gasto de $${gasto.monto}. Motivo: ${gasto.descripcion}. Se sincronizó con caja.`
+      `Se eliminó gasto de $${gasto.monto} de la Caja ${gasto.caja_id}. Motivo: ${gasto.descripcion}. Se sincronizó con caja.`
     );
 
     res.json({

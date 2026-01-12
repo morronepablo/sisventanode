@@ -6,6 +6,8 @@ const pdf = require("html-pdf");
 const db = require("../config/db");
 const { registrarLog } = require("../utils/logger"); // 👈 Importamos el logger
 
+const MY_CAJA = () => Number(process.env.CAJA_ID || 1);
+
 const getAllArqueos = async (req, res) => {
   try {
     const arqueos = await Arqueo.getAll();
@@ -38,11 +40,11 @@ const checkArqueoAbierto = async (req, res) => {
     const empresa_id = req.user.empresa_id;
     const query = `
       SELECT id FROM arqueos 
-      WHERE empresa_id = ? 
-      AND (fecha_cierre IS NULL OR fecha_cierre = '' OR fecha_cierre = '0000-00-00 00:00:00') 
+      WHERE empresa_id = ? AND caja_id = ? 
+      AND (fecha_cierre IS NULL OR fecha_cierre = '' OR estado = 'Abierto') 
       LIMIT 1`;
 
-    const [rows] = await db.execute(query, [empresa_id]);
+    const [rows] = await db.execute(query, [empresa_id, MY_CAJA()]);
     res.json({
       arqueoAbierto: rows.length > 0,
       id_arqueo: rows.length > 0 ? rows[0].id : null,
@@ -52,104 +54,142 @@ const checkArqueoAbierto = async (req, res) => {
   }
 };
 
+// const createArqueo = async (req, res) => {
+//   console.log("--- INICIO APERTURA DE CAJA ---");
+//   try {
+//     const { fecha_apertura, monto_inicial, descripcion } = req.body;
+//     const usuario_id = req.user.id;
+//     const empresa_id = req.user.empresa_id;
+
+//     const abierto = await Arqueo.checkArqueoAbierto(usuario_id);
+//     if (abierto) {
+//       return res.status(400).json({ message: "Ya tienes un arqueo abierto." });
+//     }
+
+//     const nuevoId = await Arqueo.create({
+//       empresa_id,
+//       usuario_id,
+//       fecha_apertura,
+//       monto_inicial,
+//       descripcion,
+//     });
+
+//     console.log(`[ARQUEO] Caja abierta con ID: ${nuevoId}`);
+
+//     // REGISTRO DE LOG
+//     await registrarLog(
+//       req,
+//       "CREAR",
+//       "ARQUEO_CAJA",
+//       `Apertura de caja realizada. Monto inicial: $${monto_inicial}`
+//     );
+
+//     res
+//       .status(201)
+//       .json({ message: "Arqueo registrado exitosamente", id: nuevoId });
+//   } catch (error) {
+//     console.error("[ARQUEO ERROR] Fallo al abrir caja:", error);
+//     res.status(500).json({ message: "Error al registrar arqueo" });
+//   }
+//   console.log("--- FIN APERTURA DE CAJA ---");
+// };
+
 const createArqueo = async (req, res) => {
-  console.log("--- INICIO APERTURA DE CAJA ---");
+  console.log("--- INICIO APERTURA DE CAJA MULTICAJA ---");
   try {
     const { fecha_apertura, monto_inicial, descripcion } = req.body;
     const usuario_id = req.user.id;
     const empresa_id = req.user.empresa_id;
+    const caja_id = MY_CAJA(); // 👈 CAPTURAMOS LA CAJA ACTUAL
 
-    const abierto = await Arqueo.checkArqueoAbierto(usuario_id);
-    if (abierto) {
-      return res.status(400).json({ message: "Ya tienes un arqueo abierto." });
+    // Verificamos si YA hay una abierta en esta caja
+    const [existente] = await db.execute(
+      "SELECT id FROM arqueos WHERE empresa_id = ? AND caja_id = ? AND estado = 'Abierto'",
+      [empresa_id, caja_id]
+    );
+
+    if (existente.length > 0) {
+      return res
+        .status(400)
+        .json({ message: `La Caja N° ${caja_id} ya tiene un arqueo abierto.` });
     }
 
+    // MANDAMOS EL caja_id AL MODELO
     const nuevoId = await Arqueo.create({
       empresa_id,
       usuario_id,
+      caja_id, // 👈 PASAMOS LA CAJA AL MODELO
       fecha_apertura,
       monto_inicial,
       descripcion,
     });
 
-    console.log(`[ARQUEO] Caja abierta con ID: ${nuevoId}`);
+    console.log(
+      `[ARQUEO] Caja ${caja_id} abierta por usuario ${usuario_id}. ID Arqueo: ${nuevoId}`
+    );
 
-    // REGISTRO DE LOG
     await registrarLog(
       req,
       "CREAR",
       "ARQUEO_CAJA",
-      `Apertura de caja realizada. Monto inicial: $${monto_inicial}`
+      `Apertura de Caja N° ${caja_id}. Monto inicial: $${monto_inicial}`
     );
 
     res
       .status(201)
       .json({ message: "Arqueo registrado exitosamente", id: nuevoId });
   } catch (error) {
-    console.error("[ARQUEO ERROR] Fallo al abrir caja:", error);
+    console.error("[ARQUEO ERROR]", error);
     res.status(500).json({ message: "Error al registrar arqueo" });
   }
-  console.log("--- FIN APERTURA DE CAJA ---");
 };
-
-// const getArqueoById = async (req, res) => {
-//   const { id } = req.params;
-//   try {
-//     const [arqueo] = await db.execute("SELECT * FROM arqueos WHERE id = ?", [
-//       id,
-//     ]);
-//     if (arqueo.length === 0)
-//       return res.status(404).json({ message: "Arqueo no encontrado" });
-
-//     const [movimientos] = await db.execute(
-//       "SELECT * FROM movimiento_cajas WHERE arqueo_id = ? ORDER BY id DESC",
-//       [id]
-//     );
-
-//     const queryTotales = `
-//             SELECT
-//                 (IFNULL((SELECT SUM(tarjeta) FROM ventas WHERE arqueo_id = ?), 0) + IFNULL((SELECT SUM(monto) FROM pagos WHERE arqueo_id = ? AND metodo_pago = 'tarjeta'), 0)) as total_tarjeta_sistema,
-//                 (IFNULL((SELECT SUM(mercadopago) FROM ventas WHERE arqueo_id = ?), 0) + IFNULL((SELECT SUM(monto) FROM pagos WHERE arqueo_id = ? AND metodo_pago = 'mercadopago'), 0)) as total_mp_sistema,
-//                 (IFNULL((SELECT SUM(transferencia) FROM ventas WHERE arqueo_id = ?), 0) + IFNULL((SELECT SUM(monto) FROM pagos WHERE arqueo_id = ? AND metodo_pago = 'transferencia'), 0)) as total_transf_sistema
-//         `;
-//     const [totales] = await db.execute(queryTotales, [id, id, id, id, id, id]);
-
-//     res.json({
-//       arqueo: arqueo[0],
-//       movimientos: movimientos,
-//       totales_sistema: totales[0],
-//     });
-//   } catch (error) {
-//     res.status(500).json({ message: error.message });
-//   }
-// };
 
 const getArqueoById = async (req, res) => {
   const { id } = req.params;
   try {
-    const [arqueo] = await db.execute("SELECT * FROM arqueos WHERE id = ?", [
-      id,
-    ]);
-    if (arqueo.length === 0)
-      return res.status(404).json({ message: "Arqueo no encontrado" });
-
-    const [movimientos] = await db.execute(
-      "SELECT * FROM movimiento_cajas WHERE arqueo_id = ? ORDER BY id DESC",
+    const [arqueoRows] = await db.execute(
+      "SELECT * FROM arqueos WHERE id = ?",
       [id]
     );
+    if (arqueoRows.length === 0)
+      return res.status(404).json({ message: "No encontrado" });
 
-    // Consulta corregida para traer los totales que el sistema ya conoce
+    const arqueo = arqueoRows[0];
+    const cid = arqueo.caja_id; // Usamos el ID de caja del arqueo guardado
+
+    // Sumamos ventas + cobros de cuotas de clientes filtrando por arqueo y caja
     const queryTotales = `
       SELECT 
-        ((SELECT IFNULL(SUM(tarjeta), 0) FROM ventas WHERE arqueo_id = ?) + (SELECT IFNULL(SUM(monto), 0) FROM pagos WHERE arqueo_id = ? AND metodo_pago = 'tarjeta')) as total_tarjeta_sistema,
-        ((SELECT IFNULL(SUM(mercadopago), 0) FROM ventas WHERE arqueo_id = ?) + (SELECT IFNULL(SUM(monto), 0) FROM pagos WHERE arqueo_id = ? AND metodo_pago = 'mercadopago')) as total_mp_sistema,
-        ((SELECT IFNULL(SUM(transferencia), 0) FROM ventas WHERE arqueo_id = ?) + (SELECT IFNULL(SUM(monto), 0) FROM pagos WHERE arqueo_id = ? AND metodo_pago = 'transferencia')) as total_transf_sistema
+        (
+          (SELECT IFNULL(SUM(tarjeta), 0) FROM ventas WHERE arqueo_id = ? AND caja_id = ?) + 
+          (SELECT IFNULL(SUM(monto), 0) FROM pagos WHERE arqueo_id = ? AND caja_id = ? AND metodo_pago = 'tarjeta')
+        ) as total_tarjeta_sistema,
+        (
+          (SELECT IFNULL(SUM(mercadopago), 0) FROM ventas WHERE arqueo_id = ? AND caja_id = ?) + 
+          (SELECT IFNULL(SUM(monto), 0) FROM pagos WHERE arqueo_id = ? AND caja_id = ? AND metodo_pago = 'mercadopago')
+        ) as total_mp_sistema,
+        (
+          (SELECT IFNULL(SUM(transferencia), 0) FROM ventas WHERE arqueo_id = ? AND caja_id = ?) + 
+          (SELECT IFNULL(SUM(monto), 0) FROM pagos WHERE arqueo_id = ? AND caja_id = ? AND metodo_pago = 'transferencia')
+        ) as total_transf_sistema
     `;
-    const [totales] = await db.execute(queryTotales, [id, id, id, id, id, id]);
+    const [totales] = await db.execute(queryTotales, [
+      id,
+      cid,
+      id,
+      cid,
+      id,
+      cid,
+      id,
+      cid,
+      id,
+      cid,
+      id,
+      cid,
+    ]);
 
     res.json({
-      arqueo: arqueo[0],
-      movimientos: movimientos,
+      arqueo: arqueo,
       totales_sistema: totales[0],
     });
   } catch (error) {
@@ -215,31 +255,6 @@ const storeMovimiento = async (req, res) => {
   }
   console.log("--- FIN MOVIMIENTO MANUAL CAJA ---");
 };
-
-// const closeArqueo = async (req, res) => {
-//   console.log("--- INICIO CIERRE DE CAJA ---");
-//   try {
-//     const { id } = req.params;
-//     const { fecha_cierre, monto_final } = req.body;
-
-//     const cerrado = await Arqueo.close(id, req.body);
-//     if (!cerrado) return res.status(404).json({ message: "No se pudo cerrar" });
-
-//     // REGISTRO DE LOG
-//     await registrarLog(
-//       req,
-//       "EDITAR",
-//       "ARQUEO_CAJA",
-//       `Cierre de caja realizado. ID Arqueo: ${id}. Monto final reportado: $${monto_final}`
-//     );
-
-//     res.json({ message: "Arqueo cerrado exitosamente" });
-//   } catch (error) {
-//     console.error("[ARQUEO ERROR] Fallo al cerrar caja:", error);
-//     res.status(500).json({ message: "Error al cerrar arqueo" });
-//   }
-//   console.log("--- FIN CIERRE DE CAJA ---");
-// };
 
 const closeArqueo = async (req, res) => {
   console.log("--- INICIO CIERRE DE CAJA CIEGO ---");

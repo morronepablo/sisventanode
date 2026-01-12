@@ -623,10 +623,63 @@ const getHistorialPrecios = async (req, res) => {
   }
 };
 
+const getReposicionReport = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    // Buscamos productos donde el stock actual sea menor o igual al mínimo
+    const [productos] = await db.execute(
+      `SELECT p.id, p.codigo, p.nombre, p.stock, p.stock_minimo, p.stock_maximo, p.precio_compra,
+              c.nombre as categoria_nombre, u.nombre as unidad_nombre
+       FROM productos p
+       LEFT JOIN categorias c ON p.categoria_id = c.id
+       LEFT JOIN unidads u ON p.unidad_id = u.id
+       WHERE p.empresa_id = ? AND p.stock <= p.stock_minimo
+       ORDER BY (p.stock / p.stock_minimo) ASC`, // Los más urgentes primero
+      [empresa_id]
+    );
+
+    // Calculamos totales de inversión necesaria
+    let inversionTotal = 0;
+    const listaFinal = productos.map((p) => {
+      const faltante = Math.max(p.stock_maximo - p.stock, 0);
+      const subtotalInversion = faltante * parseFloat(p.precio_compra);
+      inversionTotal += subtotalInversion;
+
+      return {
+        ...p,
+        faltante,
+        inversion: subtotalInversion,
+        urgencia: p.stock <= p.stock_minimo * 0.2 ? "CRITICO" : "REPOSICION",
+      };
+    });
+
+    res.json({
+      productos: listaFinal,
+      totalArticulosFaltantes: listaFinal.length,
+      inversionTotalNecesaria: inversionTotal,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const countProductos = async (req, res) => {
   try {
     const [rows] = await db.execute(
       "SELECT COUNT(*) AS total FROM productos WHERE empresa_id = ?",
+      [req.user.empresa_id]
+    );
+    res.json({ total: rows[0].total });
+  } catch (error) {
+    res.json({ total: 0 });
+  }
+};
+
+const countBajoStock = async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      "SELECT COUNT(*) AS total FROM productos WHERE stock <= stock_minimo AND empresa_id = ?",
       [req.user.empresa_id]
     );
     res.json({ total: rows[0].total });
@@ -643,7 +696,9 @@ module.exports = {
   updateProducto,
   deleteProducto,
   getHistorialPrecios,
+  getReposicionReport,
   countProductos,
+  countBajoStock,
   generarReporteStock,
   generarEtiquetas,
   importarProductos,

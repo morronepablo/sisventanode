@@ -32,30 +32,52 @@ class Arqueo {
   }
 
   static async create(data) {
+    // const {
+    //   empresa_id,
+    //   usuario_id,
+    //   fecha_apertura,
+    //   monto_inicial,
+    //   descripcion,
+    // } = data;
+    // const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+
+    // const [result] = await db.execute(
+    //   `INSERT INTO arqueos
+    //   (empresa_id, usuario_id, fecha_apertura, monto_inicial, descripcion,
+    //    ventas_efectivo, ventas_tarjeta, ventas_mercadopago, created_at, updated_at)
+    //   VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?)`,
+    //   [
+    //     empresa_id,
+    //     usuario_id,
+    //     fecha_apertura,
+    //     monto_inicial,
+    //     descripcion,
+    //     now,
+    //     now,
+    //   ]
+    // );
+    // return result.insertId;
     const {
       empresa_id,
       usuario_id,
+      caja_id,
       fecha_apertura,
       monto_inicial,
       descripcion,
     } = data;
-    const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+    const query = `
+      INSERT INTO arqueos 
+      (empresa_id, usuario_id, caja_id, fecha_apertura, monto_inicial, descripcion, estado, created_at, updated_at) 
+      VALUES (?, ?, ?, ?, ?, ?, 'Abierto', NOW(), NOW())`;
 
-    const [result] = await db.execute(
-      `INSERT INTO arqueos 
-      (empresa_id, usuario_id, fecha_apertura, monto_inicial, descripcion, 
-       ventas_efectivo, ventas_tarjeta, ventas_mercadopago, created_at, updated_at) 
-      VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?)`,
-      [
-        empresa_id,
-        usuario_id,
-        fecha_apertura,
-        monto_inicial,
-        descripcion,
-        now,
-        now,
-      ]
-    );
+    const [result] = await db.execute(query, [
+      empresa_id,
+      usuario_id,
+      caja_id, // 👈 AQUÍ SE GUARDA LA CAJA 2
+      fecha_apertura,
+      monto_inicial,
+      descripcion,
+    ]);
     return result.insertId;
   }
 

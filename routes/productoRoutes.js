@@ -8,7 +8,9 @@ const {
   updateProducto,
   deleteProducto,
   getHistorialPrecios,
+  getReposicionReport,
   countProductos,
+  countBajoStock,
   generarReporteStock,
   updatePreciosMasivo,
   generarEtiquetas,
@@ -28,6 +30,8 @@ router.get("/:id/etiquetas", generarEtiquetas);
 router.use(authMiddleware);
 
 router.get("/count", countProductos);
+router.get("/bajo-stock-count", countBajoStock);
+router.get("/reporte/reposicion", getReposicionReport);
 router.get("/", getAllProductos);
 router.get("/bajo-stock", getProductosBajoStock);
 router.post("/update-masivo", updatePreciosMasivo);

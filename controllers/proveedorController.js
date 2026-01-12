@@ -154,38 +154,54 @@ const getGestionPagos = async (req, res) => {
 };
 
 const postRegistrarPago = async (req, res) => {
-  console.log("--- INICIO PAGO A PROVEEDOR ---");
+  console.log("--- INICIO PAGO A PROVEEDOR (MULTICAJA) ---");
+  const MY_CAJA = Number(process.env.CAJA_ID || 1); // 👈 Identidad de la caja desde .env
+
   try {
     const { distribucion, metodo_pago } = req.body;
     const proveedor_id = req.params.id;
+    const empresa_id = req.user.empresa_id;
 
-    // 1. Ejecutar la lógica de pago en el modelo
-    await Proveedor.registrarPagoDistribuido(req.body);
+    // 1. Buscar si hay arqueo abierto EN ESTA CAJA ESPECÍFICA
+    const [arqueoRows] = await db.execute(
+      "SELECT id FROM arqueos WHERE empresa_id = ? AND caja_id = ? AND (fecha_cierre IS NULL OR fecha_cierre = '' OR estado = 'Abierto') LIMIT 1",
+      [empresa_id, MY_CAJA]
+    );
+    const arqueo_id = arqueoRows.length > 0 ? arqueoRows[0].id : null;
 
-    // 2. CALCULAR EL TOTAL REAL para el log (sumando la distribución)
+    // 2. Ejecutar la lógica de pago en el modelo
+    // Enviamos el caja_id y arqueo_id para que el modelo registre pago_compras y movimiento_cajas correctamente
+    await Proveedor.registrarPagoDistribuido({
+      ...req.body,
+      caja_id: MY_CAJA,
+      arqueo_id: arqueo_id,
+      empresa_id: empresa_id,
+    });
+
+    // 3. CALCULAR EL TOTAL REAL para el log
     const montoRealPagado = distribucion.reduce(
       (acc, item) => acc + parseFloat(item.monto || 0),
       0
     );
 
-    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    // EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
     const io = req.app.get("socketio");
     if (io) io.emit("update-dashboard");
 
-    // 3. REGISTRO DE LOG CORREGIDO
+    // 4. REGISTRO DE LOG
     await registrarLog(
       req,
       "PAGO",
       "PROVEEDORES",
-      `Se registró un pago al proveedor ID: ${proveedor_id} por un total de $${montoRealPagado.toLocaleString(
-        "es-AR",
-        { minimumFractionDigits: 2 }
-      )} vía ${metodo_pago}`
+      `Se registró un pago de $${montoRealPagado.toLocaleString(
+        "es-AR"
+      )} al proveedor ID: ${proveedor_id} vía ${metodo_pago} desde Caja ${MY_CAJA}`
     );
 
     console.log(
-      `[PROVEEDORES] Pago de $${montoRealPagado} registrado para proveedor ${proveedor_id}`
+      `[PROVEEDORES] Pago de $${montoRealPagado} registrado en Caja ${MY_CAJA} para proveedor ${proveedor_id}`
     );
+
     res.json({ success: true, message: "Pagos registrados correctamente" });
   } catch (error) {
     console.error(

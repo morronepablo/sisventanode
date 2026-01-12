@@ -144,51 +144,63 @@ const getGestionPagos = async (req, res) => {
 };
 
 const registrarPago = async (req, res) => {
-  console.log("--- INICIO REGISTRO PAGO CLIENTE (CAJA + WS) ---");
+  console.log("--- INICIO REGISTRO PAGO CLIENTE (MULTICAJA + WS) ---");
   const connection = await db.getConnection();
+  const MY_CAJA = Number(process.env.CAJA_ID || 1); // 👈 Identidad de la caja desde .env
+
   try {
     await connection.beginTransaction();
-    const { id } = req.params;
+    const { id } = req.params; // ID del cliente
     const { fecha, importe, metodo_pago } = req.body;
     const empresa_id = req.user.empresa_id;
 
-    // 1. Buscar si hay caja abierta
+    // 1. Buscar si hay caja abierta EN ESTA TERMINAL ESPECÍFICA
     const [arqueo] = await connection.execute(
-      "SELECT id FROM arqueos WHERE fecha_cierre IS NULL AND empresa_id = ? LIMIT 1",
-      [empresa_id]
+      "SELECT id FROM arqueos WHERE empresa_id = ? AND caja_id = ? AND (fecha_cierre IS NULL OR fecha_cierre = '' OR estado = 'Abierto') LIMIT 1",
+      [empresa_id, MY_CAJA]
     );
     const arqueo_id = arqueo.length > 0 ? arqueo[0].id : null;
 
-    // 2. Registrar en Cuenta Corriente
+    // 2. Registrar en Cuenta Corriente (Asignando caja_id)
     const [resultCtaCte] = await connection.execute(
-      `INSERT INTO compras_cta_cte (cliente_id, empresa_id, importe, tipo, fecha, metodo_pago, created_at, updated_at) 
-       VALUES (?, ?, ?, 'pago', ?, ?, NOW(), NOW())`,
-      [id, empresa_id, importe, fecha, metodo_pago]
+      `INSERT INTO compras_cta_cte (cliente_id, empresa_id, caja_id, importe, tipo, fecha, metodo_pago, created_at, updated_at) 
+       VALUES (?, ?, ?, ?, 'pago', ?, ?, NOW(), NOW())`,
+      [id, empresa_id, MY_CAJA, importe, fecha, metodo_pago]
     );
     const cta_cte_id = resultCtaCte.insertId;
 
-    // 3. Sincronizar con tabla de Pagos y Caja
+    // 3. Sincronizar con tabla de Pagos y Caja (Si hay arqueo abierto)
     if (arqueo_id) {
       const [resultPagosTable] = await connection.execute(
-        `INSERT INTO pagos (cliente_id, compra_cta_cte_id, monto, metodo_pago, fecha_pago, descripcion, empresa_id, arqueo_id, created_at) 
-         VALUES (?, ?, ?, ?, ?, 'Pago de Cuenta Corriente', ?, ?, NOW())`,
-        [id, cta_cte_id, importe, metodo_pago, fecha, empresa_id, arqueo_id]
+        `INSERT INTO pagos (cliente_id, compra_cta_cte_id, monto, metodo_pago, fecha_pago, descripcion, empresa_id, caja_id, arqueo_id, created_at) 
+         VALUES (?, ?, ?, ?, ?, 'Pago de Cuenta Corriente', ?, ?, ?, NOW())`,
+        [
+          id,
+          cta_cte_id,
+          importe,
+          metodo_pago,
+          fecha,
+          empresa_id,
+          MY_CAJA,
+          arqueo_id,
+        ]
       );
       const pago_real_id = resultPagosTable.insertId;
 
-      // Movimiento de caja solo si es Efectivo
+      // Movimiento de caja solo si es Efectivo (Ingresa dinero físico al cajón)
       if (metodo_pago === "efectivo") {
         const [cliente] = await connection.execute(
           "SELECT nombre_cliente FROM clientes WHERE id = ?",
           [id]
         );
         await connection.execute(
-          `INSERT INTO movimiento_cajas (tipo, monto, descripcion, arqueo_id, pago_id, created_at) 
-           VALUES ('Ingreso', ?, ?, ?, ?, NOW())`,
+          `INSERT INTO movimiento_cajas (tipo, monto, descripcion, arqueo_id, caja_id, pago_id, created_at) 
+           VALUES ('Ingreso', ?, ?, ?, ?, ?, NOW())`,
           [
             importe,
             `Pago Cta. Cte. Cliente: ${cliente[0].nombre_cliente}`,
             arqueo_id,
+            MY_CAJA,
             pago_real_id,
           ]
         );
@@ -197,7 +209,7 @@ const registrarPago = async (req, res) => {
 
     await connection.commit();
 
-    // 4. NOTIFICACIÓN WHATSAPP (Opción C)
+    // 4. NOTIFICACIÓN WHATSAPP
     const telefonoDestino = await getEmpresaPhone(empresa_id);
     if (telefonoDestino) {
       const [cli] = await connection.execute(
@@ -205,23 +217,22 @@ const registrarPago = async (req, res) => {
         [id]
       );
 
-      // Convertimos YYYY-MM-DD a DD/MM/YYYY
       const fechaFormateada = fecha.split("-").reverse().join("/");
 
       const msg =
-        `💰 *COBRO REGISTRADO* 💰\n\n` +
+        `💰 *COBRO REGISTRADO (CAJA ${MY_CAJA})* 💰\n\n` +
         `*Cliente:* ${cli[0].nombre_cliente}\n` +
         `*Monto:* $${parseFloat(importe).toLocaleString("es-AR", {
           minimumFractionDigits: 2,
         })}\n` +
         `*Método:* ${metodo_pago.toUpperCase()}\n` +
-        `*Fecha:* ${fechaFormateada}\n\n` + // 👈 Usamos la fecha formateada
-        `_Dinero ingresado al sistema correctamente._`;
+        `*Fecha:* ${fechaFormateada}\n\n` +
+        `_Dinero ingresado al sistema correctamente en terminal ${MY_CAJA}._`;
 
       sendWS(telefonoDestino, msg);
     }
 
-    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    // EMITIR EVENTO EN TIEMPO REAL
     const io = req.app.get("socketio");
     if (io) io.emit("update-dashboard");
 
@@ -230,7 +241,7 @@ const registrarPago = async (req, res) => {
       req,
       "PAGO",
       "CLIENTES_CTA_CTE",
-      `Se registró un pago de $${importe} para el cliente ID: ${id}`
+      `Se registró un pago de $${importe} en Caja ${MY_CAJA} para el cliente ID: ${id}`
     );
 
     res.json({ success: true, pago_id: cta_cte_id });

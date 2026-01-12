@@ -137,12 +137,50 @@ const storeVenta = async (req, res) => {
     const { precio_total, cliente_id, items } = req.body;
     const empresa_id = req.user.empresa_id;
 
-    // 2. Guardar la venta
+    // 2a. Guardar la venta
     const venta_id = await Venta.store(req.body, req.user.id, empresa_id);
 
     // 👈 EMITIR EVENTO EN TIEMPO REAL
     const io = req.app.get("socketio");
     io.emit("update-dashboard");
+
+    // 2b. 🚀 LÓGICA DE WHATSAPP AUTOMÁTICO 🚀
+    // Buscamos si el cliente tiene un teléfono registrado
+    if (cliente_id && cliente_id !== 1) {
+      // No enviamos si es Consumidor Final (ID 1)
+      const [clienteRows] = await db.execute(
+        "SELECT nombre_cliente, telefono FROM clientes WHERE id = ?",
+        [cliente_id]
+      );
+
+      if (clienteRows.length > 0 && clienteRows[0].telefono) {
+        const cliente = clienteRows[0];
+
+        // Preparamos el link del ticket (con token para acceso directo)
+        const token = req.headers.authorization?.split(" ")[1];
+        const baseUrl =
+          process.env.NODE_ENV === "production"
+            ? "https://sistema-ventas-backend-3nn3.onrender.com"
+            : "http://localhost:3001";
+
+        const linkTicket = `${baseUrl}/api/ventas/ticket/${venta_id}?token=${token}`;
+
+        const mensaje =
+          `¡Hola *${cliente.nombre_cliente}*! 👋\n\n` +
+          `Gracias por tu compra. Aquí tenés el link para descargar tu ticket:\n\n` +
+          `📄 *Ticket:* T-${venta_id.toString().padStart(8, "0")}\n` +
+          `💰 *Total:* $${parseFloat(precio_total).toLocaleString(
+            "es-AR"
+          )}\n\n` +
+          `🔗 *Link:* ${linkTicket}\n\n` +
+          `¡Esperamos verte pronto!`;
+
+        // Enviamos en segundo plano (sin esperar a que termine para no demorar la respuesta)
+        sendWS(cliente.telefono, mensaje).catch((e) =>
+          console.error("Error WS Auto:", e)
+        );
+      }
+    }
 
     console.log(`[VENTAS] Venta guardada con éxito. ID: ${venta_id}`);
 
@@ -1945,32 +1983,42 @@ const getReporteRentabilidad = async (req, res) => {
     const { desde, hasta } = req.query;
     const empresa_id = req.user.empresa_id;
 
-    // 1. Totales generales
-    const [totales] = await db.execute(
+    // 1. Totales de Ventas y Costos (Utilidad Bruta)
+    // Agregamos DATE(v.fecha) para ignorar la hora
+    const [totalesVentas] = await db.execute(
       `SELECT 
         IFNULL(SUM(dv.cantidad * dv.precio_venta), 0) as total_ventas,
         IFNULL(SUM(dv.cantidad * dv.precio_compra), 0) as total_costo
       FROM detalle_ventas dv
       JOIN ventas v ON dv.venta_id = v.id
-      WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?`,
+      WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ?`,
       [empresa_id, desde, hasta]
     );
 
-    const totalVentas = parseFloat(totales[0].total_ventas);
-    const totalCosto = parseFloat(totales[0].total_costo);
-    const gananciaNetaTotal = totalVentas - totalCosto;
+    // 2. Obtener Total de Gastos del periodo
+    // ✨ CORRECCIÓN CLAVE: DATE(fecha) para atrapar los gastos de hoy sin importar la hora
+    const [totalesGastos] = await db.execute(
+      `SELECT IFNULL(SUM(monto), 0) as total_gastos 
+       FROM gastos 
+       WHERE empresa_id = ? AND DATE(fecha) BETWEEN ? AND ?`,
+      [empresa_id, desde, hasta]
+    );
 
-    // 2. Ranking de PRODUCTOS (Incluyendo combos + Unidades de medida)
+    const totalVentas = parseFloat(totalesVentas[0].total_ventas);
+    const totalCosto = parseFloat(totalesVentas[0].total_costo);
+    const totalGastos = parseFloat(totalesGastos[0].total_gastos);
+
+    const gananciaBruta = totalVentas - totalCosto;
+    const gananciaNetaReal = gananciaBruta - totalGastos;
+
+    // 3. Ranking de PRODUCTOS (También corregimos con DATE() por seguridad)
     const [ranking] = await db.execute(
       `SELECT 
-        t.producto_id,
-        t.nombre,
-        t.unidad,
+        t.producto_id, t.nombre, t.unidad,
         SUM(t.cantidad_total) as cantidad_vendida,
         SUM(t.ganancia_total) as ganancia_periodo,
         SUM(t.venta_total) as total_venta_periodo
       FROM (
-          -- A. VENTAS DIRECTAS
           SELECT 
             p.id as producto_id, p.nombre, IFNULL(u.nombre, 'Unid.') as unidad,
             SUM(dv.cantidad) as cantidad_total,
@@ -1980,12 +2028,9 @@ const getReporteRentabilidad = async (req, res) => {
           JOIN ventas v ON dv.venta_id = v.id
           JOIN productos p ON dv.producto_id = p.id
           LEFT JOIN unidads u ON p.unidad_id = u.id
-          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
+          WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ?
           GROUP BY p.id, p.nombre, u.nombre
-
           UNION ALL
-
-          -- B. VENTAS POR COMBOS
           SELECT 
             p.id as producto_id, p.nombre, IFNULL(u.nombre, 'Unid.') as unidad,
             SUM(dv.cantidad * cp.cantidad) as cantidad_total,
@@ -1996,14 +2041,13 @@ const getReporteRentabilidad = async (req, res) => {
           JOIN combo_producto cp ON dv.combo_id = cp.combo_id
           JOIN productos p ON cp.producto_id = p.id
           LEFT JOIN unidads u ON p.unidad_id = u.id
-          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
+          WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ?
           GROUP BY p.id, p.nombre, u.nombre
       ) t
       GROUP BY t.producto_id, t.nombre, t.unidad`,
       [empresa_id, desde, hasta, empresa_id, desde, hasta]
     );
 
-    // 3. Traer todos los productos (con sus unidades)
     const [todosLosProductos] = await db.execute(
       `SELECT p.id, p.nombre, IFNULL(u.nombre, 'Unid.') as unidad 
        FROM productos p 
@@ -2019,17 +2063,14 @@ const getReporteRentabilidad = async (req, res) => {
       const total_venta = ventaData
         ? parseFloat(ventaData.total_venta_periodo)
         : 0;
-
       let margen = 0;
       if (total_venta > 0) margen = (ganancia / total_venta) * 100;
-
       let participacion = 0;
-      if (gananciaNetaTotal > 0 && ganancia > 0)
-        participacion = (ganancia / gananciaNetaTotal) * 100;
-
+      if (gananciaBruta > 0 && ganancia > 0)
+        participacion = (ganancia / gananciaBruta) * 100;
       return {
         nombre: p.nombre,
-        unidad: p.unidad, // 👈 Enviamos la unidad al frontend
+        unidad: p.unidad,
         cantidad,
         ganancia,
         total_venta,
@@ -2041,7 +2082,9 @@ const getReporteRentabilidad = async (req, res) => {
     res.json({
       totalVentas,
       totalCosto,
-      gananciaNeta: gananciaNetaTotal,
+      totalGastos,
+      gananciaBruta,
+      gananciaNetaReal,
       rankingProductos: rankingCompleto.sort((a, b) => b.ganancia - a.ganancia),
     });
   } catch (error) {
@@ -2100,7 +2143,13 @@ const getVentasDashboard = async (req, res) => {
     const currentMonth = parseInt(dateParts.month);
     const currentYear = parseInt(dateParts.year);
 
-    // --- 2. CONSULTA DE VENTAS Y DEVOLUCIONES (MONTO BRUTO) ---
+    // --- 2a. 🟢 NUEVA CONSULTA: PRODUCTOS BAJO STOCK 🟢 ---
+    const [bajoStockRows] = await db.execute(
+      "SELECT COUNT(*) as total FROM productos WHERE stock <= stock_minimo AND empresa_id = ?",
+      [empresa_id]
+    );
+
+    // --- 2b. CONSULTA DE VENTAS Y DEVOLUCIONES (MONTO BRUTO) ---
     const [v] = await db.execute(
       `
       SELECT 
@@ -2253,7 +2302,17 @@ const getVentasDashboard = async (req, res) => {
       parseFloat(gDevs[0].anio) -
       parseFloat(gas[0].anio);
 
+    // 🕵️ LOG PARA VERIFICAR EN LA TERMINAL DE NODE
+    console.log("--- DEBUG DASHBOARD ---");
+    console.log("Empresa ID:", empresa_id);
+    console.log("Bajo Stock detectado:", bajoStockRows[0].total);
+    console.log("-----------------------");
+
     res.json({
+      // Agregamos el dato que faltaba
+      productosBajoStock: bajoStockRows[0].total, // 👈 EL DASHBOARD AHORA RECIBE EL "1"
+
+      // Totales dinámicos
       ventas_dia,
       ventas_mes,
       ventas_anio,
