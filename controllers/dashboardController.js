@@ -33,7 +33,7 @@ const getFullChartData = async (req, res) => {
       [empresa_id, currentYear]
     );
 
-    // 2. Comparativa Diaria Mes Actual vs Anterior
+    // 2. Comparativa Diaria
     const [comparativaDiaria] = await db.execute(
       `SELECT d.dia,
         (SELECT IFNULL(SUM(precio_total),0) FROM ventas WHERE empresa_id = ? AND DAY(fecha) = d.dia AND MONTH(fecha) = ? AND YEAR(fecha) = ?) as actual,
@@ -86,7 +86,7 @@ const getFullChartData = async (req, res) => {
       [empresa_id, selectedMonth, currentYear]
     );
 
-    // ✨ NUEVO: 6. Ventas por Caja (Guerra de Cajas)
+    // 6. Ventas por Caja
     const [ventasPorCaja] = await db.execute(
       `SELECT caja_id, SUM(precio_total) as total
        FROM ventas
@@ -95,13 +95,44 @@ const getFullChartData = async (req, res) => {
       [empresa_id, selectedMonth, currentYear]
     );
 
+    // ✨ NUEVO: 7. Ventas por Hora (Heat Map de flujo de clientes)
+    const [ventasPorHora] = await db.execute(
+      `SELECT hora, SUM(total) as total
+       FROM (
+           -- Ventas positivas
+           SELECT HOUR(created_at) as hora, SUM(precio_total) as total
+           FROM ventas
+           WHERE empresa_id = ? AND MONTH(fecha) = ? AND YEAR(fecha) = ?
+           GROUP BY hora
+           
+           UNION ALL
+           
+           -- Devoluciones negativas
+           SELECT HOUR(created_at) as hora, SUM(precio_total * -1) as total
+           FROM devoluciones
+           WHERE empresa_id = ? AND MONTH(fecha) = ? AND YEAR(fecha) = ?
+           GROUP BY hora
+       ) t
+       GROUP BY hora
+       ORDER BY hora ASC`,
+      [
+        empresa_id,
+        selectedMonth,
+        currentYear,
+        empresa_id,
+        selectedMonth,
+        currentYear,
+      ]
+    );
+
     res.json({
       gananciasRaw,
       comparativaDiaria,
       balanceMensual,
       catVentas,
       catGastos,
-      ventasPorCaja, // 👈 Se envía al frontend
+      ventasPorCaja,
+      ventasPorHora, // 👈 Se envía al frontend
       categoriasLista: categorias.map((c) => c.nombre),
     });
   } catch (error) {

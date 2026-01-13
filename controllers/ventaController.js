@@ -131,32 +131,29 @@ const deleteTmpVenta = async (req, res) => {
 };
 
 const storeVenta = async (req, res) => {
-  console.log("--- INICIO REGISTRO DE VENTA ---");
+  console.log(
+    "--- INICIO REGISTRO DE VENTA CON BOT DE FIDELIZACIÓN DINÁMICO ---"
+  );
   try {
-    // 1. Extraer 'items' de req.body para poder recorrerlos después
     const { precio_total, cliente_id, items } = req.body;
     const empresa_id = req.user.empresa_id;
 
-    // 2a. Guardar la venta
+    // 1. Guardar la venta (Maneja Multicaja, Stock y Puntos en la DB)
     const venta_id = await Venta.store(req.body, req.user.id, empresa_id);
 
-    // 👈 EMITIR EVENTO EN TIEMPO REAL
+    // EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
     const io = req.app.get("socketio");
-    io.emit("update-dashboard");
+    if (io) io.emit("update-dashboard");
 
-    // 2b. 🚀 LÓGICA DE WHATSAPP AUTOMÁTICO 🚀
-    // Buscamos si el cliente tiene un teléfono registrado
-    if (cliente_id && cliente_id !== 1) {
-      // No enviamos si es Consumidor Final (ID 1)
+    // 2. 🚀 LÓGICA DE WHATSAPP AUTOMÁTICO (Ticket + Fidelización) 🚀
+    if (cliente_id && Number(cliente_id) !== 1) {
       const [clienteRows] = await db.execute(
-        "SELECT nombre_cliente, telefono FROM clientes WHERE id = ?",
+        "SELECT nombre_cliente, telefono, puntos FROM clientes WHERE id = ?",
         [cliente_id]
       );
 
       if (clienteRows.length > 0 && clienteRows[0].telefono) {
         const cliente = clienteRows[0];
-
-        // Preparamos el link del ticket (con token para acceso directo)
         const token = req.headers.authorization?.split(" ")[1];
         const baseUrl =
           process.env.NODE_ENV === "production"
@@ -165,7 +162,8 @@ const storeVenta = async (req, res) => {
 
         const linkTicket = `${baseUrl}/api/ventas/ticket/${venta_id}?token=${token}`;
 
-        const mensaje =
+        // --- MENSAJE A: ENVÍO DE TICKET ---
+        const mensajeTicket =
           `¡Hola *${cliente.nombre_cliente}*! 👋\n\n` +
           `Gracias por tu compra. Aquí tenés el link para descargar tu ticket:\n\n` +
           `📄 *Ticket:* T-${venta_id.toString().padStart(8, "0")}\n` +
@@ -175,64 +173,67 @@ const storeVenta = async (req, res) => {
           `🔗 *Link:* ${linkTicket}\n\n` +
           `¡Esperamos verte pronto!`;
 
-        // Enviamos en segundo plano (sin esperar a que termine para no demorar la respuesta)
-        sendWS(cliente.telefono, mensaje).catch((e) =>
-          console.error("Error WS Auto:", e)
+        await sendWS(cliente.telefono, mensajeTicket).catch((e) =>
+          console.error("Error WS Ticket:", e)
         );
+
+        // --- MENSAJE B: 🤖 BOT DE FIDELIZACIÓN (Umbral desde .env) ---
+        // Leemos del .env y convertimos a número. Si no existe, usamos 1000 por defecto.
+        const UMBRAL_REGALO = Number(process.env.PUNTOS_UMBRAL_REGALO || 1000);
+
+        if (cliente.puntos >= UMBRAL_REGALO) {
+          const mensajeRegalo =
+            `🎊 *¡FELICITACIONES ${cliente.nombre_cliente.toUpperCase()}!* 🎊\n\n` +
+            `¡Ya acumulaste *${cliente.puntos} puntos* en nuestro sistema!\n\n` +
+            `🎁 Tenés un beneficio de *$${cliente.puntos}* esperándote para tu próxima compra.\n\n` +
+            `¡Gracias por elegirnos! 🥂`;
+
+          setTimeout(() => {
+            sendWS(cliente.telefono, mensajeRegalo).catch((e) =>
+              console.error("Error WS Fidelización:", e)
+            );
+          }, 3500);
+        }
       }
     }
 
-    console.log(`[VENTAS] Venta guardada con éxito. ID: ${venta_id}`);
-
-    // 3. OBTENER EL TELÉFONO (Esto es lo que faltaba definir)
-    const telefonoDestino = await getEmpresaPhone(empresa_id);
-
-    // 4. Lógica de WhatsApp
-    if (telefonoDestino && items && items.length > 0) {
+    // 3. Lógica de WhatsApp al DUEÑO (Aviso de Stock Bajo)
+    const telefonoEmpresa = await getEmpresaPhone(empresa_id);
+    if (telefonoEmpresa && items) {
       for (const item of items) {
         if (item.producto_id) {
           const [prod] = await db.execute(
             "SELECT nombre, stock, stock_minimo FROM productos WHERE id = ?",
             [item.producto_id]
           );
-
-          if (prod.length > 0) {
-            const p = prod[0];
-            if (parseFloat(p.stock) <= parseFloat(p.stock_minimo)) {
-              const mensaje = `🚨 *ALERTA DE REPOSICIÓN* 🚨\n\nEl producto *${
-                p.nombre
-              }* acaba de quedar con stock bajo tras la venta *T-${venta_id
-                .toString()
-                .padStart(8, "0")}*.\n\n*Stock actual:* ${
-                p.stock
-              }\n*Mínimo permitido:* ${
-                p.stock_minimo
-              }\n\n_Por favor, genere un pedido al proveedor._`;
-
-              await sendWS(telefonoDestino, mensaje);
-              console.log(
-                `[WHATSAPP] Aviso enviado para el producto: ${p.nombre}`
-              );
-            }
+          if (
+            prod.length > 0 &&
+            parseFloat(prod[0].stock) <= parseFloat(prod[0].stock_minimo)
+          ) {
+            const mensajeStock = `🚨 *ALERTA DE REPOSICIÓN* 🚨\n\nProducto: *${
+              prod[0].nombre
+            }*\nStock actual: ${prod[0].stock}\n\n_Caja: ${MY_CAJA()}_`;
+            sendWS(telefonoEmpresa, mensajeStock).catch((e) =>
+              console.error("Error WS Stock:", e)
+            );
           }
         }
       }
     }
 
-    // 5. REGISTRO DE LOG
+    // 4. REGISTRO DE LOG
     await registrarLog(
       req,
       "CREAR",
       "VENTAS",
-      `Se registró una venta por un total de $${precio_total}. Ticket N°: ${venta_id}. Cliente ID: ${cliente_id}`
+      `Venta notificada. Ticket N°: ${venta_id}. Cliente ID: ${cliente_id}`
     );
 
     res.json({ success: true, venta_id });
   } catch (error) {
-    console.error("[VENTAS ERROR] Fallo al registrar venta:", error.message);
+    console.error("[VENTAS ERROR] Fallo:", error.message);
     res.status(500).json({ success: false, message: error.message });
   }
-  console.log("--- FIN REGISTRO DE VENTA ---");
 };
 
 const generarReporte = async (req, res) => {
@@ -438,35 +439,37 @@ const getInformeProductos = async (req, res) => {
       SELECT 
           codigo, nombre, unidad,
           SUM(cantidad_neta) as cantidad,
-          costo_unitario as costo,
-          precio_venta_unitario as venta,
-          SUM(ganancia_neta) as ganancia,
+          AVG(costo_unitario) as costo,
+          SUM(total_neto) / SUM(cantidad_neta) as venta,
+          SUM(total_neto - (cantidad_neta * costo_unitario)) as ganancia,
           SUM(total_neto) as total
       FROM (
-          -- 1. PRODUCTOS VENDIDOS INDIVIDUALMENTE (Usamos precios congelados dv.precio_...)
+          -- 1. PRODUCTOS VENDIDOS INDIVIDUALMENTE (Aplicando descuento proporcional de cabecera)
           SELECT 
               p.codigo, p.nombre, IFNULL(u.nombre, 'Unidad') as unidad,
               dv.cantidad as cantidad_neta,
               dv.precio_compra as costo_unitario,
-              dv.precio_venta as precio_venta_unitario,
-              (dv.cantidad * (dv.precio_venta - dv.precio_compra)) as ganancia_neta,
-              (dv.cantidad * dv.precio_venta) as total_neto
+              -- Calculamos el total neto de la línea aplicando el peso del descuento de la venta
+              (dv.cantidad * dv.precio_venta) * 
+              (CASE WHEN (SELECT SUM(dv2.cantidad * dv2.precio_venta) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id) = 0 THEN 1 
+               ELSE (v.precio_total / (SELECT SUM(dv2.cantidad * dv2.precio_venta) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id)) END) as total_neto
           FROM detalle_ventas dv
           JOIN ventas v ON dv.venta_id = v.id
           JOIN productos p ON dv.producto_id = p.id
           LEFT JOIN unidads u ON p.unidad_id = u.id
-          WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ?
+          WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ? AND dv.producto_id IS NOT NULL
 
           UNION ALL
 
-          -- 2. PRODUCTOS VENDIDOS DENTRO DE COMBOS (Explosión para exactitud)
+          -- 2. PRODUCTOS VENDIDOS DENTRO DE COMBOS (Aplicando descuento proporcional)
           SELECT 
               p.codigo, p.nombre, IFNULL(u.nombre, 'Unidad') as unidad,
               (dv.cantidad * cp.cantidad) as cantidad_neta,
               p.precio_compra as costo_unitario,
-              p.precio_venta as precio_venta_unitario,
-              ((dv.cantidad * cp.cantidad) * (p.precio_venta - p.precio_compra)) as ganancia_neta,
-              ((dv.cantidad * cp.cantidad) * p.precio_venta) as total_neto
+              -- Aquí el precio de venta del producto dentro del combo también se afecta por el total de la venta
+              ( (dv.cantidad * cp.cantidad) * p.precio_venta ) * 
+              (CASE WHEN (SELECT SUM(dv3.cantidad * dv3.precio_venta) FROM detalle_ventas dv3 WHERE dv3.venta_id = v.id) = 0 THEN 1 
+               ELSE (v.precio_total / (SELECT SUM(dv3.cantidad * dv3.precio_venta) FROM detalle_ventas dv3 WHERE dv3.venta_id = v.id)) END) as total_neto
           FROM detalle_ventas dv
           JOIN ventas v ON dv.venta_id = v.id
           JOIN combo_producto cp ON dv.combo_id = cp.combo_id
@@ -476,21 +479,19 @@ const getInformeProductos = async (req, res) => {
 
           UNION ALL
 
-          -- 3. DEVOLUCIONES (Restan)
+          -- 3. DEVOLUCIONES (Restan al total)
           SELECT 
               p.codigo, p.nombre, IFNULL(u.nombre, 'Unidad') as unidad,
               (dd.cantidad * -1) as cantidad_neta,
               p.precio_compra as costo_unitario,
-              p.precio_venta as precio_venta_unitario,
-              (dd.cantidad * (p.precio_venta - p.precio_compra) * -1) as ganancia_neta,
-              (dd.cantidad * p.precio_venta * -1) as total_neto
+              (dev.precio_total * ( (dd.cantidad * p.precio_venta) / (SELECT SUM(dd2.cantidad * p2.precio_venta) FROM detalle_devoluciones dd2 JOIN productos p2 ON dd2.producto_id = p2.id WHERE dd2.devolucion_id = dev.id) ) ) * -1 as total_neto
           FROM detalle_devoluciones dd
           JOIN devoluciones dev ON dd.devolucion_id = dev.id
           JOIN productos p ON dd.producto_id = p.id
           LEFT JOIN unidads u ON p.unidad_id = u.id
           WHERE dev.empresa_id = ? AND DATE(dev.fecha) BETWEEN ? AND ?
       ) as t
-      GROUP BY codigo, nombre, unidad, costo_unitario, precio_venta_unitario
+      GROUP BY codigo, nombre, unidad
       HAVING total <> 0
       ORDER BY total DESC
     `;
@@ -521,24 +522,30 @@ const generarInformeProductosPDF = async (req, res) => {
     const fInicio = fecha_inicio.split("-").reverse().join("/");
     const fFin = fecha_fin.split("-").reverse().join("/");
 
+    // Usamos la misma lógica de factor de descuento para que el PDF sea idéntico a la web
     const query = `
       SELECT 
           codigo, nombre, unidad, SUM(cantidad_neta) as cantidad,
-          costo_unitario as costo, precio_venta_unitario as venta,
-          SUM(ganancia_neta) as ganancia, SUM(total_neto) as total
+          AVG(costo_unitario) as costo, 
+          SUM(total_neto) / SUM(cantidad_neta) as venta,
+          SUM(total_neto - (cantidad_neta * costo_unitario)) as ganancia, 
+          SUM(total_neto) as total
       FROM (
-          SELECT p.codigo, p.nombre, IFNULL(u.nombre, 'Unid') as unidad, dv.cantidad as cantidad_neta, dv.precio_compra as costo_unitario, dv.precio_venta as precio_venta_unitario, (dv.cantidad * (dv.precio_venta - dv.precio_compra)) as ganancia_neta, (dv.cantidad * dv.precio_venta) as total_neto
+          SELECT p.codigo, p.nombre, IFNULL(u.nombre, 'Unid') as unidad, dv.cantidad as cantidad_neta, dv.precio_compra as costo_unitario,
+          (dv.cantidad * dv.precio_venta) * (CASE WHEN (SELECT SUM(dv2.cantidad * dv2.precio_venta) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id) = 0 THEN 1 ELSE (v.precio_total / (SELECT SUM(dv2.cantidad * dv2.precio_venta) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id)) END) as total_neto
           FROM detalle_ventas dv JOIN ventas v ON dv.venta_id = v.id JOIN productos p ON dv.producto_id = p.id LEFT JOIN unidads u ON p.unidad_id = u.id
-          WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ?
+          WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ? AND dv.producto_id IS NOT NULL
           UNION ALL
-          SELECT p.codigo, p.nombre, IFNULL(u.nombre, 'Unid') as unidad, (dv.cantidad * cp.cantidad) as cantidad_neta, p.precio_compra as costo_unitario, p.precio_venta as precio_venta_unitario, ((dv.cantidad * cp.cantidad) * (p.precio_venta - p.precio_compra)) as ganancia_neta, ((dv.cantidad * cp.cantidad) * p.precio_venta) as total_neto
+          SELECT p.codigo, p.nombre, IFNULL(u.nombre, 'Unid') as unidad, (dv.cantidad * cp.cantidad) as cantidad_neta, p.precio_compra as costo_unitario,
+          ((dv.cantidad * cp.cantidad) * p.precio_venta) * (CASE WHEN (SELECT SUM(dv2.cantidad * dv2.precio_venta) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id) = 0 THEN 1 ELSE (v.precio_total / (SELECT SUM(dv2.cantidad * dv2.precio_venta) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id)) END) as total_neto
           FROM detalle_ventas dv JOIN ventas v ON dv.venta_id = v.id JOIN combo_producto cp ON dv.combo_id = cp.combo_id JOIN productos p ON cp.producto_id = p.id LEFT JOIN unidads u ON p.unidad_id = u.id
           WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ?
           UNION ALL
-          SELECT p.codigo, p.nombre, IFNULL(u.nombre, 'Unid') as unidad, (dd.cantidad * -1) as cantidad_neta, p.precio_compra as costo_unitario, p.precio_venta as precio_venta_unitario, (dd.cantidad * (p.precio_venta - p.precio_compra) * -1) as ganancia_neta, (dd.cantidad * p.precio_venta * -1) as total_neto
+          SELECT p.codigo, p.nombre, IFNULL(u.nombre, 'Unid') as unidad, (dd.cantidad * -1) as cantidad_neta, p.precio_compra as costo_unitario,
+          (dev.precio_total * ((dd.cantidad * p.precio_venta) / (SELECT SUM(dd2.cantidad * p2.precio_venta) FROM detalle_devoluciones dd2 JOIN productos p2 ON dd2.producto_id = p2.id WHERE dd2.devolucion_id = dev.id))) * -1 as total_neto
           FROM detalle_devoluciones dd JOIN devoluciones dev ON dd.devolucion_id = dev.id JOIN productos p ON dd.producto_id = p.id LEFT JOIN unidads u ON p.unidad_id = u.id
           WHERE dev.empresa_id = ? AND DATE(dev.fecha) BETWEEN ? AND ?
-      ) as t GROUP BY codigo, nombre, unidad, costo_unitario, precio_venta_unitario ORDER BY total DESC`;
+      ) as t GROUP BY codigo, nombre, unidad ORDER BY total DESC`;
 
     const [productos] = await db.execute(query, [
       empresa_id,
@@ -552,7 +559,6 @@ const generarInformeProductosPDF = async (req, res) => {
       fecha_fin,
     ]);
 
-    // Helper de formato con 2 decimales forzados
     const fmt = (val) =>
       parseFloat(val).toLocaleString("es-AR", {
         minimumFractionDigits: 2,
@@ -571,7 +577,9 @@ const generarInformeProductosPDF = async (req, res) => {
       filas += `<tr>
             <td style="text-align:center">${p.codigo}</td>
             <td>${p.nombre}</td>
-            <td style="text-align:center">${p.cantidad} ${p.unidad}</td>
+            <td style="text-align:center">${parseFloat(p.cantidad)} ${
+        p.unit || "Unid"
+      }</td>
             <td style="text-align:right">$ ${fmt(p.costo)}</td>
             <td style="text-align:right">$ ${fmt(p.venta)}</td>
             <td style="text-align:right">$ ${fmt(p.ganancia)}</td>
@@ -580,13 +588,14 @@ const generarInformeProductosPDF = async (req, res) => {
     });
 
     const html = `<html><head><meta charset="UTF-8"><style>body{font-family:sans-serif;font-size:10px;color:#333;}table{width:100%;border-collapse:collapse;}th{background:#1a73e8;color:white;padding:5px;}td{padding:5px;border:1px solid #ddd;}.total{font-weight:bold;background:#eee;}</style></head>
-      <body><h1 style="text-align:center;color:#1a73e8">Informe de Ventas por Producto</h1><p style="text-align:center">Período: ${fInicio} - ${fFin}</p>
-      <table><thead><tr><th>CÓDIGO</th><th>PRODUCTO</th><th>CANT.</th><th>COSTO</th><th>VENTA</th><th>GANANCIA</th><th>TOTAL</th></tr></thead><tbody>${filas}
+      <body><h1 style="text-align:center;color:#1a73e8">Informe de Ventas por Producto (Neto)</h1><p style="text-align:center">Período: ${fInicio} - ${fFin}</p>
+      <table><thead><tr><th>CÓDIGO</th><th>PRODUCTO</th><th>CANT.</th><th>COSTO</th><th>VENTA (NETA)</th><th>GANANCIA</th><th>TOTAL</th></tr></thead><tbody>${filas}
       <tr class="total"><td colspan="2">TOTALES</td><td style="text-align:center">${tCant}</td><td></td><td></td><td style="text-align:right">$ ${fmt(
       tGan
     )}</td><td style="text-align:right">$ ${fmt(tTot)}</td></tr>
       </tbody></table></body></html>`;
 
+    const pdf = require("html-pdf");
     pdf
       .create(html, { format: "A4", orientation: "landscape", border: "10mm" })
       .toBuffer((err, buffer) => {
