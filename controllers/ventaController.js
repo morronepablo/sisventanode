@@ -433,7 +433,8 @@ const generarReporte = async (req, res) => {
 const getInformeProductos = async (req, res) => {
   try {
     const { fecha_inicio, fecha_fin } = req.query;
-    const empresa_id = req.user ? req.user.empresa_id : 1;
+    const empresa_id = req.user.empresa_id;
+    const MY_CAJA = Number(process.env.CAJA_ID || 1); // 👈 Filtro por terminal
 
     const query = `
       SELECT 
@@ -444,12 +445,11 @@ const getInformeProductos = async (req, res) => {
           SUM(total_neto - (cantidad_neta * costo_unitario)) as ganancia,
           SUM(total_neto) as total
       FROM (
-          -- 1. PRODUCTOS VENDIDOS INDIVIDUALMENTE (Aplicando descuento proporcional de cabecera)
+          -- 1. PRODUCTOS VENDIDOS INDIVIDUALMENTE (Neto de Promos y Caja)
           SELECT 
               p.codigo, p.nombre, IFNULL(u.nombre, 'Unidad') as unidad,
               dv.cantidad as cantidad_neta,
               dv.precio_compra as costo_unitario,
-              -- Calculamos el total neto de la línea aplicando el peso del descuento de la venta
               (dv.cantidad * dv.precio_venta) * 
               (CASE WHEN (SELECT SUM(dv2.cantidad * dv2.precio_venta) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id) = 0 THEN 1 
                ELSE (v.precio_total / (SELECT SUM(dv2.cantidad * dv2.precio_venta) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id)) END) as total_neto
@@ -457,17 +457,16 @@ const getInformeProductos = async (req, res) => {
           JOIN ventas v ON dv.venta_id = v.id
           JOIN productos p ON dv.producto_id = p.id
           LEFT JOIN unidads u ON p.unidad_id = u.id
-          WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ? AND dv.producto_id IS NOT NULL
+          WHERE v.empresa_id = ? AND v.caja_id = ? AND DATE(v.fecha) BETWEEN ? AND ? AND dv.producto_id IS NOT NULL
 
           UNION ALL
 
-          -- 2. PRODUCTOS VENDIDOS DENTRO DE COMBOS (Aplicando descuento proporcional)
+          -- 2. PRODUCTOS VENDIDOS DENTRO DE COMBOS (Neto de Promos y Caja)
           SELECT 
               p.codigo, p.nombre, IFNULL(u.nombre, 'Unidad') as unidad,
               (dv.cantidad * cp.cantidad) as cantidad_neta,
               p.precio_compra as costo_unitario,
-              -- Aquí el precio de venta del producto dentro del combo también se afecta por el total de la venta
-              ( (dv.cantidad * cp.cantidad) * p.precio_venta ) * 
+              ((dv.cantidad * cp.cantidad) * p.precio_venta) * 
               (CASE WHEN (SELECT SUM(dv3.cantidad * dv3.precio_venta) FROM detalle_ventas dv3 WHERE dv3.venta_id = v.id) = 0 THEN 1 
                ELSE (v.precio_total / (SELECT SUM(dv3.cantidad * dv3.precio_venta) FROM detalle_ventas dv3 WHERE dv3.venta_id = v.id)) END) as total_neto
           FROM detalle_ventas dv
@@ -475,11 +474,11 @@ const getInformeProductos = async (req, res) => {
           JOIN combo_producto cp ON dv.combo_id = cp.combo_id
           JOIN productos p ON cp.producto_id = p.id
           LEFT JOIN unidads u ON p.unidad_id = u.id
-          WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ?
+          WHERE v.empresa_id = ? AND v.caja_id = ? AND DATE(v.fecha) BETWEEN ? AND ?
 
           UNION ALL
 
-          -- 3. DEVOLUCIONES (Restan al total)
+          -- 3. DEVOLUCIONES (Restan a la caja actual)
           SELECT 
               p.codigo, p.nombre, IFNULL(u.nombre, 'Unidad') as unidad,
               (dd.cantidad * -1) as cantidad_neta,
@@ -489,7 +488,7 @@ const getInformeProductos = async (req, res) => {
           JOIN devoluciones dev ON dd.devolucion_id = dev.id
           JOIN productos p ON dd.producto_id = p.id
           LEFT JOIN unidads u ON p.unidad_id = u.id
-          WHERE dev.empresa_id = ? AND DATE(dev.fecha) BETWEEN ? AND ?
+          WHERE dev.empresa_id = ? AND dev.caja_id = ? AND DATE(dev.fecha) BETWEEN ? AND ?
       ) as t
       GROUP BY codigo, nombre, unidad
       HAVING total <> 0
@@ -498,12 +497,15 @@ const getInformeProductos = async (req, res) => {
 
     const [rows] = await db.execute(query, [
       empresa_id,
+      MY_CAJA,
       fecha_inicio,
       fecha_fin, // Bloque 1
       empresa_id,
+      MY_CAJA,
       fecha_inicio,
       fecha_fin, // Bloque 2
       empresa_id,
+      MY_CAJA,
       fecha_inicio,
       fecha_fin, // Bloque 3
     ]);
@@ -519,10 +521,10 @@ const generarInformeProductosPDF = async (req, res) => {
   try {
     const { fecha_inicio, fecha_fin } = req.query;
     const empresa_id = req.query.empresa_id || 1;
+    const MY_CAJA = Number(process.env.CAJA_ID || 1); // 👈 Filtro por terminal
     const fInicio = fecha_inicio.split("-").reverse().join("/");
     const fFin = fecha_fin.split("-").reverse().join("/");
 
-    // Usamos la misma lógica de factor de descuento para que el PDF sea idéntico a la web
     const query = `
       SELECT 
           codigo, nombre, unidad, SUM(cantidad_neta) as cantidad,
@@ -534,27 +536,30 @@ const generarInformeProductosPDF = async (req, res) => {
           SELECT p.codigo, p.nombre, IFNULL(u.nombre, 'Unid') as unidad, dv.cantidad as cantidad_neta, dv.precio_compra as costo_unitario,
           (dv.cantidad * dv.precio_venta) * (CASE WHEN (SELECT SUM(dv2.cantidad * dv2.precio_venta) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id) = 0 THEN 1 ELSE (v.precio_total / (SELECT SUM(dv2.cantidad * dv2.precio_venta) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id)) END) as total_neto
           FROM detalle_ventas dv JOIN ventas v ON dv.venta_id = v.id JOIN productos p ON dv.producto_id = p.id LEFT JOIN unidads u ON p.unidad_id = u.id
-          WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ? AND dv.producto_id IS NOT NULL
+          WHERE v.empresa_id = ? AND v.caja_id = ? AND DATE(v.fecha) BETWEEN ? AND ? AND dv.producto_id IS NOT NULL
           UNION ALL
           SELECT p.codigo, p.nombre, IFNULL(u.nombre, 'Unid') as unidad, (dv.cantidad * cp.cantidad) as cantidad_neta, p.precio_compra as costo_unitario,
           ((dv.cantidad * cp.cantidad) * p.precio_venta) * (CASE WHEN (SELECT SUM(dv2.cantidad * dv2.precio_venta) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id) = 0 THEN 1 ELSE (v.precio_total / (SELECT SUM(dv2.cantidad * dv2.precio_venta) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id)) END) as total_neto
           FROM detalle_ventas dv JOIN ventas v ON dv.venta_id = v.id JOIN combo_producto cp ON dv.combo_id = cp.combo_id JOIN productos p ON cp.producto_id = p.id LEFT JOIN unidads u ON p.unidad_id = u.id
-          WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ?
+          WHERE v.empresa_id = ? AND v.caja_id = ? AND DATE(v.fecha) BETWEEN ? AND ?
           UNION ALL
           SELECT p.codigo, p.nombre, IFNULL(u.nombre, 'Unid') as unidad, (dd.cantidad * -1) as cantidad_neta, p.precio_compra as costo_unitario,
           (dev.precio_total * ((dd.cantidad * p.precio_venta) / (SELECT SUM(dd2.cantidad * p2.precio_venta) FROM detalle_devoluciones dd2 JOIN productos p2 ON dd2.producto_id = p2.id WHERE dd2.devolucion_id = dev.id))) * -1 as total_neto
           FROM detalle_devoluciones dd JOIN devoluciones dev ON dd.devolucion_id = dev.id JOIN productos p ON dd.producto_id = p.id LEFT JOIN unidads u ON p.unidad_id = u.id
-          WHERE dev.empresa_id = ? AND DATE(dev.fecha) BETWEEN ? AND ?
+          WHERE dev.empresa_id = ? AND dev.caja_id = ? AND DATE(dev.fecha) BETWEEN ? AND ?
       ) as t GROUP BY codigo, nombre, unidad ORDER BY total DESC`;
 
     const [productos] = await db.execute(query, [
       empresa_id,
+      MY_CAJA,
       fecha_inicio,
       fecha_fin,
       empresa_id,
+      MY_CAJA,
       fecha_inicio,
       fecha_fin,
       empresa_id,
+      MY_CAJA,
       fecha_inicio,
       fecha_fin,
     ]);
@@ -578,7 +583,7 @@ const generarInformeProductosPDF = async (req, res) => {
             <td style="text-align:center">${p.codigo}</td>
             <td>${p.nombre}</td>
             <td style="text-align:center">${parseFloat(p.cantidad)} ${
-        p.unit || "Unid"
+        p.unidad || "Unid"
       }</td>
             <td style="text-align:right">$ ${fmt(p.costo)}</td>
             <td style="text-align:right">$ ${fmt(p.venta)}</td>
@@ -588,7 +593,7 @@ const generarInformeProductosPDF = async (req, res) => {
     });
 
     const html = `<html><head><meta charset="UTF-8"><style>body{font-family:sans-serif;font-size:10px;color:#333;}table{width:100%;border-collapse:collapse;}th{background:#1a73e8;color:white;padding:5px;}td{padding:5px;border:1px solid #ddd;}.total{font-weight:bold;background:#eee;}</style></head>
-      <body><h1 style="text-align:center;color:#1a73e8">Informe de Ventas por Producto (Neto)</h1><p style="text-align:center">Período: ${fInicio} - ${fFin}</p>
+      <body><h1 style="text-align:center;color:#1a73e8">Informe de Ventas por Producto (Neto) - CAJA ${MY_CAJA}</h1><p style="text-align:center">Período: ${fInicio} - ${fFin}</p>
       <table><thead><tr><th>CÓDIGO</th><th>PRODUCTO</th><th>CANT.</th><th>COSTO</th><th>VENTA (NETA)</th><th>GANANCIA</th><th>TOTAL</th></tr></thead><tbody>${filas}
       <tr class="total"><td colspan="2">TOTALES</td><td style="text-align:center">${tCant}</td><td></td><td></td><td style="text-align:right">$ ${fmt(
       tGan
@@ -612,6 +617,7 @@ const getInformeClientes = async (req, res) => {
   try {
     const { fecha_inicio, fecha_fin } = req.query;
     const empresa_id = req.user ? req.user.empresa_id : 1;
+    const MY_CAJA = Number(process.env.CAJA_ID || 1); // 👈 Filtro por terminal
 
     const query = `
       SELECT 
@@ -620,18 +626,18 @@ const getInformeClientes = async (req, res) => {
           SUM(total_neto) as total,
           (SUM(total_neto) - SUM(costo_total)) as ganancia
       FROM (
-          -- A. VENTAS REALES (Usamos precio_total de cabecera para incluir descuentos)
+          -- A. VENTAS REALES DE ESTA CAJA (Sincronizado con Dashboard)
           SELECT 
               IFNULL(cl.nombre_cliente, 'Consumidor Final') as nombre,
               v.precio_total as total_neto,
               (SELECT IFNULL(SUM(dv.cantidad * dv.precio_compra), 0) FROM detalle_ventas dv WHERE dv.venta_id = v.id) as costo_total
           FROM ventas v
           LEFT JOIN clientes cl ON v.cliente_id = cl.id
-          WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ?
+          WHERE v.empresa_id = ? AND v.caja_id = ? AND DATE(v.fecha) BETWEEN ? AND ?
 
           UNION ALL
 
-          -- B. DEVOLUCIONES (Restan al total y al costo)
+          -- B. DEVOLUCIONES DE ESTA CAJA (Restan al total)
           SELECT 
               IFNULL(cl.nombre_cliente, 'Consumidor Final') as nombre,
               dev.precio_total * -1 as total_neto,
@@ -641,7 +647,7 @@ const getInformeClientes = async (req, res) => {
                WHERE dd.devolucion_id = dev.id) * -1 as costo_total
           FROM devoluciones dev
           LEFT JOIN clientes cl ON dev.cliente_id = cl.id
-          WHERE dev.empresa_id = ? AND DATE(dev.fecha) BETWEEN ? AND ?
+          WHERE dev.empresa_id = ? AND dev.caja_id = ? AND DATE(dev.fecha) BETWEEN ? AND ?
       ) as t
       GROUP BY nombre
       ORDER BY total DESC
@@ -649,9 +655,11 @@ const getInformeClientes = async (req, res) => {
 
     const [rows] = await db.execute(query, [
       empresa_id,
+      MY_CAJA,
       fecha_inicio,
       fecha_fin, // Parámetros Ventas
       empresa_id,
+      MY_CAJA,
       fecha_inicio,
       fecha_fin, // Parámetros Devoluciones
     ]);
@@ -667,29 +675,36 @@ const generarInformeClientesPDF = async (req, res) => {
   try {
     const { fecha_inicio, fecha_fin } = req.query;
     const empresa_id = req.query.empresa_id || 1;
-
+    const MY_CAJA = Number(process.env.CAJA_ID || 1); // 👈 Filtro por terminal
     const fInicio = fecha_inicio.split("-").reverse().join("/");
     const fFin = fecha_fin.split("-").reverse().join("/");
 
-    // MISMA QUERY EXACTA QUE EL LISTADO PARA QUE LOS NÚMEROS SEAN IDENTICOS
     const query = `
       SELECT nombre, SUM(costo_total) as costo, SUM(total_neto) as total, (SUM(total_neto) - SUM(costo_total)) as ganancia
       FROM (
           SELECT IFNULL(cl.nombre_cliente, 'Consumidor Final') as nombre, v.precio_total as total_neto, (SELECT IFNULL(SUM(dv.cantidad * dv.precio_compra), 0) FROM detalle_ventas dv WHERE dv.venta_id = v.id) as costo_total
-          FROM ventas v LEFT JOIN clientes cl ON v.cliente_id = cl.id WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ?
+          FROM ventas v LEFT JOIN clientes cl ON v.cliente_id = cl.id WHERE v.empresa_id = ? AND v.caja_id = ? AND DATE(v.fecha) BETWEEN ? AND ?
           UNION ALL
           SELECT IFNULL(cl.nombre_cliente, 'Consumidor Final') as nombre, dev.precio_total * -1 as total_neto, (SELECT IFNULL(SUM(dd.cantidad * p.precio_compra), 0) FROM detalle_devoluciones dd JOIN productos p ON dd.producto_id = p.id WHERE dd.devolucion_id = dev.id) * -1 as costo_total
-          FROM devoluciones dev LEFT JOIN clientes cl ON dev.cliente_id = cl.id WHERE dev.empresa_id = ? AND DATE(dev.fecha) BETWEEN ? AND ?
+          FROM devoluciones dev LEFT JOIN clientes cl ON dev.cliente_id = cl.id WHERE dev.empresa_id = ? AND dev.caja_id = ? AND DATE(dev.fecha) BETWEEN ? AND ?
       ) as t GROUP BY nombre ORDER BY total DESC`;
 
     const [clientes] = await db.execute(query, [
       empresa_id,
+      MY_CAJA,
       fecha_inicio,
       fecha_fin,
       empresa_id,
+      MY_CAJA,
       fecha_inicio,
       fecha_fin,
     ]);
+
+    const fmt = (val) =>
+      parseFloat(val).toLocaleString("es-AR", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      });
 
     let filas = "";
     let totalCosto = 0;
@@ -700,7 +715,6 @@ const generarInformeClientesPDF = async (req, res) => {
       const costo = parseFloat(c.costo);
       const ganancia = parseFloat(c.ganancia);
       const total = parseFloat(c.total);
-
       totalCosto += costo;
       totalGanancia += ganancia;
       totalGral += total;
@@ -708,16 +722,9 @@ const generarInformeClientesPDF = async (req, res) => {
       filas += `
         <tr>
             <td style="text-align: left;">${c.nombre}</td>
-            <td style="text-align: right;">$ ${costo.toLocaleString("es-AR", {
-              minimumFractionDigits: 2,
-            })}</td>
-            <td style="text-align: right;">$ ${ganancia.toLocaleString(
-              "es-AR",
-              { minimumFractionDigits: 2 }
-            )}</td>
-            <td style="text-align: right;">$ ${total.toLocaleString("es-AR", {
-              minimumFractionDigits: 2,
-            })}</td>
+            <td style="text-align: right;">$ ${fmt(costo)}</td>
+            <td style="text-align: right;">$ ${fmt(ganancia)}</td>
+            <td style="text-align: right;">$ ${fmt(total)}</td>
         </tr>`;
     });
 
@@ -726,18 +733,18 @@ const generarInformeClientesPDF = async (req, res) => {
       <head>
           <meta charset="UTF-8">
           <style>
-              body { font-family: sans-serif; font-size: 12px; padding: 20px; }
+              body { font-family: sans-serif; font-size: 12px; padding: 20px; color: #333; }
               .header { text-align: center; margin-bottom: 30px; }
               .header h1 { color: #1a73e8; margin-bottom: 5px; }
               .table { width: 100%; border-collapse: collapse; }
               .table th { background-color: #1a73e8; color: white; padding: 10px; text-align: center; }
               .table td { padding: 10px; border-bottom: 1px solid #ddd; }
-              .total-row { font-weight: bold; background-color: #e8f0fe; }
+              .total-row { font-weight: bold; background-color: #e8f0fe; color: #1a73e8; }
           </style>
       </head>
       <body>
           <div class="header">
-              <h1>Informe de Ventas por Cliente</h1>
+              <h1>Informe de Ventas por Cliente - CAJA ${MY_CAJA}</h1>
               <p>Período: ${fInicio} - ${fFin}</p>
           </div>
           <table class="table">
@@ -753,30 +760,24 @@ const generarInformeClientesPDF = async (req, res) => {
                   ${filas}
                   <tr class="total-row">
                       <td>TOTAL GENERAL</td>
-                      <td style="text-align: right;">$ ${totalCosto.toLocaleString(
-                        "es-AR",
-                        { minimumFractionDigits: 2 }
+                      <td style="text-align: right;">$ ${fmt(totalCosto)}</td>
+                      <td style="text-align: right;">$ ${fmt(
+                        totalGanancia
                       )}</td>
-                      <td style="text-align: right;">$ ${totalGanancia.toLocaleString(
-                        "es-AR",
-                        { minimumFractionDigits: 2 }
-                      )}</td>
-                      <td style="text-align: right;">$ ${totalGral.toLocaleString(
-                        "es-AR",
-                        { minimumFractionDigits: 2 }
-                      )}</td>
+                      <td style="text-align: right;">$ ${fmt(totalGral)}</td>
                   </tr>
               </tbody>
           </table>
       </body>
       </html>`;
 
-    const options = { format: "A4", orientation: "portrait", border: "10mm" };
-    pdf.create(html, options).toBuffer((err, buffer) => {
-      if (err) return res.status(500).send("Error");
-      res.setHeader("Content-Type", "application/pdf");
-      res.send(buffer);
-    });
+    pdf
+      .create(html, { format: "A4", orientation: "portrait", border: "10mm" })
+      .toBuffer((err, buffer) => {
+        if (err) return res.status(500).send("Error");
+        res.setHeader("Content-Type", "application/pdf");
+        res.send(buffer);
+      });
   } catch (error) {
     console.error("ERROR PDF CLIENTES:", error);
     res.status(500).send("Error interno");
@@ -787,6 +788,7 @@ const getInformeMetodosPago = async (req, res) => {
   try {
     const { fecha_inicio, fecha_fin } = req.query;
     const empresa_id = req.user ? req.user.empresa_id : 1;
+    const MY_CAJA = Number(process.env.CAJA_ID || 1); // 👈 Filtro por terminal
 
     const query = `
             SELECT 
@@ -797,7 +799,7 @@ const getInformeMetodosPago = async (req, res) => {
                 SUM(transferencia) as transferencia,
                 SUM(total) as total
             FROM (
-                -- 1. SUMAR LAS VENTAS POR DÍA
+                -- 1. VENTAS POR DÍA EN ESTA CAJA
                 SELECT 
                     DATE(fecha) as fecha,
                     IFNULL(efectivo, 0) as efectivo,
@@ -806,11 +808,11 @@ const getInformeMetodosPago = async (req, res) => {
                     IFNULL(transferencia, 0) as transferencia,
                     IFNULL(precio_total, 0) as total
                 FROM ventas
-                WHERE empresa_id = ? AND fecha BETWEEN ? AND ?
+                WHERE empresa_id = ? AND caja_id = ? AND DATE(fecha) BETWEEN ? AND ?
 
                 UNION ALL
 
-                -- 2. RESTAR LAS DEVOLUCIONES (Siempre del efectivo)
+                -- 2. DEVOLUCIONES EN ESTA CAJA (Siempre restan del efectivo por defecto)
                 SELECT 
                     DATE(fecha) as fecha,
                     (IFNULL(precio_total, 0) * -1) as efectivo,
@@ -819,7 +821,7 @@ const getInformeMetodosPago = async (req, res) => {
                     0 as transferencia,
                     (IFNULL(precio_total, 0) * -1) as total
                 FROM devoluciones
-                WHERE empresa_id = ? AND fecha BETWEEN ? AND ?
+                WHERE empresa_id = ? AND caja_id = ? AND DATE(fecha) BETWEEN ? AND ?
             ) as consolidado
             GROUP BY fecha
             ORDER BY fecha ASC
@@ -827,9 +829,11 @@ const getInformeMetodosPago = async (req, res) => {
 
     const [rows] = await db.execute(query, [
       empresa_id,
+      MY_CAJA,
       fecha_inicio,
       fecha_fin, // Parámetros para Ventas
       empresa_id,
+      MY_CAJA,
       fecha_inicio,
       fecha_fin, // Parámetros para Devoluciones
     ]);
@@ -845,12 +849,10 @@ const generarInformeMetodosPagoPDF = async (req, res) => {
   try {
     const { fecha_inicio, fecha_fin } = req.query;
     const empresa_id = req.query.empresa_id || 1;
-
-    // Formateo de fechas para el título
+    const MY_CAJA = Number(process.env.CAJA_ID || 1); // 👈 Filtro por terminal
     const fInicio = fecha_inicio.split("-").reverse().join("/");
     const fFin = fecha_fin.split("-").reverse().join("/");
 
-    // QUERY CONSOLIDADA: Ventas (Suman) + Devoluciones (Restan del efectivo)
     const query = `
       SELECT 
           DATE_FORMAT(fecha, '%d/%m/%Y') as fecha_formateada,
@@ -860,42 +862,34 @@ const generarInformeMetodosPagoPDF = async (req, res) => {
           SUM(transferencia) as transferencia,
           SUM(total) as total
       FROM (
-          -- 1. VENTAS (Valores positivos)
-          SELECT 
-              DATE(fecha) as fecha, 
-              IFNULL(efectivo, 0) as efectivo, 
-              IFNULL(tarjeta, 0) as tarjeta, 
-              IFNULL(mercadopago, 0) as mercadopago, 
-              IFNULL(transferencia, 0) as transferencia, 
-              IFNULL(precio_total, 0) as total
+          SELECT DATE(fecha) as fecha, IFNULL(efectivo, 0) as efectivo, IFNULL(tarjeta, 0) as tarjeta, IFNULL(mercadopago, 0) as mercadopago, IFNULL(transferencia, 0) as transferencia, IFNULL(precio_total, 0) as total
           FROM ventas 
-          WHERE empresa_id = ? AND fecha BETWEEN ? AND ?
-
+          WHERE empresa_id = ? AND caja_id = ? AND DATE(fecha) BETWEEN ? AND ?
           UNION ALL
-
-          -- 2. DEVOLUCIONES (Restan del efectivo y del total)
-          SELECT 
-              DATE(fecha) as fecha, 
-              (IFNULL(precio_total, 0) * -1) as efectivo, 
-              0 as tarjeta, 
-              0 as mercadopago, 
-              0 as transferencia, 
-              (IFNULL(precio_total, 0) * -1) as total
+          SELECT DATE(fecha) as fecha, (IFNULL(precio_total, 0) * -1) as efectivo, 0 as tarjeta, 0 as mercadopago, 0 as transferencia, (IFNULL(precio_total, 0) * -1) as total
           FROM devoluciones 
-          WHERE empresa_id = ? AND fecha BETWEEN ? AND ?
+          WHERE empresa_id = ? AND caja_id = ? AND DATE(fecha) BETWEEN ? AND ?
       ) as consolidado
       GROUP BY fecha
-      ORDER BY fecha ASC
-    `;
+      ORDER BY fecha ASC`;
 
     const [datos] = await db.execute(query, [
       empresa_id,
+      MY_CAJA,
       fecha_inicio,
-      fecha_fin, // Paratemetros Ventas
+      fecha_fin,
       empresa_id,
+      MY_CAJA,
       fecha_inicio,
-      fecha_fin, // Paratemetros Devoluciones
+      fecha_fin,
     ]);
+
+    // Helper para 2 decimales obligatorios
+    const fmt = (val) =>
+      parseFloat(val).toLocaleString("es-AR", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      });
 
     let filas = "";
     let tEfe = 0,
@@ -905,12 +899,11 @@ const generarInformeMetodosPagoPDF = async (req, res) => {
       tGral = 0;
 
     datos.forEach((d) => {
-      const efe = parseFloat(d.efectivo) || 0;
-      const tar = parseFloat(d.tarjeta) || 0;
-      const mp = parseFloat(d.mercadopago) || 0;
-      const tra = parseFloat(d.transferencia) || 0;
-      const tot = parseFloat(d.total) || 0;
-
+      const efe = parseFloat(d.efectivo);
+      const tar = parseFloat(d.tarjeta);
+      const mp = parseFloat(d.mercadopago);
+      const tra = parseFloat(d.transferencia);
+      const tot = parseFloat(d.total);
       tEfe += efe;
       tTar += tar;
       tMP += mp;
@@ -920,22 +913,11 @@ const generarInformeMetodosPagoPDF = async (req, res) => {
       filas += `
         <tr>
             <td style="text-align: left;">${d.fecha_formateada}</td>
-            <td style="text-align: right;">$ ${efe.toLocaleString("es-AR", {
-              minimumFractionDigits: 2,
-            })}</td>
-            <td style="text-align: right;">$ ${tar.toLocaleString("es-AR", {
-              minimumFractionDigits: 2,
-            })}</td>
-            <td style="text-align: right;">$ ${mp.toLocaleString("es-AR", {
-              minimumFractionDigits: 2,
-            })}</td>
-            <td style="text-align: right;">$ ${tra.toLocaleString("es-AR", {
-              minimumFractionDigits: 2,
-            })}</td>
-            <td style="text-align: right; font-weight: bold;">$ ${tot.toLocaleString(
-              "es-AR",
-              { minimumFractionDigits: 2 }
-            )}</td>
+            <td style="text-align: right;">$ ${fmt(efe)}</td>
+            <td style="text-align: right;">$ ${fmt(tar)}</td>
+            <td style="text-align: right;">$ ${fmt(mp)}</td>
+            <td style="text-align: right;">$ ${fmt(tra)}</td>
+            <td style="text-align: right; font-weight: bold;">$ ${fmt(tot)}</td>
         </tr>`;
     });
 
@@ -948,14 +930,14 @@ const generarInformeMetodosPagoPDF = async (req, res) => {
               .header { text-align: center; margin-bottom: 20px; }
               .header h1 { color: #1a73e8; margin-bottom: 5px; }
               .table { width: 100%; border-collapse: collapse; }
-              .table th { background-color: #1a73e8; color: white; padding: 8px; font-size: 10px; text-transform: uppercase; }
+              .table th { background-color: #1a73e8; color: white; padding: 8px; font-size: 10px; }
               .table td { padding: 8px; border-bottom: 1px solid #eee; }
               .total-row { font-weight: bold; background-color: #f1f1f1; border-top: 2px solid #1a73e8; }
           </style>
       </head>
       <body>
           <div class="header">
-              <h1>Informe de Ventas por Forma de Pago</h1>
+              <h1>Ventas por Forma de Pago - CAJA ${MY_CAJA}</h1>
               <p>Período: ${fInicio} - ${fFin}</p>
           </div>
           <table class="table">
@@ -972,29 +954,16 @@ const generarInformeMetodosPagoPDF = async (req, res) => {
               <tbody>
                   ${
                     filas ||
-                    '<tr><td colspan="6" style="text-align:center;">No hay movimientos en este período</td></tr>'
+                    '<tr><td colspan="6" style="text-align:center;">Sin movimientos</td></tr>'
                   }
                   <tr class="total-row">
                       <td style="text-align: left;">TOTALES</td>
-                      <td style="text-align: right;">$ ${tEfe.toLocaleString(
-                        "es-AR",
-                        { minimumFractionDigits: 2 }
-                      )}</td>
-                      <td style="text-align: right;">$ ${tTar.toLocaleString(
-                        "es-AR",
-                        { minimumFractionDigits: 2 }
-                      )}</td>
-                      <td style="text-align: right;">$ ${tMP.toLocaleString(
-                        "es-AR",
-                        { minimumFractionDigits: 2 }
-                      )}</td>
-                      <td style="text-align: right;">$ ${tTra.toLocaleString(
-                        "es-AR",
-                        { minimumFractionDigits: 2 }
-                      )}</td>
-                      <td style="text-align: right; color: #1a73e8;">$ ${tGral.toLocaleString(
-                        "es-AR",
-                        { minimumFractionDigits: 2 }
+                      <td style="text-align: right;">$ ${fmt(tEfe)}</td>
+                      <td style="text-align: right;">$ ${fmt(tTar)}</td>
+                      <td style="text-align: right;">$ ${fmt(tMP)}</td>
+                      <td style="text-align: right;">$ ${fmt(tTra)}</td>
+                      <td style="text-align: right; color: #1a73e8;">$ ${fmt(
+                        tGral
                       )}</td>
                   </tr>
               </tbody>
@@ -1002,19 +971,15 @@ const generarInformeMetodosPagoPDF = async (req, res) => {
       </body>
       </html>`;
 
-    const options = { format: "A4", orientation: "landscape", border: "10mm" };
-
-    pdf.create(html, options).toBuffer((err, buffer) => {
-      if (err) {
-        console.error("ERROR CREANDO PDF:", err);
-        return res.status(500).send("Error al generar el PDF");
-      }
-      res.setHeader("Content-Type", "application/pdf");
-      res.send(buffer);
-    });
+    pdf
+      .create(html, { format: "A4", orientation: "landscape", border: "10mm" })
+      .toBuffer((err, buffer) => {
+        if (err) return res.status(500).send("Error");
+        res.setHeader("Content-Type", "application/pdf");
+        res.send(buffer);
+      });
   } catch (error) {
-    console.error("ERROR GENERAL PDF:", error);
-    res.status(500).send("Error interno del servidor");
+    res.status(500).send("Error interno");
   }
 };
 
@@ -1769,92 +1734,107 @@ const getReporteRentabilidad = async (req, res) => {
   try {
     const { desde, hasta } = req.query;
     const empresa_id = req.user.empresa_id;
+    const MY_CAJA = Number(process.env.CAJA_ID || 1); // 👈 Identidad de la terminal
 
-    // 1. Totales de Ventas y Costos (Utilidad Bruta)
-    // Agregamos DATE(v.fecha) para ignorar la hora
-    const [totalesVentas] = await db.execute(
-      `SELECT 
-        IFNULL(SUM(dv.cantidad * dv.precio_venta), 0) as total_ventas,
-        IFNULL(SUM(dv.cantidad * dv.precio_compra), 0) as total_costo
-      FROM detalle_ventas dv
-      JOIN ventas v ON dv.venta_id = v.id
-      WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ?`,
-      [empresa_id, desde, hasta]
+    // 1. VENTAS NETAS DE ESTA CAJA (Sincronizado con Dashboard)
+    // Calculamos: Suma de Tickets - Suma de Devoluciones
+    const [vRows] = await db.execute(
+      `SELECT IFNULL(SUM(precio_total), 0) as total FROM ventas 
+       WHERE empresa_id = ? AND caja_id = ? AND DATE(fecha) BETWEEN ? AND ?`,
+      [empresa_id, MY_CAJA, desde, hasta]
     );
 
-    // 2. Obtener Total de Gastos del periodo
-    // ✨ CORRECCIÓN CLAVE: DATE(fecha) para atrapar los gastos de hoy sin importar la hora
-    const [totalesGastos] = await db.execute(
-      `SELECT IFNULL(SUM(monto), 0) as total_gastos 
-       FROM gastos 
-       WHERE empresa_id = ? AND DATE(fecha) BETWEEN ? AND ?`,
-      [empresa_id, desde, hasta]
+    const [dRows] = await db.execute(
+      `SELECT IFNULL(SUM(precio_total), 0) as total FROM devoluciones 
+       WHERE empresa_id = ? AND caja_id = ? AND DATE(fecha) BETWEEN ? AND ?`,
+      [empresa_id, MY_CAJA, desde, hasta]
     );
 
-    const totalVentas = parseFloat(totalesVentas[0].total_ventas);
-    const totalCosto = parseFloat(totalesVentas[0].total_costo);
-    const totalGastos = parseFloat(totalesGastos[0].total_gastos);
+    // 2. COSTO DE MERCADERÍA (CMV) Y GASTOS DE ESTA CAJA
+    const [cRows] = await db.execute(
+      `SELECT IFNULL(SUM(dv.cantidad * dv.precio_compra), 0) as total 
+       FROM detalle_ventas dv 
+       JOIN ventas v ON dv.venta_id = v.id 
+       WHERE v.empresa_id = ? AND v.caja_id = ? AND DATE(v.fecha) BETWEEN ? AND ?`,
+      [empresa_id, MY_CAJA, desde, hasta]
+    );
 
-    const gananciaBruta = totalVentas - totalCosto;
+    const [gRows] = await db.execute(
+      `SELECT IFNULL(SUM(monto), 0) as total FROM gastos 
+       WHERE empresa_id = ? AND caja_id = ? AND DATE(fecha) BETWEEN ? AND ?`,
+      [empresa_id, MY_CAJA, desde, hasta]
+    );
+
+    const totalVentasBrutas = parseFloat(vRows[0].total);
+    const totalDevoluciones = parseFloat(dRows[0].total);
+    const totalVentasNetas = totalVentasBrutas - totalDevoluciones;
+    const totalCosto = parseFloat(cRows[0].total);
+    const totalGastos = parseFloat(gRows[0].total);
+
+    const gananciaBruta = totalVentasNetas - totalCosto;
     const gananciaNetaReal = gananciaBruta - totalGastos;
 
-    // 3. Ranking de PRODUCTOS (También corregimos con DATE() por seguridad)
+    // 3. RANKING DE PRODUCTOS (Incluyendo combos + prorrateo de descuentos de venta)
     const [ranking] = await db.execute(
       `SELECT 
         t.producto_id, t.nombre, t.unidad,
         SUM(t.cantidad_total) as cantidad_vendida,
-        SUM(t.ganancia_total) as ganancia_periodo,
-        SUM(t.venta_total) as total_venta_periodo
+        SUM(t.ganancia_real) as ganancia_periodo,
+        SUM(t.venta_real) as total_venta_periodo
       FROM (
+          -- A. VENTAS DIRECTAS (Prorrateadas con el descuento del ticket)
           SELECT 
             p.id as producto_id, p.nombre, IFNULL(u.nombre, 'Unid.') as unidad,
             SUM(dv.cantidad) as cantidad_total,
-            SUM(dv.cantidad * (dv.precio_venta - dv.precio_compra)) as ganancia_total,
-            SUM(dv.cantidad * dv.precio_venta) as venta_total
+            SUM((dv.cantidad * dv.precio_venta) * (v.precio_total / (SELECT SUM(dv2.cantidad * dv2.precio_venta) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id))) as venta_real,
+            SUM(((dv.cantidad * dv.precio_venta) * (v.precio_total / (SELECT SUM(dv2.cantidad * dv2.precio_venta) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id))) - (dv.cantidad * dv.precio_compra)) as ganancia_real
           FROM detalle_ventas dv
           JOIN ventas v ON dv.venta_id = v.id
           JOIN productos p ON dv.producto_id = p.id
           LEFT JOIN unidads u ON p.unidad_id = u.id
-          WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ?
+          WHERE v.empresa_id = ? AND v.caja_id = ? AND DATE(v.fecha) BETWEEN ? AND ?
           GROUP BY p.id, p.nombre, u.nombre
+
           UNION ALL
+
+          -- B. VENTAS POR COMBOS (Prorrateadas con el descuento del ticket)
           SELECT 
             p.id as producto_id, p.nombre, IFNULL(u.nombre, 'Unid.') as unidad,
             SUM(dv.cantidad * cp.cantidad) as cantidad_total,
-            SUM((dv.cantidad * cp.cantidad) * (p.precio_venta - p.precio_compra)) as ganancia_total,
-            SUM((dv.cantidad * cp.cantidad) * p.precio_venta) as venta_total
+            SUM((dv.cantidad * cp.cantidad * p.precio_venta) * (v.precio_total / (SELECT SUM(dv3.cantidad * dv3.precio_venta) FROM detalle_ventas dv3 WHERE dv3.venta_id = v.id))) as venta_real,
+            SUM(((dv.cantidad * cp.cantidad * p.precio_venta) * (v.precio_total / (SELECT SUM(dv3.cantidad * dv3.precio_venta) FROM detalle_ventas dv3 WHERE dv3.venta_id = v.id))) - (dv.cantidad * cp.cantidad * p.precio_compra)) as ganancia_real
           FROM detalle_ventas dv
           JOIN ventas v ON dv.venta_id = v.id
           JOIN combo_producto cp ON dv.combo_id = cp.combo_id
           JOIN productos p ON cp.producto_id = p.id
           LEFT JOIN unidads u ON p.unidad_id = u.id
-          WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ?
+          WHERE v.empresa_id = ? AND v.caja_id = ? AND DATE(v.fecha) BETWEEN ? AND ?
           GROUP BY p.id, p.nombre, u.nombre
       ) t
       GROUP BY t.producto_id, t.nombre, t.unidad`,
-      [empresa_id, desde, hasta, empresa_id, desde, hasta]
+      [empresa_id, MY_CAJA, desde, hasta, empresa_id, MY_CAJA, desde, hasta]
     );
 
+    // 4. Traer todos los productos para que figuren aunque tengan 0 ventas
     const [todosLosProductos] = await db.execute(
       `SELECT p.id, p.nombre, IFNULL(u.nombre, 'Unid.') as unidad 
-       FROM productos p 
-       LEFT JOIN unidads u ON p.unidad_id = u.id 
+       FROM productos p LEFT JOIN unidads u ON p.unidad_id = u.id 
        WHERE p.empresa_id = ?`,
       [empresa_id]
     );
 
     const rankingCompleto = todosLosProductos.map((p) => {
-      const ventaData = ranking.find((r) => r.producto_id === p.id);
-      const cantidad = ventaData ? parseFloat(ventaData.cantidad_vendida) : 0;
-      const ganancia = ventaData ? parseFloat(ventaData.ganancia_periodo) : 0;
-      const total_venta = ventaData
-        ? parseFloat(ventaData.total_venta_periodo)
-        : 0;
-      let margen = 0;
-      if (total_venta > 0) margen = (ganancia / total_venta) * 100;
-      let participacion = 0;
-      if (gananciaBruta > 0 && ganancia > 0)
-        participacion = (ganancia / gananciaBruta) * 100;
+      const vData = ranking.find((r) => r.producto_id === p.id);
+      const cantidad = vData ? parseFloat(vData.cantidad_vendida) : 0;
+      const ganancia = vData ? parseFloat(vData.ganancia_periodo) : 0;
+      const total_venta = vData ? parseFloat(vData.total_venta_periodo) : 0;
+
+      let margen = total_venta > 0 ? (ganancia / total_venta) * 100 : 0;
+      let participacion =
+        gananciaBruta > 0 && ganancia > 0
+          ? (ganancia / gananciaBruta) * 100
+          : 0;
+
       return {
         nombre: p.nombre,
         unidad: p.unidad,
@@ -1867,7 +1847,7 @@ const getReporteRentabilidad = async (req, res) => {
     });
 
     res.json({
-      totalVentas,
+      totalVentas: totalVentasNetas, // Coincide con Dashboard
       totalCosto,
       totalGastos,
       gananciaBruta,
@@ -1875,7 +1855,7 @@ const getReporteRentabilidad = async (req, res) => {
       rankingProductos: rankingCompleto.sort((a, b) => b.ganancia - a.ganancia),
     });
   } catch (error) {
-    console.error(error);
+    console.error("ERROR RENTABILIDAD:", error);
     res.status(500).json({ message: "Error interno" });
   }
 };
@@ -1912,209 +1892,95 @@ const getVentasSummary = async (req, res) => {
 
 const getVentasDashboard = async (req, res) => {
   try {
-    const empresa_id = req.user ? req.user.empresa_id : 1;
+    const empresa_id = req.user.empresa_id;
+    const MY_CAJA = Number(process.env.CAJA_ID || 1);
 
-    // --- 1. CÁLCULO DE FECHA LOCAL ARGENTINA ---
     const options = {
       timeZone: "America/Argentina/Buenos_Aires",
       year: "numeric",
       month: "numeric",
       day: "numeric",
     };
-    const formatter = new Intl.DateTimeFormat("en-CA", options);
-    const parts = formatter.formatToParts(new Date());
-    const dateParts = {};
-    parts.forEach((p) => (dateParts[p.type] = p.value));
-
-    const todayStr = `${dateParts.year}-${dateParts.month}-${dateParts.day}`;
-    const currentMonth = parseInt(dateParts.month);
-    const currentYear = parseInt(dateParts.year);
-
-    // --- 2a. 🟢 NUEVA CONSULTA: PRODUCTOS BAJO STOCK 🟢 ---
-    const [bajoStockRows] = await db.execute(
-      "SELECT COUNT(*) as total FROM productos WHERE stock <= stock_minimo AND empresa_id = ?",
-      [empresa_id]
+    const todayStr = new Intl.DateTimeFormat("en-CA", options).format(
+      new Date()
     );
+    const currentMonth = new Date().getMonth() + 1;
+    const currentYear = new Date().getFullYear();
 
-    // --- 2b. CONSULTA DE VENTAS Y DEVOLUCIONES (MONTO BRUTO) ---
+    // 1. VENTAS NETAS (Filtro estricto por Caja y Empresa)
     const [v] = await db.execute(
-      `
-      SELECT 
+      `SELECT 
         IFNULL(SUM(CASE WHEN DATE(fecha) = ? THEN precio_total ELSE 0 END), 0) as dia,
         IFNULL(SUM(CASE WHEN MONTH(fecha) = ? AND YEAR(fecha) = ? THEN precio_total ELSE 0 END), 0) as mes,
         IFNULL(SUM(CASE WHEN YEAR(fecha) = ? THEN precio_total ELSE 0 END), 0) as anio
-      FROM ventas WHERE empresa_id = ?
-    `,
-      [todayStr, currentMonth, currentYear, currentYear, empresa_id]
+      FROM ventas WHERE empresa_id = ? AND caja_id = ?`,
+      [todayStr, currentMonth, currentYear, currentYear, empresa_id, MY_CAJA]
     );
 
     const [d] = await db.execute(
-      `
-      SELECT 
+      `SELECT 
         IFNULL(SUM(CASE WHEN DATE(fecha) = ? THEN precio_total ELSE 0 END), 0) as dia,
         IFNULL(SUM(CASE WHEN MONTH(fecha) = ? AND YEAR(fecha) = ? THEN precio_total ELSE 0 END), 0) as mes,
-        IFNULL(SUM(CASE WHEN YEAR(fecha) = ? THEN precio_total ELSE 0 END), 0) as anio,
-        COUNT(id) as total_cantidad
-      FROM devoluciones WHERE empresa_id = ?
-    `,
-      [todayStr, currentMonth, currentYear, currentYear, empresa_id]
+        IFNULL(SUM(CASE WHEN YEAR(fecha) = ? THEN precio_total ELSE 0 END), 0) as anio
+      FROM devoluciones WHERE empresa_id = ? AND caja_id = ?`,
+      [todayStr, currentMonth, currentYear, currentYear, empresa_id, MY_CAJA]
     );
 
-    // --- 3. GANANCIA BRUTA DE VENTAS (Incluye Productos y Combos) ---
-    const [gVentas] = await db.execute(
-      `
-      SELECT 
-        IFNULL(SUM(CASE WHEN DATE(fecha_v) = ? THEN ganancia ELSE 0 END), 0) as dia,
-        IFNULL(SUM(CASE WHEN MONTH(fecha_v) = ? AND YEAR(fecha_v) = ? THEN ganancia ELSE 0 END), 0) as mes,
-        IFNULL(SUM(CASE WHEN YEAR(fecha_v) = ? THEN ganancia ELSE 0 END), 0) as anio
-      FROM (
-        SELECT v.fecha as fecha_v, (dv.cantidad * (p.precio_venta - p.precio_compra)) as ganancia
-        FROM detalle_ventas dv
-        JOIN ventas v ON dv.venta_id = v.id
-        JOIN productos p ON dv.producto_id = p.id
-        WHERE v.empresa_id = ? AND dv.producto_id IS NOT NULL
-        UNION ALL
-        SELECT v.fecha as fecha_v, (dv.cantidad * (c.precio_venta - (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id))) as ganancia
-        FROM detalle_ventas dv
-        JOIN ventas v ON dv.venta_id = v.id
-        JOIN combos c ON dv.combo_id = c.id
-        WHERE v.empresa_id = ? AND dv.combo_id IS NOT NULL
-      ) as t_ventas
-    `,
-      [todayStr, currentMonth, currentYear, currentYear, empresa_id, empresa_id]
+    // 2. GANANCIA NETA REAL (Precio Cobrado - Costo)
+    const [gReal] = await db.execute(
+      `SELECT 
+        IFNULL(SUM(CASE WHEN DATE(fecha) = ? THEN (precio_total - costo_total) ELSE 0 END), 0) as dia,
+        IFNULL(SUM(CASE WHEN MONTH(fecha) = ? AND YEAR(fecha) = ? THEN (precio_total - costo_total) ELSE 0 END), 0) as mes,
+        IFNULL(SUM(CASE WHEN YEAR(fecha) = ? THEN (precio_total - costo_total) ELSE 0 END), 0) as anio
+       FROM (
+         SELECT v.fecha, v.precio_total, v.empresa_id, v.caja_id,
+                (SELECT IFNULL(SUM(dv.cantidad * dv.precio_compra), 0) FROM detalle_ventas dv WHERE dv.venta_id = v.id) as costo_total
+         FROM ventas v
+       ) t WHERE empresa_id = ? AND caja_id = ?`,
+      [todayStr, currentMonth, currentYear, currentYear, empresa_id, MY_CAJA]
     );
 
-    // --- 4. GANANCIA PERDIDA POR DEVOLUCIONES (Para restar de la ganancia bruta) ---
-    const [gDevs] = await db.execute(
-      `
-        SELECT 
-          IFNULL(SUM(CASE WHEN DATE(fecha_d) = ? THEN g_p ELSE 0 END), 0) as dia,
-          IFNULL(SUM(CASE WHEN MONTH(fecha_d) = ? AND YEAR(fecha_d) = ? THEN g_p ELSE 0 END), 0) as mes,
-          IFNULL(SUM(CASE WHEN YEAR(fecha_d) = ? THEN g_p ELSE 0 END), 0) as anio
-        FROM (
-          SELECT dev.fecha as fecha_d, (dd.cantidad * (p.precio_venta - p.precio_compra)) as g_p
-          FROM detalle_devoluciones dd
-          JOIN devoluciones dev ON dd.devolucion_id = dev.id
-          JOIN productos p ON dd.producto_id = p.id
-          WHERE dev.empresa_id = ? AND dd.producto_id IS NOT NULL
-          UNION ALL
-          SELECT dev.fecha as fecha_d, (dd.cantidad * (c.precio_venta - (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = c.id))) as g_p
-          FROM detalle_devoluciones dd
-          JOIN devoluciones dev ON dd.devolucion_id = dev.id
-          JOIN combos c ON dd.combo_id = c.id
-          WHERE dev.empresa_id = ? AND dd.combo_id IS NOT NULL
-        ) as t_devs
-    `,
-      [todayStr, currentMonth, currentYear, currentYear, empresa_id, empresa_id]
-    );
-
-    // --- 5. TOTAL GASTOS (Egresos operativos) ---
+    // 3. GASTOS DE ESTA CAJA
     const [gas] = await db.execute(
-      `
-      SELECT 
+      `SELECT 
         IFNULL(SUM(CASE WHEN DATE(fecha) = ? THEN monto ELSE 0 END), 0) as dia,
         IFNULL(SUM(CASE WHEN MONTH(fecha) = ? AND YEAR(fecha) = ? THEN monto ELSE 0 END), 0) as mes,
         IFNULL(SUM(CASE WHEN YEAR(fecha) = ? THEN monto ELSE 0 END), 0) as anio
-      FROM gastos WHERE empresa_id = ?
-    `,
-      [todayStr, currentMonth, currentYear, currentYear, empresa_id]
+      FROM gastos WHERE empresa_id = ? AND caja_id = ?`,
+      [todayStr, currentMonth, currentYear, currentYear, empresa_id, MY_CAJA]
     );
 
-    // --- 6. DEUDA GENERAL ---
-    const [deudaRows] = await db.execute(
-      `
-      SELECT IFNULL(SUM(CASE WHEN tipo = 'deuda' THEN importe ELSE 0 END), 0) - 
-             IFNULL(SUM(CASE WHEN tipo = 'pago' THEN importe ELSE 0 END), 0) as total 
-      FROM compras_cta_cte WHERE empresa_id = ?
-    `,
-      [empresa_id]
-    );
+    // 4. CONTEOS INFOBOXES
+    const [counts] = await db.execute(`
+      SELECT 
+        (SELECT COUNT(*) FROM productos WHERE empresa_id = ${empresa_id}) as productos,
+        (SELECT COUNT(*) FROM productos WHERE empresa_id = ${empresa_id} AND stock <= stock_minimo) as bajoStock,
+        (SELECT COUNT(*) FROM clientes WHERE empresa_id = ${empresa_id}) as clientes,
+        (SELECT COUNT(*) FROM ventas WHERE empresa_id = ${empresa_id} AND caja_id = ${MY_CAJA}) as ventasCount,
+        (SELECT IFNULL(SUM(CASE WHEN tipo = 'deuda' THEN importe ELSE -importe END), 0) FROM compras_cta_cte WHERE empresa_id = ${empresa_id}) as deuda_gral
+    `);
 
-    // --- 7. RANKING TOP 10 ---
+    // Top Productos de esta caja
     const [top] = await db.execute(
       `
-        SELECT nombre, SUM(cant) as veces_vendido FROM (
-          -- 1. PRODUCTOS VENDIDOS INDIVIDUALMENTE (Filtrados por unidad)
-          SELECT p.nombre, SUM(dv.cantidad) as cant 
-          FROM detalle_ventas dv 
-          JOIN ventas v ON dv.venta_id = v.id 
-          JOIN productos p ON dv.producto_id = p.id
-          JOIN unidads u ON p.unidad_id = u.id
-          WHERE v.empresa_id = ? 
-            AND dv.producto_id IS NOT NULL 
-            AND u.nombre = 'Unidad' -- 👈 SOLO CONTAMOS LOS QUE SON POR UNIDAD
-          GROUP BY p.id, p.nombre
-
-          UNION ALL
-
-          -- 2. PRODUCTOS DENTRO DE COMBOS (Filtrados por unidad)
-          SELECT p.nombre, SUM(dv.cantidad * cp.cantidad) as cant 
-          FROM detalle_ventas dv
-          JOIN ventas v ON dv.venta_id = v.id 
-          JOIN combo_producto cp ON dv.combo_id = cp.combo_id
-          JOIN productos p ON cp.producto_id = p.id 
-          JOIN unidads u ON p.unidad_id = u.id
-          WHERE v.empresa_id = ? 
-            AND dv.combo_id IS NOT NULL 
-            AND u.nombre = 'Unidad' -- 👈 SOLO CONTAMOS LOS QUE SON POR UNIDAD
-          GROUP BY p.id, p.nombre
-        ) t 
-        GROUP BY nombre 
-        ORDER BY veces_vendido DESC 
-        LIMIT 10
-    `,
-      [empresa_id, empresa_id]
+      SELECT p.nombre, SUM(dv.cantidad) as veces_vendido 
+      FROM detalle_ventas dv JOIN ventas v ON dv.venta_id = v.id JOIN productos p ON dv.producto_id = p.id 
+      WHERE v.empresa_id = ? AND v.caja_id = ? GROUP BY p.id ORDER BY veces_vendido DESC LIMIT 10`,
+      [empresa_id, MY_CAJA]
     );
-
-    // --- CÁLCULOS FINALES ---
-    // Ventas Neta = Ventas Brutas - Devoluciones
-    const ventas_dia = Math.max(parseFloat(v[0].dia) - parseFloat(d[0].dia), 0);
-    const ventas_mes = Math.max(parseFloat(v[0].mes) - parseFloat(d[0].mes), 0);
-    const ventas_anio = Math.max(
-      parseFloat(v[0].anio) - parseFloat(d[0].anio),
-      0
-    );
-
-    // Ganancia Neta Real = (Ganancia Ventas - Ganancia Devoluciones) - Gastos
-    const ganancia_dia =
-      parseFloat(gVentas[0].dia) -
-      parseFloat(gDevs[0].dia) -
-      parseFloat(gas[0].dia);
-    const ganancia_mes =
-      parseFloat(gVentas[0].mes) -
-      parseFloat(gDevs[0].mes) -
-      parseFloat(gas[0].mes);
-    const ganancia_anio =
-      parseFloat(gVentas[0].anio) -
-      parseFloat(gDevs[0].anio) -
-      parseFloat(gas[0].anio);
-
-    // 🕵️ LOG PARA VERIFICAR EN LA TERMINAL DE NODE
-    console.log("--- DEBUG DASHBOARD ---");
-    console.log("Empresa ID:", empresa_id);
-    console.log("Bajo Stock detectado:", bajoStockRows[0].total);
-    console.log("-----------------------");
 
     res.json({
-      // Agregamos el dato que faltaba
-      productosBajoStock: bajoStockRows[0].total, // 👈 EL DASHBOARD AHORA RECIBE EL "1"
-
-      // Totales dinámicos
-      ventas_dia,
-      ventas_mes,
-      ventas_anio,
-      ganancia_dia, // Puede ser negativo si hay pérdidas
-      ganancia_mes,
-      ganancia_anio,
-      deuda_general: parseFloat(deudaRows[0].total || 0),
-      devoluciones_dia: parseFloat(d[0].dia),
-      devoluciones_mes: parseFloat(d[0].mes),
-      devoluciones_anio: parseFloat(d[0].anio),
-      devoluciones_total_cant: d[0].total_cantidad,
+      productosBajoStock: counts[0].bajoStock,
+      ventas_dia: Math.max(parseFloat(v[0].dia) - parseFloat(d[0].dia), 0),
+      ventas_mes: Math.max(parseFloat(v[0].mes) - parseFloat(d[0].mes), 0),
+      ventas_anio: Math.max(parseFloat(v[0].anio) - parseFloat(d[0].anio), 0),
+      ganancia_dia: parseFloat(gReal[0].dia) - parseFloat(gas[0].dia),
+      ganancia_mes: parseFloat(gReal[0].mes) - parseFloat(gas[0].mes),
+      ganancia_anio: parseFloat(gReal[0].anio) - parseFloat(gas[0].anio),
+      deuda_general: parseFloat(counts[0].deuda_gral),
       topProductos: top,
     });
   } catch (error) {
-    console.error("ERROR DASHBOARD:", error);
     res.status(500).json({ error: error.message });
   }
 };

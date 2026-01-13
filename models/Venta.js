@@ -68,7 +68,7 @@ const Venta = {
     return await db.execute("DELETE FROM tmp_ventas WHERE id = ?", [id]);
   },
 
-  // 5. PROCESO PRINCIPAL DE VENTA (MULTICAJA + STOCK COMBOS + FIDELIZACIÓN)
+  // 5. PROCESO PRINCIPAL DE VENTA (MULTICAJA + STOCK COMBOS + FIDELIZACIÓN + MOTOR DE PROMOS)
   store: async (datos, usuario_id, empresa_id) => {
     const MY_CAJA = Number(process.env.CAJA_ID || 1);
     const connection = await db.getConnection();
@@ -76,7 +76,7 @@ const Venta = {
     try {
       await connection.beginTransaction();
 
-      const precio_total = parseFloat(datos.precio_total || 0);
+      const precio_total_recibido = parseFloat(datos.precio_total || 0);
       const {
         cliente_id,
         fecha,
@@ -84,17 +84,8 @@ const Venta = {
         es_cuenta_corriente,
         descuento_porcentaje,
         descuento_monto,
-        puntos_canjeados, // 👈 Nuevo dato enviado desde el frontend
+        puntos_canjeados,
       } = datos;
-
-      // --- 🏆 CÁLCULO DE PUNTOS (Fidelización) ---
-      let puntosGanados = 0;
-      const canjeados = Number(puntos_canjeados || 0);
-
-      // Solo sumamos puntos si NO es Consumidor Final (ID 1)
-      if (Number(cliente_id) !== 1) {
-        puntosGanados = Math.floor(precio_total / 100); // 1 Punto cada $100
-      }
 
       // A. BUSCAR EL ARQUEO ABIERTO DE ESTA CAJA
       const [arqueoRows] = await connection.execute(
@@ -103,15 +94,62 @@ const Venta = {
       );
       const current_arqueo_id = arqueoRows.length > 0 ? arqueoRows[0].id : null;
 
-      // B. INSERTAR CABECERA DE VENTA (Incluyendo puntos)
+      // B. PROCESAR ITEMS TEMPORALES Y CALCULAR PROMOCIONES
+      const [tmpItems] = await connection.execute(
+        `SELECT t.*, 
+                p.precio_compra as p_costo, p.precio_venta as p_venta, p.aplicar_porcentaje, p.valor_porcentaje,
+                c.precio_venta as c_venta
+         FROM tmp_ventas t 
+         LEFT JOIN productos p ON t.producto_id = p.id 
+         LEFT JOIN combos c ON t.combo_id = c.id 
+         WHERE t.session_id = ?`,
+        [usuario_id]
+      );
+
+      let ahorroTotalPromos = 0;
+
+      for (const item of tmpItems) {
+        if (item.producto_id) {
+          // 🚀 BUSCAR PROMOCIÓN ACTIVA PARA EL PRODUCTO
+          const [promoRows] = await connection.execute(
+            "SELECT tipo FROM promociones WHERE producto_id = ? AND empresa_id = ? AND estado = 1 LIMIT 1",
+            [item.producto_id, empresa_id]
+          );
+
+          if (promoRows.length > 0) {
+            const tipoPromo = promoRows[0].tipo;
+            const precioUnidad = parseFloat(item.p_venta);
+            const cant = parseFloat(item.cantidad);
+
+            if (tipoPromo === "3x2" && cant >= 3) {
+              ahorroTotalPromos += Math.floor(cant / 3) * precioUnidad;
+            } else if (tipoPromo === "2da_al_70" && cant >= 2) {
+              ahorroTotalPromos += Math.floor(cant / 2) * (precioUnidad * 0.7);
+            } else if (tipoPromo === "2da_al_50" && cant >= 2) {
+              ahorroTotalPromos += Math.floor(cant / 2) * (precioUnidad * 0.5);
+            } else if (tipoPromo === "4x3" && cant >= 4) {
+              ahorroTotalPromos += Math.floor(cant / 4) * precioUnidad;
+            }
+          }
+        }
+      }
+
+      // El precio final es el total recibido (que ya debería venir calculado del front)
+      // Pero recalculamos puntos basándonos en ese total real.
+      let puntosGanados = 0;
+      if (Number(cliente_id) !== 1) {
+        puntosGanados = Math.floor(precio_total_recibido / 100);
+      }
+
+      // C. INSERTAR CABECERA DE VENTA
       const [resVenta] = await connection.execute(
         `INSERT INTO ventas (fecha, precio_total, puntos_ganados, puntos_canjeados, cliente_id, arqueo_id, empresa_id, caja_id, usuario_id, efectivo, tarjeta, mercadopago, transferencia, es_cuenta_corriente, descuento_porcentaje, descuento_monto, created_at, updated_at) 
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
         [
           fecha,
-          precio_total,
+          precio_total_recibido,
           puntosGanados,
-          canjeados,
+          Number(puntos_canjeados || 0),
           cliente_id,
           current_arqueo_id,
           empresa_id,
@@ -128,32 +166,20 @@ const Venta = {
       );
       const venta_id = resVenta.insertId;
 
-      // --- 🏆 ACTUALIZAR PUNTOS DEL CLIENTE ---
+      // D. ACTUALIZAR PUNTOS CLIENTE
       if (Number(cliente_id) !== 1) {
         await connection.execute(
           "UPDATE clientes SET puntos = puntos + ? - ? WHERE id = ?",
-          [puntosGanados, canjeados, cliente_id]
+          [puntosGanados, Number(puntos_canjeados || 0), cliente_id]
         );
       }
 
-      // C. PROCESAR ITEMS TEMPORALES
-      const [tmpItems] = await connection.execute(
-        `SELECT t.*, 
-                p.precio_compra as p_costo, p.precio_venta as p_venta, p.aplicar_porcentaje, p.valor_porcentaje,
-                c.precio_venta as c_venta
-         FROM tmp_ventas t 
-         LEFT JOIN productos p ON t.producto_id = p.id 
-         LEFT JOIN combos c ON t.combo_id = c.id 
-         WHERE t.session_id = ?`,
-        [usuario_id]
-      );
-
+      // E. PROCESAR DETALLES Y STOCK
       for (const item of tmpItems) {
         let costoFinal = 0;
         let precioFinal = 0;
 
         if (item.producto_id) {
-          // PRODUCTO INDIVIDUAL
           costoFinal = parseFloat(item.p_costo || 0);
           precioFinal =
             item.aplicar_porcentaje == 1
@@ -177,15 +203,12 @@ const Venta = {
             ]
           );
         } else if (item.combo_id) {
-          // COMBO (Explotar componentes)
           const [componentes] = await connection.execute(
             "SELECT producto_id, cantidad FROM combo_producto WHERE combo_id = ?",
             [item.combo_id]
           );
-
           precioFinal = parseFloat(item.c_venta || 0);
           let costoAcumulado = 0;
-
           for (const comp of componentes) {
             const cantADescontar =
               parseFloat(item.cantidad) * parseFloat(comp.cantidad);
@@ -229,7 +252,7 @@ const Venta = {
         );
       }
 
-      // D. MOVIMIENTO DE CAJA (Neto)
+      // F. MOVIMIENTO DE CAJA
       const efectivoReal = parseFloat(pagos.efectivo || 0);
       if (current_arqueo_id && efectivoReal > 0) {
         await connection.execute(
@@ -243,13 +266,13 @@ const Venta = {
         );
       }
 
-      // E. CUENTA CORRIENTE
+      // G. CUENTA CORRIENTE
       const pagadoTotal =
         parseFloat(pagos.efectivo || 0) +
         parseFloat(pagos.tarjeta || 0) +
         parseFloat(pagos.mercadopago || 0) +
         parseFloat(pagos.transferencia || 0);
-      if (es_cuenta_corriente && pagadoTotal < precio_total) {
+      if (es_cuenta_corriente && pagadoTotal < precio_total_recibido) {
         await connection.execute(
           "INSERT INTO compras_cta_cte (cliente_id, empresa_id, caja_id, venta_id, importe, tipo, fecha, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'deuda', ?, NOW(), NOW())",
           [
@@ -257,17 +280,15 @@ const Venta = {
             empresa_id,
             MY_CAJA,
             venta_id,
-            precio_total - pagadoTotal,
+            precio_total_recibido - pagadoTotal,
             fecha,
           ]
         );
       }
 
-      // F. LIMPIAR CARRITO
       await connection.execute("DELETE FROM tmp_ventas WHERE session_id = ?", [
         usuario_id,
       ]);
-
       await connection.commit();
       return venta_id;
     } catch (error) {
