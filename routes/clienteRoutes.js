@@ -21,6 +21,8 @@ const {
   generarReporteCobranzasPDF,
   reclamarDeuda,
   generarEstadoCuentaPDF,
+  getClientesPerdidos,
+  postRecapturaWhatsApp,
 } = require("../controllers/clienteController");
 const authMiddleware = require("../middlewares/authMiddleware");
 
@@ -34,11 +36,13 @@ router.get("/summary", getClientesSummary);
 router.get("/con-deuda", getClientesConDeuda);
 router.get("/informes/cobranzas", getInformeCobranzas);
 router.get("/informes/cobranzas-pdf", generarReporteCobranzasPDF);
+router.get("/recaptura", getClientesPerdidos);
 
 // Rutas de Gestión de Pagos y Tickets
 router.get("/pagos/ticket/:pagoId", getReciboPagoTicket);
 router.put("/pagos/:pagoId", updatePago);
 router.post("/reclamar-deuda/:id", reclamarDeuda);
+router.post("/enviar-recaptura/:id", postRecapturaWhatsApp);
 
 // Rutas principales de Clientes
 router.get("/", getListadoClientes);

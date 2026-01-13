@@ -1117,6 +1117,103 @@ const eliminarCliente = async (req, res) => {
   console.log("--- FIN ELIMINAR CLIENTE ---");
 };
 
+const getClientesPerdidos = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    // Buscamos clientes que:
+    // 1. No sean "Consumidor Final" (ID 1)
+    // 2. Su última venta sea hace más de 15 días
+    // 3. Obtenemos el nombre del producto que más veces compraron (su favorito)
+    const query = `
+      SELECT 
+        c.id, c.nombre_cliente, c.telefono,
+        MAX(v.fecha) as fecha_ultima_compra,
+        DATEDIFF(CURDATE(), MAX(v.fecha)) as dias_ausente,
+        (
+          SELECT p.nombre 
+          FROM detalle_ventas dv 
+          JOIN ventas v2 ON dv.venta_id = v2.id 
+          JOIN productos p ON dv.producto_id = p.id
+          WHERE v2.cliente_id = c.id
+          GROUP BY p.id 
+          ORDER BY SUM(dv.cantidad) DESC 
+          LIMIT 1
+        ) as producto_favorito
+      FROM clientes c
+      JOIN ventas v ON c.id = v.cliente_id
+      WHERE c.empresa_id = ? AND c.id != 1
+      GROUP BY c.id
+      HAVING dias_ausente >= 15
+      ORDER BY dias_ausente DESC
+    `;
+
+    const [clientes] = await db.execute(query, [empresa_id]);
+    res.json(clientes);
+  } catch (error) {
+    console.error("ERROR RECAPTURA:", error);
+    res.status(500).json({ message: "Error al analizar clientes" });
+  }
+};
+
+const postRecapturaWhatsApp = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const empresa_id = req.user.empresa_id;
+
+    // 1. Obtenemos los datos del cliente y su producto favorito
+    const query = `
+      SELECT 
+        c.nombre_cliente, c.telefono,
+        DATEDIFF(CURDATE(), (SELECT MAX(fecha) FROM ventas WHERE cliente_id = c.id)) as dias_ausente,
+        (
+          SELECT p.nombre FROM detalle_ventas dv 
+          JOIN ventas v2 ON dv.venta_id = v2.id 
+          JOIN productos p ON dv.producto_id = p.id
+          WHERE v2.cliente_id = c.id GROUP BY p.id ORDER BY SUM(dv.cantidad) DESC LIMIT 1
+        ) as producto_favorito
+      FROM clientes c WHERE c.id = ? AND c.empresa_id = ?
+    `;
+
+    const [rows] = await db.execute(query, [id, empresa_id]);
+    if (rows.length === 0)
+      return res.status(404).json({ message: "Cliente no encontrado" });
+
+    const cliente = rows[0];
+
+    // 2. Construimos el mensaje (Igual que el anterior pero para el Bot)
+    const mensaje =
+      `¡Hola *${cliente.nombre_cliente}*! 👋\n\n` +
+      `Te extrañamos en el local. Hace *${cliente.dias_ausente} días* que no nos visitas.\n\n` +
+      `Justo entró stock de *${
+        cliente.producto_favorito || "tus productos favoritos"
+      }* esperándote. 🛍️\n\n` +
+      `🎁 ¡En tu próxima compra presentá este mensaje y te regalamos un *10% de descuento*!\n\n` +
+      `¡Te esperamos pronto! 😊`;
+
+    // 3. ENVIAR DIRECTO (Igual que el ticket)
+    await sendWS(cliente.telefono, mensaje);
+
+    // 4. LOG de la acción
+    await registrarLog(
+      req,
+      "WHATSAPP",
+      "CLIENTES",
+      `Mensaje de recaptura enviado a ${cliente.nombre_cliente}`
+    );
+
+    res.json({
+      success: true,
+      message: "Mensaje enviado correctamente por el Bot.",
+    });
+  } catch (error) {
+    console.error("ERROR WS RECAPTURA:", error);
+    res
+      .status(500)
+      .json({ success: false, message: "Error al enviar WhatsApp" });
+  }
+};
+
 module.exports = {
   getListadoClientes,
   createCliente,
@@ -1137,4 +1234,6 @@ module.exports = {
   generarEstadoCuentaPDF,
   countClientes,
   getClientesSummary,
+  getClientesPerdidos,
+  postRecapturaWhatsApp,
 };
