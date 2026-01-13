@@ -884,6 +884,63 @@ const getProductosMuertos = async (req, res) => {
   }
 };
 
+const getSimulacionImpacto = async (req, res) => {
+  try {
+    const { categoria_id, porcentaje_ajuste } = req.query;
+    const empresa_id = req.user.empresa_id;
+    const ajuste = parseFloat(porcentaje_ajuste) / 100;
+
+    // 1. Analizamos ventas de los últimos 90 días para esa categoría
+    const query = `
+      SELECT 
+        SUM(dv.cantidad * dv.precio_venta) as facturacion_total,
+        SUM(dv.cantidad * dv.precio_compra) as costo_total,
+        COUNT(DISTINCT v.id) as cantidad_operaciones
+      FROM detalle_ventas dv
+      JOIN ventas v ON dv.venta_id = v.id
+      JOIN productos p ON dv.producto_id = p.id
+      WHERE v.empresa_id = ? 
+        AND p.categoria_id = ? 
+        AND v.fecha >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)
+    `;
+
+    const [stats] = await db.execute(query, [empresa_id, categoria_id]);
+    const s = stats[0];
+
+    // 2. Cálculos Promedio Mensuales Actuales
+    const facturacionMensual = parseFloat(s.facturacion_total || 0) / 3;
+    const costoMensual = parseFloat(s.costo_total || 0) / 3;
+    const utilidadMensualActual = facturacionMensual - costoMensual;
+
+    // 3. Simulación de Impacto
+    // Proyectamos la nueva facturación con el aumento
+    const nuevaFacturacionMensual = facturacionMensual * (1 + ajuste);
+    const nuevaUtilidadMensual = nuevaFacturacionMensual - costoMensual;
+
+    // 4. Factor de Elasticidad (Riesgo de pérdida de clientes)
+    // Heurística retail: Por cada 1% de aumento, riesgo de pérdida de 0.8% de volumen
+    const riesgoPerdidaClientes = Math.abs(parseFloat(porcentaje_ajuste) * 0.8);
+
+    res.json({
+      actual: {
+        facturacion: facturacionMensual.toFixed(2),
+        utilidad: utilidadMensualActual.toFixed(2),
+        operaciones: Math.round(s.cantidad_operaciones / 3),
+      },
+      proyectado: {
+        facturacion: nuevaFacturacionMensual.toFixed(2),
+        utilidad: nuevaUtilidadMensual.toFixed(2),
+        incremento_neto: (nuevaUtilidadMensual - utilidadMensualActual).toFixed(
+          2
+        ),
+        riesgo_cliente: riesgoPerdidaClientes.toFixed(1),
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
 const countProductos = async (req, res) => {
   try {
     const [rows] = await db.execute(
@@ -921,6 +978,7 @@ module.exports = {
   getPrediccionCompra,
   getAuditoriaMargenes,
   getProductosMuertos,
+  getSimulacionImpacto,
   countProductos,
   countBajoStock,
   generarReporteStock,

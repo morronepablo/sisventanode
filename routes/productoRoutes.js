@@ -13,6 +13,7 @@ const {
   getPrediccionCompra,
   getAuditoriaMargenes,
   getProductosMuertos,
+  getSimulacionImpacto,
   countProductos,
   countBajoStock,
   generarReporteStock,
@@ -39,6 +40,7 @@ router.get("/reporte/reposicion", getReposicionReport);
 router.get("/asistente-compra", getPrediccionCompra);
 router.get("/auditoria-margenes", getAuditoriaMargenes);
 router.get("/liquidador-inteligente", getProductosMuertos);
+router.get("/simulador-precios", getSimulacionImpacto);
 
 router.get("/", getAllProductos);
 router.get("/bajo-stock", getProductosBajoStock);
