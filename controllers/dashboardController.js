@@ -226,6 +226,25 @@ const getFullChartData = async (req, res) => {
       [empresa_id]
     );
 
+    // 10. ⏱️ RANKING DE EFICIENCIA (Cajero Pro)
+    // Calculamos el tiempo entre la primera y la última venta de cada día para promediar la "jornada activa"
+    const [rankingEficiencia] = await db.execute(
+      `SELECT 
+    u.name as usuario,
+    SUM(v.precio_total) as facturacion,
+    COUNT(v.id) as total_tickets,
+    -- Sumamos todos los items vendidos (directos + componentes de combos)
+    SUM((SELECT SUM(cantidad) FROM detalle_ventas WHERE venta_id = v.id)) as total_items,
+    -- Calculamos la densidad: Items por ticket
+    AVG((SELECT SUM(cantidad) FROM detalle_ventas WHERE venta_id = v.id)) as items_por_ticket
+   FROM ventas v
+   JOIN users u ON v.usuario_id = u.id
+   WHERE v.empresa_id = ? AND MONTH(v.fecha) = ? AND YEAR(v.fecha) = ?
+   GROUP BY v.usuario_id
+   ORDER BY facturacion DESC`,
+      [empresa_id, selectedMonth, currentYear]
+    );
+
     res.json({
       gananciasRaw,
       comparativaDiaria,
@@ -235,6 +254,7 @@ const getFullChartData = async (req, res) => {
       ventasPorCaja,
       ventasPorHora,
       ventasPorUsuario, // 👈 Enviamos los datos al Frontend
+      rankingEficiencia,
       categoriasLista: cats.map((c) => c.nombre),
     });
   } catch (error) {
