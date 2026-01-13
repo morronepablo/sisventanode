@@ -1,12 +1,11 @@
 // controllers/categoriaController.js
 const Categoria = require("../models/Categoria");
 const db = require("../config/db");
-const { registrarLog } = require("../utils/logger"); // 👈 Importamos el logger
-const { calcularDiferencias } = require("../utils/differences"); // 👈 1. Importar utilidad
+const { registrarLog } = require("../utils/logger");
+const { calcularDiferencias } = require("../utils/differences");
 
 const getAllCategorias = async (req, res) => {
   try {
-    // Agregamos una subconsulta para contar los productos de cada categoría
     const query = `
       SELECT 
         c.*, 
@@ -38,9 +37,10 @@ const getCategoriaById = async (req, res) => {
 };
 
 const createCategoria = async (req, res) => {
-  console.log("--- INICIO CREATE CATEGORIA (AUDITADO) ---");
+  console.log("--- INICIO CREATE CATEGORIA (CON MARGEN) ---");
   try {
-    const { nombre, descripcion } = req.body;
+    // 1. Extraemos margen_objetivo del body respetando tu lógica
+    const { nombre, descripcion, margen_objetivo } = req.body;
     if (!nombre?.trim())
       return res.status(400).json({ message: "El nombre es obligatorio" });
 
@@ -53,13 +53,12 @@ const createCategoria = async (req, res) => {
     const id = await Categoria.create({
       nombre: nombre.trim(),
       descripcion: descripcion || "",
+      margen_objetivo: margen_objetivo || 0, // 👈 AGREGADO PARA EL MODELO
     });
 
-    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
     const io = req.app.get("socketio");
     if (io) io.emit("update-dashboard");
 
-    // REGISTRO DE LOG DETALLADO
     await registrarLog(
       req,
       "CREAR",
@@ -77,15 +76,14 @@ const createCategoria = async (req, res) => {
 };
 
 const updateCategoria = async (req, res) => {
-  console.log("--- INICIO UPDATE CATEGORIA (AUDITADO) ---");
+  console.log("--- INICIO UPDATE CATEGORIA (CON MARGEN) ---");
   try {
     const { id } = req.params;
-    const { nombre, descripcion } = req.body;
+    const { nombre, descripcion, margen_objetivo } = req.body; // 👈 Capturamos margen_objetivo
 
     if (!nombre?.trim())
       return res.status(400).json({ message: "El nombre es obligatorio" });
 
-    // 2. OBTENER DATOS ANTERIORES PARA COMPARAR
     const categoriaAnterior = await Categoria.findById(id);
     if (!categoriaAnterior)
       return res.status(404).json({ message: "Categoría no encontrada" });
@@ -96,11 +94,9 @@ const updateCategoria = async (req, res) => {
         .json({ message: "Ya existe otra categoría con ese nombre" });
     }
 
-    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
     const io = req.app.get("socketio");
     if (io) io.emit("update-dashboard");
 
-    // 3. CALCULAR DIFERENCIAS
     const detalleCambios = calcularDiferencias(categoriaAnterior, req.body, [
       "id",
       "updated_at",
@@ -110,12 +106,12 @@ const updateCategoria = async (req, res) => {
     const updated = await Categoria.updateById(id, {
       nombre: nombre.trim(),
       descripcion: descripcion || "",
+      margen_objetivo: margen_objetivo || 0, // 👈 AGREGADO PARA EL MODELO
     });
 
     if (!updated)
       return res.status(404).json({ message: "Categoría no encontrada" });
 
-    // 4. REGISTRO DE LOG DETALLADO
     await registrarLog(
       req,
       "EDITAR",
@@ -131,11 +127,8 @@ const updateCategoria = async (req, res) => {
 };
 
 const deleteCategoria = async (req, res) => {
-  console.log("--- INICIO DELETE CATEGORIA ---");
   try {
     const { id } = req.params;
-
-    // 1. Verificación de seguridad en el servidor: ¿Tiene productos?
     const [check] = await db.execute(
       "SELECT COUNT(*) as count FROM productos WHERE categoria_id = ?",
       [id]
@@ -151,9 +144,8 @@ const deleteCategoria = async (req, res) => {
     const categoriaABorrar = await Categoria.findById(id);
     const nombreCat = categoriaABorrar ? categoriaABorrar.nombre : "ID " + id;
 
-    const deleted = await Categoria.deleteById(id);
+    await Categoria.deleteById(id);
 
-    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
     const io = req.app.get("socketio");
     if (io) io.emit("update-dashboard");
 
@@ -163,13 +155,11 @@ const deleteCategoria = async (req, res) => {
       "CATEGORIAS",
       `Se eliminó la categoría: ${nombreCat}`
     );
-
     res.json({ message: "Categoría eliminada exitosamente" });
   } catch (error) {
     console.error("[CATEGORIAS ERROR] Fallo al eliminar:", error);
     res.status(500).json({ message: "Error al eliminar la categoría" });
   }
-  console.log("--- FIN DELETE CATEGORIA ---");
 };
 
 const countCategorias = async (req, res) => {
@@ -177,7 +167,6 @@ const countCategorias = async (req, res) => {
     const [rows] = await db.execute("SELECT COUNT(*) AS total FROM categorias");
     res.json({ total: rows[0].total });
   } catch (error) {
-    console.error("Error al contar categorías:", error);
     res.status(500).json({ total: 0 });
   }
 };

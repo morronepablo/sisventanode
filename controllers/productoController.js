@@ -183,16 +183,29 @@ const updateProducto = async (req, res) => {
   try {
     const { id } = req.params;
     const nuevosDatos = req.body;
+
+    // 1. Buscamos el producto actual en la DB
     const productoAnterior = await Producto.findById(id);
     if (!productoAnterior)
       return res.status(404).json({ message: "No encontrado" });
 
-    // ✨ CORRECCIÓN: HISTORIAL DE PRECIOS Y COSTOS ✨
-    const ventaNueva = parseFloat(nuevosDatos.precio_venta || 0);
+    // 2. ✨ SOPORTE PARA ACTUALIZACIÓN PARCIAL ✨
+    // Si nuevosDatos no trae el costo o la venta, usamos los que ya tenía
+    const ventaNueva = parseFloat(
+      nuevosDatos.precio_venta !== undefined
+        ? nuevosDatos.precio_venta
+        : productoAnterior.precio_venta
+    );
+    const costoNuevo = parseFloat(
+      nuevosDatos.precio_compra !== undefined
+        ? nuevosDatos.precio_compra
+        : productoAnterior.precio_compra
+    );
+
     const ventaAnterior = parseFloat(productoAnterior.precio_venta || 0);
-    const costoNuevo = parseFloat(nuevosDatos.precio_compra || 0);
     const costoAnterior = parseFloat(productoAnterior.precio_compra || 0);
 
+    // 3. Registrar en historial solo si hubo cambios reales
     if (ventaNueva !== ventaAnterior || costoNuevo !== costoAnterior) {
       await db.execute(
         `INSERT INTO historial_precios 
@@ -202,6 +215,7 @@ const updateProducto = async (req, res) => {
       );
     }
 
+    // 4. Gestionar imagen (respetando tu lógica de Cloudinary)
     let imagenUrl = productoAnterior.imagen;
     if (req.file) {
       if (
@@ -217,8 +231,18 @@ const updateProducto = async (req, res) => {
       imagenUrl = req.file.path;
     }
 
-    await Producto.updateById(id, { ...nuevosDatos, imagen: imagenUrl });
-    const detalleCambios = calcularDiferencias(productoAnterior, nuevosDatos, [
+    // 5. ✨ UNIMOS LOS DATOS ✨
+    // Esto asegura que si mandamos solo el precio, el nombre y el código no se borren
+    const datosFinales = {
+      ...productoAnterior, // Datos viejos
+      ...nuevosDatos, // Datos nuevos (pisan a los viejos)
+      imagen: imagenUrl, // Imagen procesada
+    };
+
+    await Producto.updateById(id, datosFinales);
+
+    // 6. Logs y Sockets
+    const detalleCambios = calcularDiferencias(productoAnterior, datosFinales, [
       "updated_at",
       "created_at",
       "imagen",
@@ -227,15 +251,86 @@ const updateProducto = async (req, res) => {
     ]);
     const io = req.app.get("socketio");
     if (io) io.emit("update-dashboard");
+
     await registrarLog(
       req,
       "EDITAR",
       "PRODUCTOS",
-      `Editó ${productoAnterior.nombre}. Cambios: ${detalleCambios}`
+      `Actualización de producto ID ${id}. Cambios: ${detalleCambios}`
     );
-    res.json({ success: true });
+
+    res.json({ success: true, message: "Producto actualizado correctamente" });
   } catch (error) {
-    res.status(500).json({ message: "Error" });
+    console.error("ERROR UPDATE PRODUCTO:", error);
+    res.status(500).json({
+      message: "Error interno al actualizar producto",
+      error: error.message,
+    });
+  }
+};
+
+const aplicarCorreccionGuardian = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // 1. Buscamos el costo actual y el margen de la categoría
+    const [rows] = await db.execute(
+      `
+      SELECT p.precio_compra, p.nombre, p.precio_venta as venta_vieja, c.margen_objetivo 
+      FROM productos p 
+      JOIN categorias c ON p.categoria_id = c.id 
+      WHERE p.id = ?`,
+      [id]
+    );
+
+    const producto = rows[0];
+    if (!producto) return res.status(404).json({ message: "No encontrado" });
+
+    // 2. ORDEN DE CÁLCULO SOLICITADO:
+    const costo = parseFloat(producto.precio_compra);
+    const porcentaje = parseFloat(producto.margen_objetivo);
+
+    // Al precio de compra le sumamos el porcentaje para obtener la venta
+    const nuevaVenta = costo * (1 + porcentaje / 100);
+
+    // 3. ACTUALIZACIÓN DIRECTA (Sin intermediarios)
+    // Actualizamos precio_venta y valor_porcentaje al mismo tiempo
+    await db.execute(
+      `UPDATE productos 
+       SET precio_venta = ?, 
+           valor_porcentaje = ?, 
+           updated_at = NOW() 
+       WHERE id = ?`,
+      [nuevaVenta.toFixed(2), porcentaje.toFixed(2), id]
+    );
+
+    // 4. HISTORIAL DE PRECIOS (Regla de oro: 2 decimales)
+    await db.execute(
+      `INSERT INTO historial_precios 
+       (producto_id, precio_anterior, precio_nuevo, costo_anterior, costo_nuevo, fecha_cambio) 
+       VALUES (?, ?, ?, ?, ?, NOW())`,
+      [id, producto.venta_vieja, nuevaVenta.toFixed(2), costo, costo]
+    );
+
+    // 5. LOGS Y SOCKETS (Manteniendo tu estructura original)
+    const io = req.app.get("socketio");
+    if (io) io.emit("update-dashboard");
+    await registrarLog(
+      req,
+      "EDITAR",
+      "PRODUCTOS",
+      `Guardian BI: Actualizó ${
+        producto.nombre
+      }. Margen: ${porcentaje}% | Nueva Venta: $${nuevaVenta.toFixed(2)}`
+    );
+
+    res.json({
+      success: true,
+      message: "Precio y porcentaje actualizados correctamente",
+    });
+  } catch (error) {
+    console.error("ERROR CRÍTICO GUARDIÁN:", error);
+    res.status(500).json({ success: false, message: "Error en el servidor" });
   }
 };
 
@@ -647,6 +742,58 @@ const getPrediccionCompra = async (req, res) => {
   }
 };
 
+const getAuditoriaMargenes = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    // Mejoramos la consulta para manejar costos en 0 y asegurar el cálculo
+    const query = `
+      SELECT 
+        p.id, p.codigo, p.nombre, p.precio_compra, p.precio_venta,
+        c.nombre as categoria_nombre,
+        c.margen_objetivo,
+        -- Si el costo es 0, el margen es 0 para que salte la alerta
+        CASE 
+          WHEN p.precio_compra <= 0 THEN 0 
+          ELSE (((p.precio_venta - p.precio_compra) / p.precio_compra) * 100) 
+        END as margen_actual
+      FROM productos p
+      JOIN categorias c ON p.categoria_id = c.id
+      WHERE p.empresa_id = ? 
+        AND c.margen_objetivo > 0
+      HAVING margen_actual < c.margen_objetivo
+      ORDER BY (c.margen_objetivo - margen_actual) DESC
+    `;
+
+    const [productos] = await db.execute(query, [empresa_id]);
+
+    const reporte = productos.map((p) => {
+      const costo = parseFloat(p.precio_compra);
+      const obj = parseFloat(p.margen_objetivo);
+
+      // Precio Sugerido = Costo * (1 + Objetivo/100)
+      const precioSugerido = costo * (1 + obj / 100);
+
+      return {
+        id: p.id,
+        codigo: p.codigo,
+        nombre: p.nombre,
+        categoria_nombre: p.categoria_nombre,
+        precio_compra: costo.toFixed(2),
+        precio_venta: parseFloat(p.precio_venta).toFixed(2),
+        margen_actual: parseFloat(p.margen_actual).toFixed(2),
+        margen_objetivo: obj.toFixed(2),
+        precio_sugerido: precioSugerido.toFixed(2),
+      };
+    });
+
+    res.json(reporte);
+  } catch (error) {
+    console.error("ERROR GUARDIAN:", error);
+    res.status(500).json({ message: "Error al auditar márgenes" });
+  }
+};
+
 const countProductos = async (req, res) => {
   try {
     const [rows] = await db.execute(
@@ -677,10 +824,12 @@ module.exports = {
   getProductoById,
   createProducto,
   updateProducto,
+  aplicarCorreccionGuardian,
   deleteProducto,
   getHistorialPrecios,
   getReposicionReport,
   getPrediccionCompra,
+  getAuditoriaMargenes,
   countProductos,
   countBajoStock,
   generarReporteStock,

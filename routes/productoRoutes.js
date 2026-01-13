@@ -5,11 +5,13 @@ const {
   getProductosBajoStock,
   getProductoById,
   createProducto,
+  aplicarCorreccionGuardian,
   updateProducto,
   deleteProducto,
   getHistorialPrecios,
   getReposicionReport,
   getPrediccionCompra,
+  getAuditoriaMargenes,
   countProductos,
   countBajoStock,
   generarReporteStock,
@@ -34,6 +36,7 @@ router.get("/count", countProductos);
 router.get("/bajo-stock-count", countBajoStock);
 router.get("/reporte/reposicion", getReposicionReport);
 router.get("/asistente-compra", getPrediccionCompra);
+router.get("/auditoria-margenes", getAuditoriaMargenes);
 
 router.get("/", getAllProductos);
 router.get("/bajo-stock", getProductosBajoStock);
@@ -44,6 +47,7 @@ router.get("/:id/historial-precios", getHistorialPrecios);
 router.post("/", upload.single("imagen"), createProducto);
 router.post("/importar", uploadCsv.single("csv_file"), importarProductos);
 router.put("/:id", upload.single("imagen"), updateProducto);
+router.put("/guardian-fix/:id", aplicarCorreccionGuardian);
 router.delete("/:id", deleteProducto);
 
 module.exports = router;

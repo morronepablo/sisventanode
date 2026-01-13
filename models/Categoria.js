@@ -14,18 +14,20 @@ class Categoria {
     return rows[0] || null;
   }
 
-  static async create({ nombre, descripcion }) {
+  // 1. AJUSTADO PARA INSERTAR EL MARGEN
+  static async create({ nombre, descripcion, margen_objetivo }) {
     const [result] = await db.execute(
-      "INSERT INTO categorias (nombre, descripcion) VALUES (?, ?)",
-      [nombre, descripcion]
+      "INSERT INTO categorias (nombre, descripcion, margen_objetivo) VALUES (?, ?, ?)",
+      [nombre, descripcion, margen_objetivo || 0]
     );
     return result.insertId;
   }
 
-  static async updateById(id, { nombre, descripcion }) {
+  // 2. AJUSTADO PARA ACTUALIZAR EL MARGEN
+  static async updateById(id, { nombre, descripcion, margen_objetivo }) {
     const [result] = await db.execute(
-      "UPDATE categorias SET nombre = ?, descripcion = ? WHERE id = ?",
-      [nombre, descripcion, id]
+      "UPDATE categorias SET nombre = ?, descripcion = ?, margen_objetivo = ? WHERE id = ?",
+      [nombre, descripcion, margen_objetivo || 0, id]
     );
     return result.affectedRows > 0;
   }
