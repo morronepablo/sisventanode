@@ -24,6 +24,7 @@ const {
   getVentasDashboard,
   enviarTicketPorWhatsApp,
   getReporteRentabilidad,
+  getEstadoResultados,
 } = require("../controllers/ventaController");
 const authMiddleware = require("../middlewares/authMiddleware");
 
@@ -49,6 +50,7 @@ router.get("/informes/clientes", getInformeClientes);
 router.get("/informes/forma-pagos", getInformeMetodosPago);
 router.get("/informes/movimiento-stock", getInformeMovimientoStock);
 router.get("/reporte-rentabilidad", getReporteRentabilidad);
+router.get("/estado-resultados", getEstadoResultados);
 
 router.get("/tmp", getTmpVentas);
 router.post("/tmp", postTmpVenta);

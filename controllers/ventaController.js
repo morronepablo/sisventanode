@@ -1845,6 +1845,71 @@ const getReporteRentabilidad = async (req, res) => {
   }
 };
 
+const getEstadoResultados = async (req, res) => {
+  try {
+    const { desde, hasta } = req.query;
+    const empresa_id = req.user.empresa_id;
+
+    // 1. INGRESOS NETOS (Ventas - Devoluciones)
+    const [vRows] = await db.execute(
+      `SELECT IFNULL(SUM(precio_total),0) as total, IFNULL(SUM(tarjeta),0) as t, IFNULL(SUM(mercadopago),0) as mp FROM ventas WHERE empresa_id = ? AND DATE(fecha) BETWEEN ? AND ?`,
+      [empresa_id, desde, hasta]
+    );
+    const [dRows] = await db.execute(
+      `SELECT IFNULL(SUM(precio_total),0) as total FROM devoluciones WHERE empresa_id = ? AND DATE(fecha) BETWEEN ? AND ?`,
+      [empresa_id, desde, hasta]
+    );
+
+    const ingresosBrutos = parseFloat(vRows[0].total);
+    const devoluciones = parseFloat(dRows[0].total);
+    const ventasNetas = ingresosBrutos - devoluciones;
+
+    // 2. COSTO DE MERCADERÍA VENDIDA (CMV)
+    const [cRows] = await db.execute(
+      `SELECT IFNULL(SUM(dv.cantidad * dv.precio_compra), 0) as total FROM detalle_ventas dv JOIN ventas v ON dv.venta_id = v.id WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ?`,
+      [empresa_id, desde, hasta]
+    );
+    const [cdRows] = await db.execute(
+      `SELECT IFNULL(SUM(dd.cantidad * p.precio_compra), 0) as total FROM detalle_devoluciones dd JOIN productos p ON dd.producto_id = p.id JOIN devoluciones d ON dd.devolucion_id = d.id WHERE d.empresa_id = ? AND DATE(d.fecha) BETWEEN ? AND ?`,
+      [empresa_id, desde, hasta]
+    );
+
+    const cmv = parseFloat(cRows[0].total) - parseFloat(cdRows[0].total);
+    const utilidadBruta = ventasNetas - cmv;
+
+    // 3. GASTOS OPERATIVOS (Gastos registrados)
+    const [gRows] = await db.execute(
+      `SELECT IFNULL(SUM(monto), 0) as total FROM gastos WHERE empresa_id = ? AND DATE(fecha) BETWEEN ? AND ?`,
+      [empresa_id, desde, hasta]
+    );
+    const gastosOperativos = parseFloat(gRows[0].total);
+
+    // 4. COMISIONES BANCARIAS (El gasto invisible: Tarjeta 3%, MP 4% est.)
+    const comisionesMP = parseFloat(vRows[0].mp) * 0.04;
+    const comisionesTarj = parseFloat(vRows[0].t) * 0.03;
+    const totalComisiones = comisionesMP + comisionesTarj;
+
+    // 5. EBITDA (Utilidad antes de intereses, impuestos, depreciaciones y amortizaciones)
+    const ebitda = utilidadBruta - gastosOperativos - totalComisiones;
+
+    res.json({
+      periodo: { desde, hasta },
+      ingresos: { brutos: ingresosBrutos, devoluciones, netos: ventasNetas },
+      costos: { cmv, utilidadBruta },
+      gastos: {
+        operativos: gastosOperativos,
+        comisiones: totalComisiones,
+        total: gastosOperativos + totalComisiones,
+      },
+      ebitda: ebitda,
+      margenEbitda:
+        ventasNetas > 0 ? ((ebitda / ventasNetas) * 100).toFixed(2) : 0,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
 const countVentas = async (req, res) => {
   try {
     const [rows] = await db.execute("SELECT COUNT(*) AS total FROM ventas");
@@ -1993,6 +2058,7 @@ module.exports = {
   updateTmpVentaQuantity,
   enviarTicketPorWhatsApp,
   getReporteRentabilidad,
+  getEstadoResultados,
   countVentas,
   getVentasSummary,
   getVentasDashboard,
