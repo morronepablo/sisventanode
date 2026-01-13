@@ -9,6 +9,7 @@ const {
   deleteProducto,
   getHistorialPrecios,
   getReposicionReport,
+  getPrediccionCompra,
   countProductos,
   countBajoStock,
   generarReporteStock,
@@ -32,6 +33,8 @@ router.use(authMiddleware);
 router.get("/count", countProductos);
 router.get("/bajo-stock-count", countBajoStock);
 router.get("/reporte/reposicion", getReposicionReport);
+router.get("/asistente-compra", getPrediccionCompra);
+
 router.get("/", getAllProductos);
 router.get("/bajo-stock", getProductosBajoStock);
 router.post("/update-masivo", updatePreciosMasivo);

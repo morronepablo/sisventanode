@@ -577,6 +577,76 @@ const getReposicionReport = async (req, res) => {
   }
 };
 
+const getPrediccionCompra = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    // Eliminamos 'v.estado' ya que no existe en tu tabla ventas
+    const query = `
+      SELECT 
+          p.id,
+          p.codigo,
+          p.nombre,
+          p.stock as stock_actual,
+          p.stock_minimo,
+          p.precio_compra,
+          IFNULL(u.nombre, 'Unid') as unidad_nombre,
+          (SELECT IFNULL(SUM(dv.cantidad), 0) 
+           FROM detalle_ventas dv 
+           JOIN ventas v ON dv.venta_id = v.id 
+           WHERE dv.producto_id = p.id 
+             AND v.empresa_id = ? 
+             AND v.fecha >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+          ) as ventas_30_dias
+      FROM productos p
+      LEFT JOIN unidads u ON p.unidad_id = u.id
+      WHERE p.empresa_id = ?
+      HAVING ventas_30_dias > 0 OR stock_actual <= stock_minimo
+      ORDER BY ventas_30_dias DESC
+    `;
+
+    const [productos] = await db.execute(query, [empresa_id, empresa_id]);
+
+    const reporte = productos.map((p) => {
+      const vpd = parseFloat(p.ventas_30_dias) / 30;
+      const diasAutonomia =
+        vpd > 0
+          ? Math.floor(p.stock_actual / vpd)
+          : p.stock_actual > 0
+          ? 999
+          : 0;
+
+      let sugerencia = vpd * 30 - p.stock_actual;
+      sugerencia = sugerencia > 0 ? Math.ceil(sugerencia) : 0;
+
+      const inversionEstimada = sugerencia * parseFloat(p.precio_compra);
+
+      let urgencia = "BAJA";
+      if (diasAutonomia <= 7) urgencia = "CRÍTICA";
+      else if (diasAutonomia <= 15) urgencia = "MEDIA";
+
+      return {
+        id: p.id,
+        codigo: p.codigo,
+        nombre: p.nombre,
+        unidad: p.unidad_nombre,
+        stock_actual: p.stock_actual,
+        ventas_mes: parseFloat(p.ventas_30_dias),
+        vpd: parseFloat(vpd.toFixed(2)),
+        dias_autonomia: diasAutonomia,
+        sugerencia_compra: sugerencia,
+        inversion_estimada: parseFloat(inversionEstimada.toFixed(2)),
+        urgencia: p.ventas_30_dias > 0 ? urgencia : "STOCK ESTANCADO",
+      };
+    });
+
+    res.json(reporte);
+  } catch (error) {
+    console.error("Error en Predicción de Compra:", error);
+    res.status(500).json({ message: "Error al calcular asistente de compras" });
+  }
+};
+
 const countProductos = async (req, res) => {
   try {
     const [rows] = await db.execute(
@@ -610,6 +680,7 @@ module.exports = {
   deleteProducto,
   getHistorialPrecios,
   getReposicionReport,
+  getPrediccionCompra,
   countProductos,
   countBajoStock,
   generarReporteStock,
