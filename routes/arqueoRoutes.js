@@ -12,6 +12,8 @@ const {
   generarReporte,
   countArqueos,
   getArqueosSummary,
+  getMonitorTiempoReal,
+  postRetiroParcial,
 } = require("../controllers/arqueoController");
 const authMiddleware = require("../middlewares/authMiddleware");
 
@@ -22,6 +24,8 @@ router.use(authMiddleware);
 router.get("/count", countArqueos);
 router.get("/summary", getArqueosSummary);
 router.get("/reporte", generarReporte);
+router.get("/monitor-vivo", getMonitorTiempoReal);
+router.post("/retiro-parcial", postRetiroParcial);
 router.get("/", getAllArqueos);
 router.get("/estado-abierto", checkArqueoAbierto);
 router.post("/", createArqueo);
