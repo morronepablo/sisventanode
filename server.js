@@ -86,6 +86,7 @@ const logRoutes = require("./routes/logRoutes");
 const backupRoutes = require("./routes/backupRoutes");
 const promocionesRoutes = require("./routes/promocionRoutes");
 const auditoriaRoutes = require("./routes/auditoriaRoutes");
+const alquimistaRoutes = require("./routes/alquimistaRoutes");
 
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
@@ -111,6 +112,7 @@ app.use("/api/logs", logRoutes);
 app.use("/api/backup", backupRoutes);
 app.use("/api/promociones", promocionesRoutes);
 app.use("/api/auditoria", auditoriaRoutes);
+app.use("/api/alquimista", alquimistaRoutes);
 
 app.get("/api/whatsapp-status", (req, res) => {
   const qr = getQR();
