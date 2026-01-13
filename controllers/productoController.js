@@ -794,6 +794,96 @@ const getAuditoriaMargenes = async (req, res) => {
   }
 };
 
+const getProductosMuertos = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    // Esta nueva subconsulta busca la última fecha de venta
+    // uniendo ventas directas y ventas donde el producto es parte de un combo.
+    const query = `
+      SELECT 
+        p.id, p.codigo, p.nombre, p.stock, p.precio_compra, p.precio_venta,
+        c.nombre as categoria_nombre,
+        u.nombre as unidad_nombre,
+        (
+          SELECT MAX(fecha_v) FROM (
+            -- Venta directa del producto
+            SELECT v.fecha as fecha_v, dv.producto_id
+            FROM detalle_ventas dv
+            JOIN ventas v ON dv.venta_id = v.id
+            WHERE v.empresa_id = ?
+            
+            UNION ALL
+            
+            -- Venta del producto como parte de un combo
+            SELECT v.fecha as fecha_v, cp.producto_id
+            FROM detalle_ventas dv
+            JOIN ventas v ON dv.venta_id = v.id
+            JOIN combo_producto cp ON dv.combo_id = cp.combo_id
+            WHERE v.empresa_id = ?
+          ) as todas_las_ventas
+          WHERE todas_las_ventas.producto_id = p.id
+        ) as fecha_ultima_venta,
+        DATEDIFF(CURDATE(), p.created_at) as dias_desde_creacion
+      FROM productos p
+      LEFT JOIN categorias c ON p.categoria_id = c.id
+      LEFT JOIN unidads u ON p.unidad_id = u.id
+      WHERE p.empresa_id = ? 
+        AND p.stock > 0
+      HAVING (fecha_ultima_venta < DATE_SUB(CURDATE(), INTERVAL 60 DAY) OR fecha_ultima_venta IS NULL)
+         AND dias_desde_creacion > 30
+      ORDER BY (p.stock * p.precio_compra) DESC
+    `;
+
+    // Pasamos los parámetros: 2 para la subconsulta de fecha y 1 para la principal
+    const [productos] = await db.execute(query, [
+      empresa_id,
+      empresa_id,
+      empresa_id,
+    ]);
+
+    let capitalTotalInmovilizado = 0;
+
+    const reporte = productos.map((p) => {
+      const capitalInmovilizado =
+        parseFloat(p.stock) * parseFloat(p.precio_compra);
+      capitalTotalInmovilizado += capitalInmovilizado;
+
+      const margenActual =
+        ((parseFloat(p.precio_venta) - parseFloat(p.precio_compra)) /
+          parseFloat(p.precio_compra)) *
+        100;
+      let sugerencia =
+        margenActual >= 50 ? "Aplicar Promo 2x1" : "Descuento del 20%";
+
+      return {
+        id: p.id,
+        codigo: p.codigo,
+        nombre: p.nombre,
+        stock: p.stock,
+        categoria_nombre: p.categoria_nombre || "Sin Categoría",
+        unidad_nombre: p.unidad_nombre || "Unid.",
+        capital_inmovilizado: capitalInmovilizado.toFixed(2),
+        dias_estancado: p.fecha_ultima_venta
+          ? Math.floor(
+              (new Date() - new Date(p.fecha_ultima_venta)) /
+                (1000 * 60 * 60 * 24)
+            )
+          : p.dias_desde_creacion,
+        sugerencia: sugerencia,
+      };
+    });
+
+    res.json({
+      productos: reporte,
+      capitalTotalInmovilizado: capitalTotalInmovilizado.toFixed(2),
+    });
+  } catch (error) {
+    console.error("ERROR LIQUIDADOR:", error);
+    res.status(500).json({ message: "Error al analizar productos muertos" });
+  }
+};
+
 const countProductos = async (req, res) => {
   try {
     const [rows] = await db.execute(
@@ -830,6 +920,7 @@ module.exports = {
   getReposicionReport,
   getPrediccionCompra,
   getAuditoriaMargenes,
+  getProductosMuertos,
   countProductos,
   countBajoStock,
   generarReporteStock,
