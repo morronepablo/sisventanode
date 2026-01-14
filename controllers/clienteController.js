@@ -1214,6 +1214,72 @@ const postRecapturaWhatsApp = async (req, res) => {
   }
 };
 
+const getSegmentacionClientes = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    // Buscamos datos de compra de cada cliente (Excepto Consumidor Final ID 1)
+    const query = `
+      SELECT 
+        c.id, c.nombre_cliente, c.telefono,
+        DATEDIFF(CURDATE(), MAX(v.fecha)) as recencia,
+        COUNT(v.id) as frecuencia,
+        SUM(v.precio_total) as valor_monetario
+      FROM clientes c
+      JOIN ventas v ON c.id = v.cliente_id
+      WHERE c.empresa_id = ? AND c.id != 1
+      GROUP BY c.id
+      ORDER BY recencia ASC
+    `;
+
+    const [clientes] = await db.execute(query, [empresa_id]);
+
+    const segmentados = clientes.map((c) => {
+      let segmento = "";
+      let color = "";
+      let icono = "";
+      let sugerencia = "";
+
+      // LÓGICA DE SEGMENTACIÓN RFM
+      if (c.recencia <= 7 && c.frecuencia >= 5) {
+        segmento = "CAMPEÓN";
+        color = "badge-success";
+        icono = "fas fa-crown";
+        sugerencia = "¡Regalale un cupón de agradecimiento!";
+      } else if (c.recencia <= 15 && c.frecuencia >= 2) {
+        segmento = "LEAL";
+        color = "badge-primary";
+        icono = "fas fa-heart";
+        sugerencia = "Ofrecele un producto nuevo.";
+      } else if (c.recencia > 20 && c.recencia <= 45) {
+        segmento = "EN RIESGO";
+        color = "badge-warning text-dark";
+        icono = "fas fa-exclamation-triangle";
+        sugerencia = "¡Mandale un descuento para que vuelva!";
+      } else {
+        segmento = "DORMIDO";
+        color = "badge-danger";
+        icono = "fas fa-bed";
+        sugerencia = "Intentá recuperarlo con una super oferta.";
+      }
+
+      return {
+        ...c,
+        segmento,
+        color,
+        icono,
+        sugerencia,
+        valor_monetario: parseFloat(c.valor_monetario).toFixed(2),
+      };
+    });
+
+    res.json(segmentados);
+  } catch (error) {
+    console.error("ERROR RFM:", error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
 module.exports = {
   getListadoClientes,
   createCliente,
@@ -1236,4 +1302,5 @@ module.exports = {
   getClientesSummary,
   getClientesPerdidos,
   postRecapturaWhatsApp,
+  getSegmentacionClientes,
 };
