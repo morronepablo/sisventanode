@@ -24,6 +24,7 @@ const {
   getClientesPerdidos,
   postRecapturaWhatsApp,
   getSegmentacionClientes,
+  cargarSaldoBilletera,
 } = require("../controllers/clienteController");
 const authMiddleware = require("../middlewares/authMiddleware");
 
@@ -59,5 +60,6 @@ router.post("/:id/pagos", registrarPago);
 router.get("/:id/compras", getComprasCliente); // 👈 2. RUTA DE COMPRAS (LA ANTERIOR)
 router.get("/:id/historial", getHistorialCliente); // 👈 3. RUTA DE HISTORIAL (LA NUEVA)
 router.get("/:id/estado-cuenta-pdf", generarEstadoCuentaPDF);
+router.post("/:id/billetera/cargar", cargarSaldoBilletera);
 
 module.exports = router;

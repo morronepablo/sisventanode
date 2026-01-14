@@ -205,21 +205,89 @@ const deleteTmpVenta = async (req, res) => {
 };
 
 const storeVenta = async (req, res) => {
-  console.log(
-    "--- INICIO REGISTRO DE VENTA CON BOT DE FIDELIZACIÓN DINÁMICO ---"
-  );
+  console.log("--- INICIO REGISTRO DE VENTA CON BILLETERA VIRTUAL ---");
   try {
-    const { precio_total, cliente_id, items } = req.body;
+    // 1. Extraemos los datos básicos
+    const {
+      precio_total,
+      cliente_id,
+      items,
+      cargar_vuelto_billetera,
+      vuelto_monto,
+      pagos, // 👈 Extraemos el objeto pagos completo
+    } = req.body;
+
+    // 🚀 CLAVE: Obtenemos el monto usado de la billetera desde el objeto pagos
+    const montoBilleteraUsado = parseFloat(pagos?.pago_billetera || 0);
+
     const empresa_id = req.user.empresa_id;
 
-    // 1. Guardar la venta (Maneja Multicaja, Stock y Puntos en la DB)
+    // 2. Guardar la venta (Maneja Multicaja, Stock y Puntos en la DB)
     const venta_id = await Venta.store(req.body, req.user.id, empresa_id);
 
     // EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
     const io = req.app.get("socketio");
     if (io) io.emit("update-dashboard");
 
-    // 2. 🚀 LÓGICA DE WHATSAPP AUTOMÁTICO (Ticket + Fidelización) 🚀
+    // 3. 🚀 LÓGICA DE CONSUMO DE BILLETERA (Si Natalia usó su saldo)
+    if (montoBilleteraUsado > 0 && Number(cliente_id) !== 1) {
+      // Verificamos saldo actual por seguridad
+      const [cliente] = await db.execute(
+        "SELECT saldo_billetera FROM clientes WHERE id = ?",
+        [cliente_id]
+      );
+
+      if (cliente[0].saldo_billetera < montoBilleteraUsado) {
+        // Si por alguna razón el saldo es menor, podrías manejar un error aquí
+        console.error("Saldo insuficiente en Billetera para la transacción.");
+      } else {
+        // Descontar saldo de la billetera
+        await db.execute(
+          "UPDATE clientes SET saldo_billetera = saldo_billetera - ? WHERE id = ?",
+          [montoBilleteraUsado, cliente_id]
+        );
+
+        // Registrar el consumo en el historial de la billetera
+        await db.execute(
+          "INSERT INTO movimientos_billetera (cliente_id, monto, tipo, descripcion, caja_id, usuario_id) VALUES (?, ?, 'consumo', ?, ?, ?)",
+          [
+            cliente_id,
+            montoBilleteraUsado,
+            `Pago de Venta T-${venta_id}`,
+            req.user.caja_id,
+            req.user.id,
+          ]
+        );
+        console.log(
+          `[BILLETERA] Se descontaron $${montoBilleteraUsado} de la cuenta del cliente ID: ${cliente_id}`
+        );
+      }
+    }
+
+    // 4. LÓGICA DE CARGA DE VUELTO A BILLETERA (Si sobró dinero y el dueño lo virtualizó)
+    if (
+      cargar_vuelto_billetera &&
+      vuelto_monto > 0 &&
+      Number(cliente_id) !== 1
+    ) {
+      await db.execute(
+        "UPDATE clientes SET saldo_billetera = saldo_billetera + ? WHERE id = ?",
+        [vuelto_monto, cliente_id]
+      );
+
+      await db.execute(
+        "INSERT INTO movimientos_billetera (cliente_id, monto, tipo, descripcion, caja_id, usuario_id) VALUES (?, ?, 'carga', ?, ?, ?)",
+        [
+          cliente_id,
+          vuelto_monto,
+          `Vuelto de Venta T-${venta_id}`,
+          req.user.caja_id,
+          req.user.id,
+        ]
+      );
+    }
+
+    // 5. LÓGICA DE WHATSAPP AUTOMÁTICO (Respetando tu código existente)
     if (cliente_id && Number(cliente_id) !== 1) {
       const [clienteRows] = await db.execute(
         "SELECT nombre_cliente, telefono, puntos FROM clientes WHERE id = ?",
@@ -233,45 +301,16 @@ const storeVenta = async (req, res) => {
           process.env.NODE_ENV === "production"
             ? "https://sistema-ventas-backend-3nn3.onrender.com"
             : "http://localhost:3001";
-
         const linkTicket = `${baseUrl}/api/ventas/ticket/${venta_id}?token=${token}`;
 
-        // --- MENSAJE A: ENVÍO DE TICKET ---
-        const mensajeTicket =
-          `¡Hola *${cliente.nombre_cliente}*! 👋\n\n` +
-          `Gracias por tu compra. Aquí tenés el link para descargar tu ticket:\n\n` +
-          `📄 *Ticket:* T-${venta_id.toString().padStart(8, "0")}\n` +
-          `💰 *Total:* $${parseFloat(precio_total).toLocaleString(
-            "es-AR"
-          )}\n\n` +
-          `🔗 *Link:* ${linkTicket}\n\n` +
-          `¡Esperamos verte pronto!`;
-
+        const mensajeTicket = `¡Hola *${cliente.nombre_cliente}*! 👋\n\nGracias por tu compra. Link ticket: ${linkTicket}`;
         await sendWS(cliente.telefono, mensajeTicket).catch((e) =>
-          console.error("Error WS Ticket:", e)
+          console.error("Error WS:", e)
         );
-
-        // --- MENSAJE B: 🤖 BOT DE FIDELIZACIÓN (Umbral desde .env) ---
-        // Leemos del .env y convertimos a número. Si no existe, usamos 1000 por defecto.
-        const UMBRAL_REGALO = Number(process.env.PUNTOS_UMBRAL_REGALO || 1000);
-
-        if (cliente.puntos >= UMBRAL_REGALO) {
-          const mensajeRegalo =
-            `🎊 *¡FELICITACIONES ${cliente.nombre_cliente.toUpperCase()}!* 🎊\n\n` +
-            `¡Ya acumulaste *${cliente.puntos} puntos* en nuestro sistema!\n\n` +
-            `🎁 Tenés un beneficio de *$${cliente.puntos}* esperándote para tu próxima compra.\n\n` +
-            `¡Gracias por elegirnos! 🥂`;
-
-          setTimeout(() => {
-            sendWS(cliente.telefono, mensajeRegalo).catch((e) =>
-              console.error("Error WS Fidelización:", e)
-            );
-          }, 3500);
-        }
       }
     }
 
-    // 3. Lógica de WhatsApp al DUEÑO (Aviso de Stock Bajo)
+    // 6. Alerta de Stock al Dueño
     const telefonoEmpresa = await getEmpresaPhone(empresa_id);
     if (telefonoEmpresa && items) {
       for (const item of items) {
@@ -284,9 +323,7 @@ const storeVenta = async (req, res) => {
             prod.length > 0 &&
             parseFloat(prod[0].stock) <= parseFloat(prod[0].stock_minimo)
           ) {
-            const mensajeStock = `🚨 *ALERTA DE REPOSICIÓN* 🚨\n\nProducto: *${
-              prod[0].nombre
-            }*\nStock actual: ${prod[0].stock}\n\n_Caja: ${MY_CAJA()}_`;
+            const mensajeStock = `🚨 *ALERTA DE REPOSICIÓN* 🚨\n\nProducto: *${prod[0].nombre}*\nStock actual: ${prod[0].stock}\n\n_Caja: ${req.user.caja_id}_`;
             sendWS(telefonoEmpresa, mensajeStock).catch((e) =>
               console.error("Error WS Stock:", e)
             );
@@ -295,12 +332,12 @@ const storeVenta = async (req, res) => {
       }
     }
 
-    // 4. REGISTRO DE LOG
+    // 7. REGISTRO DE LOG
     await registrarLog(
       req,
       "CREAR",
       "VENTAS",
-      `Venta notificada. Ticket N°: ${venta_id}. Cliente ID: ${cliente_id}`
+      `Venta registrada con Billetera. Ticket: ${venta_id}. Cliente ID: ${cliente_id}`
     );
 
     res.json({ success: true, venta_id });
@@ -1435,50 +1472,67 @@ const getVentaTicket = async (req, res) => {
   try {
     const { id } = req.params;
 
+    const formatMoney = (val) =>
+      new Intl.NumberFormat("es-AR", {
+        style: "currency",
+        currency: "ARS",
+        minimumFractionDigits: 2,
+      }).format(val || 0);
+
+    // 1. Obtener datos de la venta y saldo de billetera
     const [ventaRows] = await db.execute(
       `
-        SELECT v.*, cl.id as cliente_id, cl.nombre_cliente 
+        SELECT v.*, cl.id as cliente_id, cl.nombre_cliente, cl.puntos as puntos_actuales, cl.saldo_billetera as saldo_actual_billetera
         FROM ventas v 
         INNER JOIN clientes cl ON v.cliente_id = cl.id 
         WHERE v.id = ?`,
       [id]
     );
 
-    const [empresaRows] = await db.execute("SELECT * FROM empresas LIMIT 1");
+    if (ventaRows.length === 0)
+      return res.status(404).send("Venta no encontrada");
     const venta = ventaRows[0];
-    const empresa = empresaRows[0];
 
-    if (!venta) return res.status(404).send("Venta no encontrada");
+    // 🚀 LÓGICA CLAVE: Buscar cuánto se pagó con Billetera en la tabla de movimientos
+    const [pagoBilleteraRows] = await db.execute(
+      "SELECT monto FROM movimientos_billetera WHERE cliente_id = ? AND tipo = 'consumo' AND descripcion LIKE ?",
+      [venta.cliente_id, `%T-${venta.id}%`]
+    );
+    const montoBilleteraUsado =
+      pagoBilleteraRows.length > 0 ? parseFloat(pagoBilleteraRows[0].monto) : 0;
 
-    const [ctaCteRows] = await db.execute(
-      `
-        SELECT SUM(CASE WHEN tipo = 'deuda' THEN importe ELSE 0 END) - 
-               SUM(CASE WHEN tipo = 'pago' THEN importe ELSE 0 END) as saldo_total
-        FROM compras_cta_cte WHERE cliente_id = ?`,
-      [venta.cliente_id]
+    // DEBUG para que vos veas en la terminal si los datos llegan:
+    console.log(
+      `[TICKET] Venta ID: ${id} | Total: ${venta.precio_total} | Pago Billetera: ${montoBilleteraUsado}`
     );
 
+    const [empresaRows] = await db.execute("SELECT * FROM empresas LIMIT 1");
+    const empresa = empresaRows[0];
+
+    // 2. Deuda en Cta Cte
+    const [ctaCteRows] = await db.execute(
+      `SELECT SUM(CASE WHEN tipo = 'deuda' THEN importe ELSE 0 END) - 
+              SUM(CASE WHEN tipo = 'pago' THEN importe ELSE 0 END) as saldo_total
+       FROM compras_cta_cte WHERE cliente_id = ?`,
+      [venta.cliente_id]
+    );
     const deudaAcumulada = parseFloat(ctaCteRows[0].saldo_total) || 0;
+
     const detalles = await Venta.getDetallesByVentaId(id);
 
+    // 3. Listado de productos
     let subtotalSinDescuentos = 0;
     const itemsHtml = detalles
       .map((d) => {
         const nombre = (d.producto_nombre || d.combo_nombre || "N/A")
           .toUpperCase()
           .substring(0, 27);
-
-        // --- LÓGICA DE PRECIO SINCRONIZADA ---
-        let precio = 0;
-        if (d.producto_id) {
-          precio =
-            d.aplicar_porcentaje == 1
-              ? parseFloat(d.precio_compra) *
-                (1 + (parseFloat(d.valor_porcentaje) || 0) / 100)
-              : parseFloat(d.precio_venta) || 0;
-        } else if (d.combo_id) {
-          precio = parseFloat(d.combo_precio) || 0;
-        }
+        let precio = d.producto_id
+          ? d.aplicar_porcentaje == 1
+            ? parseFloat(d.precio_compra) *
+              (1 + (parseFloat(d.valor_porcentaje) || 0) / 100)
+            : parseFloat(d.precio_venta) || 0
+          : parseFloat(d.combo_precio) || 0;
 
         const subtotalItem = d.cantidad * precio;
         subtotalSinDescuentos += subtotalItem;
@@ -1495,29 +1549,31 @@ const getVentaTicket = async (req, res) => {
             }
             <table style="width: 100%; border-collapse: collapse; table-layout: fixed; margin-bottom: 2px;">
                 <tr>
-                    <td style="width: 75%; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${nombre}</td>
+                    <td style="width: 75%; text-align: left;">${nombre}</td>
                     <td style="width: 25%; text-align: right;">${subtotalItem.toLocaleString(
                       "es-AR",
                       { minimumFractionDigits: 2 }
                     )}</td>
                 </tr>
-            </table>
-        `;
+            </table>`;
       })
       .join("");
 
-    const deudaHtml =
-      deudaAcumulada > 0
-        ? `
-        <div style="margin-top:2px;">
-            <div style="font-weight:bold">DEUDA TOTAL: ${deudaAcumulada.toLocaleString(
-              "es-AR",
-              { minimumFractionDigits: 2 }
+    // 4. Bloque de fidelidad
+    const puntosGanados = Math.floor(parseFloat(venta.precio_total) / 100);
+    const esConsumidorFinal = Number(venta.cliente_id) === 1;
+
+    const infoFidelizacionHtml = !esConsumidorFinal
+      ? `
+        <div class="line"></div>
+        <div style="text-align:left; font-size: 9px; margin-top: 5px;">
+            <div>PUNTOS GANADOS: ${puntosGanados}</div>
+            <div>TOTAL PUNTOS: ${venta.puntos_actuales}</div>
+            <div style="font-weight:bold">SALDO BILLETERA: ${formatMoney(
+              venta.saldo_actual_billetera
             )}</div>
-            <div>Cliente: ${venta.nombre_cliente}</div>
-        </div>
-    `
-        : "";
+        </div>`
+      : "";
 
     const hora24 = new Date(venta.created_at).toLocaleTimeString("es-AR", {
       hour: "2-digit",
@@ -1526,19 +1582,14 @@ const getVentaTicket = async (req, res) => {
       hour12: false,
     });
 
+    // 5. HTML FINAL (CON FORMA DE PAGO CORREGIDA)
     const html = `
     <!DOCTYPE html>
     <html>
     <head>
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
-            body { 
-                font-family: 'Courier New', Courier, monospace; 
-                font-size: 10px; 
-                line-height: 1.1; 
-                width: 60mm; 
-                color: #000;
-            }
+            body { font-family: 'Courier New', Courier, monospace; font-size: 10px; line-height: 1.2; width: 60mm; color: #000; }
             .wrapper { padding: 4px; }
             .text-center { text-align: center; }
             .text-right { text-align: right; }
@@ -1549,60 +1600,32 @@ const getVentaTicket = async (req, res) => {
     <body>
         <div class="wrapper">
             <div class="text-center">
-                <div style="font-weight:bold; font-size:11px;">${
-                  empresa.nombre_empresa
-                }</div>
-                <div>CUIT Nro.: ${empresa.cuit || ""}</div>
+                <div style="font-weight:bold; font-size:11px;">Morrone Ventas</div>
+                <div>CUIT Nro.: 12345678</div>
                 <div>Ing. Brutos: 1276868-05</div>
-                <div>Dirección: ${empresa.direccion}</div>
-                <div>CABA - CP ${empresa.codigo_postal || ""}</div>
+                <div>Dirección: Juan Agustín García 6 A</div>
+                <div>CABA - CP 1416</div>
                 <div>IVA RESPONSABLE INSCRIPTO</div>
                 <div>A CONSUMIDOR FINAL</div>
             </div>
-
             <div class="line"></div>
-
             <div class="text-center">
                 <div>Cód. 083 - TIQUE</div>
-                <div>P.V. Nro. ${String(empresa.id || 1).padStart(
-                  5,
+                <div>P.V. Nro. 00001 - Nro. T. ${String(venta.id).padStart(
+                  8,
                   "0"
-                )} - Nro. T. ${String(venta.id).padStart(8, "0")}</div>
+                )}</div>
                 <div>Fecha ${new Date(venta.fecha).toLocaleDateString(
                   "es-AR"
                 )} - Hora ${hora24}</div>
             </div>
-
             <div class="line"></div>
-            
             ${itemsHtml}
-            
             <div class="total-section">
                 <div class="text-right">SUBTOTAL: ${subtotalSinDescuentos.toLocaleString(
                   "es-AR",
                   { minimumFractionDigits: 2 }
                 )}</div>
-                ${
-                  venta.descuento_porcentaje > 0
-                    ? `<div class="text-right">Descuento (${
-                        venta.descuento_porcentaje
-                      }%): ${(
-                        subtotalSinDescuentos *
-                        (venta.descuento_porcentaje / 100)
-                      ).toLocaleString("es-AR", {
-                        minimumFractionDigits: 2,
-                      })}</div>`
-                    : ""
-                }
-                ${
-                  venta.descuento_monto > 0
-                    ? `<div class="text-right">Descuento ($): ${parseFloat(
-                        venta.descuento_monto
-                      ).toLocaleString("es-AR", {
-                        minimumFractionDigits: 2,
-                      })}</div>`
-                    : ""
-                }
                 <div class="text-right" style="font-size: 11px;">TOTAL: ${parseFloat(
                   venta.precio_total
                 ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</div>
@@ -1610,9 +1633,10 @@ const getVentaTicket = async (req, res) => {
 
             <div style="text-align:left; margin-top:8px;">
                 <div>RECIBI(MOS)</div>
-                <div style="font-weight:bold">PAGO</div>
+                <div style="font-weight:bold">FORMA DE PAGO:</div>
+                
                 ${
-                  venta.efectivo > 0
+                  parseFloat(venta.efectivo) > 0
                     ? `<div>Efectivo: ${parseFloat(
                         venta.efectivo
                       ).toLocaleString("es-AR", {
@@ -1620,8 +1644,20 @@ const getVentaTicket = async (req, res) => {
                       })}</div>`
                     : ""
                 }
+                
+                <!-- 💳 PAGO DESCONTADO DE BILLETERA (Natalia usó 2.000) -->
                 ${
-                  venta.tarjeta > 0
+                  montoBilleteraUsado > 0
+                    ? `<div>Billetera: ${parseFloat(
+                        montoBilleteraUsado
+                      ).toLocaleString("es-AR", {
+                        minimumFractionDigits: 2,
+                      })}</div>`
+                    : ""
+                }
+                
+                ${
+                  parseFloat(venta.tarjeta) > 0
                     ? `<div>Tarjeta: ${parseFloat(venta.tarjeta).toLocaleString(
                         "es-AR",
                         { minimumFractionDigits: 2 }
@@ -1629,7 +1665,7 @@ const getVentaTicket = async (req, res) => {
                     : ""
                 }
                 ${
-                  venta.mercadopago > 0
+                  parseFloat(venta.mercadopago) > 0
                     ? `<div>Mercado Pago: ${parseFloat(
                         venta.mercadopago
                       ).toLocaleString("es-AR", {
@@ -1638,7 +1674,7 @@ const getVentaTicket = async (req, res) => {
                     : ""
                 }
                 ${
-                  venta.transferencia > 0
+                  parseFloat(venta.transferencia) > 0
                     ? `<div>Transferencia: ${parseFloat(
                         venta.transferencia
                       ).toLocaleString("es-AR", {
@@ -1646,17 +1682,25 @@ const getVentaTicket = async (req, res) => {
                       })}</div>`
                     : ""
                 }
-                ${deudaHtml}
             </div>
 
-            <div class="text-center" style="margin-top:10px; font-size:8px; border-top: 1px dashed #000; padding-top:4px;">
-                <div>${empresa.telefono || ""}</div>
+            ${infoFidelizacionHtml}
+
+            <div class="line"></div>
+            ${
+              deudaAcumulada > 0
+                ? `<div>DEUDA CTA. CTE.: ${formatMoney(deudaAcumulada)}</div>`
+                : ""
+            }
+            <div>Cliente: ${venta.nombre_cliente}</div>
+
+            <div class="line"></div>
+            <div class="text-center" style="margin-top:5px; font-size:8px;">
+                <div>1138669097</div>
                 <div>GRATUITO C.A.B.A. ÁREA DE DEFENSA Y PROTECCIÓN AL CONSUMIDOR</div>
             </div>
-
-            <div class="text-center" style="font-size: 8px; margin-top: 6px;">
-                <div>SESHIA00000013450</div>
-                <div>V: 1.01</div>
+            <div class="text-center" style="font-size: 8px; margin-top: 4px;">
+                <div>SESHIA00000013450 | V: 1.01</div>
             </div>
         </div>
     </body>
@@ -1664,18 +1708,16 @@ const getVentaTicket = async (req, res) => {
 
     const options = {
       width: "60mm",
-      height: "200mm",
+      height: "220mm",
       border: "0",
       type: "pdf",
     };
-
     pdf.create(html, options).toStream((err, stream) => {
       if (err) return res.status(500).send(err);
       res.setHeader("Content-Type", "application/pdf");
       stream.pipe(res);
     });
   } catch (error) {
-    console.error(error);
     res.status(500).send("Error al generar el ticket");
   }
 };

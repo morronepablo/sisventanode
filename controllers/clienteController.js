@@ -1277,6 +1277,37 @@ const getSegmentacionClientes = async (req, res) => {
   }
 };
 
+const cargarSaldoBilletera = async (req, res) => {
+  const connection = await db.getConnection();
+  try {
+    await connection.beginTransaction();
+    const { id } = req.params; // ID del cliente
+    const { monto, descripcion } = req.body;
+    const usuario_id = req.user.id;
+    const caja_id = req.user.caja_id || 1;
+
+    // 1. Actualizar el saldo en la tabla clientes
+    await connection.execute(
+      "UPDATE clientes SET saldo_billetera = saldo_billetera + ? WHERE id = ?",
+      [monto, id]
+    );
+
+    // 2. Registrar el movimiento para auditoría
+    await connection.execute(
+      "INSERT INTO movimientos_billetera (cliente_id, monto, tipo, descripcion, caja_id, usuario_id) VALUES (?, ?, 'carga', ?, ?, ?)",
+      [id, monto, descripcion || "Carga de saldo", caja_id, usuario_id]
+    );
+
+    await connection.commit();
+    res.json({ success: true, message: "Saldo cargado exitosamente" });
+  } catch (error) {
+    await connection.rollback();
+    res.status(500).json({ error: error.message });
+  } finally {
+    connection.release();
+  }
+};
+
 module.exports = {
   getListadoClientes,
   createCliente,
@@ -1300,4 +1331,5 @@ module.exports = {
   getClientesPerdidos,
   postRecapturaWhatsApp,
   getSegmentacionClientes,
+  cargarSaldoBilletera,
 };

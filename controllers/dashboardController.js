@@ -381,4 +381,50 @@ const getTermometroCategorias = async (req, res) => {
   }
 };
 
-module.exports = { getFullChartData, getPrediccionBI, getTermometroCategorias };
+const getPuntoEquilibrio = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    // 1. Obtener la Meta de Gastos Fijos de la empresa
+    const [empresa] = await db.execute(
+      "SELECT meta_gastos_fijos FROM empresas WHERE id = ?",
+      [empresa_id]
+    );
+    const meta = parseFloat(empresa[0].meta_gastos_fijos || 0);
+
+    // 2. Calcular Utilidad Neta Real del mes (Ventas - Devoluciones - CMV - Gastos Variables)
+    // Usamos la misma lógica que en el Dashboard Global para que los números coincidan
+    const [utilidad] = await db.execute(
+      `
+      SELECT (
+        (SELECT IFNULL(SUM(precio_total),0) FROM ventas WHERE empresa_id = ? AND MONTH(fecha) = MONTH(CURDATE()) AND YEAR(fecha) = YEAR(CURDATE())) - 
+        (SELECT IFNULL(SUM(precio_total),0) FROM devoluciones WHERE empresa_id = ? AND MONTH(fecha) = MONTH(CURDATE()) AND YEAR(fecha) = YEAR(CURDATE())) -
+        (SELECT IFNULL(SUM(dv.cantidad * dv.precio_compra), 0) FROM detalle_ventas dv JOIN ventas v ON dv.venta_id = v.id WHERE v.empresa_id = ? AND MONTH(v.fecha) = MONTH(CURDATE()) AND YEAR(v.fecha) = YEAR(CURDATE())) -
+        (SELECT IFNULL(SUM(monto),0) FROM gastos WHERE empresa_id = ? AND MONTH(fecha) = MONTH(CURDATE()) AND YEAR(fecha) = YEAR(CURDATE()))
+      ) as neta`,
+      [empresa_id, empresa_id, empresa_id, empresa_id]
+    );
+
+    const utilidadNeta = parseFloat(utilidad[0].neta || 0);
+    const faltante = meta - utilidadNeta;
+    const porcentaje =
+      meta > 0 ? Math.min((utilidadNeta / meta) * 100, 100) : 0;
+
+    res.json({
+      meta,
+      utilidadNeta,
+      faltante: faltante > 0 ? faltante : 0,
+      porcentaje: porcentaje.toFixed(2),
+      objetivoCumplido: utilidadNeta >= meta,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+module.exports = {
+  getFullChartData,
+  getPrediccionBI,
+  getTermometroCategorias,
+  getPuntoEquilibrio,
+};
