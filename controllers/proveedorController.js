@@ -361,6 +361,65 @@ const generarReporteCuentasPorPagarPDF = async (req, res) => {
   }
 };
 
+const getRankingProveedoresBI = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    // LÓGICA BASADA EN TU CAPTURA DE PANTALLA:
+    // 1. Tabla: 'proveedores'
+    // 2. Columna Nombre: 'empresa'
+    // 3. Vínculo: A través de la tabla compras
+    const query = `
+      SELECT 
+        pr.id,
+        pr.empresa as proveedor, 
+        COUNT(DISTINCT v.id) as cantidad_ventas,
+        SUM(dv.cantidad * dv.precio_venta) as total_facturado,
+        SUM(dv.cantidad * dv.precio_compra) as total_costo,
+        SUM(dv.cantidad * (dv.precio_venta - dv.precio_compra)) as utilidad_neta
+      FROM detalle_ventas dv
+      JOIN ventas v ON dv.venta_id = v.id
+      JOIN productos p ON dv.producto_id = p.id
+      JOIN proveedors pr ON pr.id = (
+          SELECT c.proveedor_id 
+          FROM detalle_compras dc 
+          JOIN compras c ON dc.compra_id = c.id 
+          WHERE dc.producto_id = p.id 
+          ORDER BY c.fecha DESC LIMIT 1
+      )
+      WHERE v.empresa_id = ? 
+        AND v.fecha >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
+      GROUP BY pr.id
+      ORDER BY utilidad_neta DESC
+    `;
+
+    const [rows] = await db.execute(query, [empresa_id]);
+
+    const ranking = rows.map((r) => {
+      const facturado = parseFloat(r.total_facturado || 0);
+      const utilidad = parseFloat(r.utilidad_neta || 0);
+      const margen =
+        facturado > 0 ? ((utilidad / facturado) * 100).toFixed(2) : 0;
+
+      return {
+        id: r.id,
+        proveedor: r.proveedor,
+        cantidad_ventas: r.cantidad_ventas,
+        total_facturado: facturado.toFixed(2),
+        total_costo: parseFloat(r.total_costo || 0).toFixed(2),
+        utilidad_neta: utilidad.toFixed(2),
+        margen_promedio: margen,
+      };
+    });
+
+    res.json(ranking);
+  } catch (error) {
+    console.error("ERROR PROVIDER BI:", error.message);
+    res
+      .status(500)
+      .json({ error: "Error al calcular rentabilidad de proveedores" });
+  }
+};
 const countProveedores = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
@@ -408,6 +467,7 @@ module.exports = {
   deleteProveedor,
   getInformeCuentasPorPagar,
   generarReporteCuentasPorPagarPDF,
+  getRankingProveedoresBI,
   countProveedores,
   getProveedoresSummary,
 };
