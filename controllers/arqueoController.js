@@ -5,6 +5,7 @@ const fs = require("fs");
 const pdf = require("html-pdf");
 const db = require("../config/db");
 const { registrarLog } = require("../utils/logger"); // 👈 Importamos el logger
+const { sendWS } = require("../utils/whatsapp"); // 👈 Importamos WhatsApp
 
 const MY_CAJA = () => Number(process.env.CAJA_ID || 1);
 
@@ -237,61 +238,72 @@ const closeArqueo = async (req, res) => {
     const { id } = req.params;
     const {
       fecha_cierre,
-      monto_final, // Total contado (Efe + Tarj + MP)
-      ventas_efectivo, // Solo el Efectivo que el cajero contó
-      ventas_tarjeta,
+      monto_final, // Total físico (Efe + Tarj + MP + Tra)
+      ventas_efectivo, // Conteo de EFECTIVO en el cajón (incluye inicial)
+      ventas_tarjeta, // Lo que el cajero dice que hay en tarjetas
       ventas_mercadopago,
       ventas_transferencia,
     } = req.body;
 
-    // 1. Obtener el arqueo para saber el Monto Inicial
+    const empresa_id = req.user.empresa_id;
+
+    // 1. Obtener datos del Arqueo y Empresa
     const [arqueoRows] = await db.execute(
-      "SELECT monto_inicial FROM arqueos WHERE id = ?",
+      `
+      SELECT a.monto_inicial, e.nombre_empresa, e.telefono, u.name as usuario 
+      FROM arqueos a 
+      JOIN users u ON a.usuario_id = u.id 
+      JOIN empresas e ON a.empresa_id = e.id 
+      WHERE a.id = ?`,
       [id]
     );
-    const monto_inicial = parseFloat(arqueoRows[0].monto_inicial);
 
-    // 2. Obtener las ventas REALES en efectivo desde la tabla 'ventas'
+    if (arqueoRows.length === 0)
+      return res.status(404).json({ message: "Arqueo no encontrado" });
+    const m_inicial = parseFloat(arqueoRows[0].monto_inicial);
+    const infoEmpresa = arqueoRows[0];
+
+    // 2. Obtener lo que el sistema registró (Ventas reales)
     const [salesRows] = await db.execute(
-      "SELECT IFNULL(SUM(efectivo), 0) as total FROM ventas WHERE arqueo_id = ?",
+      `
+      SELECT IFNULL(SUM(efectivo), 0) as efe_sys FROM ventas WHERE arqueo_id = ?`,
       [id]
     );
-    const total_ventas_efectivo = parseFloat(salesRows[0].total);
+    const efe_sistema = parseFloat(salesRows[0].efe_sys);
 
-    // 3. Obtener movimientos MANUALES (Aportes de cambio o Gastos)
-    // IMPORTANTÍSIMO: Filtramos para NO sumar las ventas que se registran en movimientos
+    // 3. Movimientos manuales y Retiros
     const [movRows] = await db.execute(
-      `SELECT 
-        SUM(CASE WHEN tipo = 'Ingreso' AND descripcion NOT LIKE 'Venta%' THEN monto ELSE 0 END) as ingresos_manuales,
-        SUM(CASE WHEN tipo = 'Egreso' THEN monto ELSE 0 END) as egresos_manuales
-       FROM movimiento_cajas WHERE arqueo_id = ?`,
+      `
+      SELECT 
+        SUM(CASE WHEN tipo = 'Ingreso' AND descripcion NOT LIKE 'Venta%' THEN monto ELSE 0 END) as ing_man,
+        SUM(CASE WHEN tipo = 'Egreso' THEN monto ELSE 0 END) as egr_man
+      FROM movimiento_cajas WHERE arqueo_id = ?`,
       [id]
     );
-    const ing_manual = parseFloat(movRows[0].ingresos_manuales || 0);
-    const egr_manual = parseFloat(movRows[0].egresos_manuales || 0);
+    const ing_man = parseFloat(movRows[0].ing_man || 0);
+    const egr_man = parseFloat(movRows[0].egr_man || 0);
 
-    // 4. Obtener los Retiros de Seguridad (Lo que sacó el dueño)
     const [retRows] = await db.execute(
       "SELECT IFNULL(SUM(monto), 0) as total FROM retiros_caja WHERE arqueo_id = ?",
       [id]
     );
-    const total_retiros = parseFloat(retRows[0].total);
+    const t_retiros = parseFloat(retRows[0].total);
 
-    // 5. 🚀 LA MATEMÁTICA DEFINITIVA (Efectivo Esperado) 🚀
-    // Lo que debería haber en el cajón es:
-    // (Inicial + Ventas en Efectivo + Entradas Manuales) - (Gastos Manuales + Retiros del Dueño)
-    const esperado_efectivo =
-      monto_inicial +
-      total_ventas_efectivo +
-      ing_manual -
-      egr_manual -
-      total_retiros;
+    // 4. 🚀 CÁLCULO DEL ESPERADO (Lo que DEBERÍA haber en el cajón)
+    const esperado_en_cajon =
+      m_inicial + efe_sistema + ing_man - egr_man - t_retiros;
 
-    // 6. Diferencia Real: Lo que contó el cajero vs lo que el sistema dice que hay
-    const diferencia = parseFloat(ventas_efectivo) - esperado_efectivo;
+    // 5. 🚀 CÁLCULO DE LA VENTA REAL DECLARADA (Lo que el usuario vendió según su conteo)
+    // Fórmula: (Lo que contó - Lo que había al principio - ingresos manuales) + gastos + retiros
+    const venta_efectivo_fisica =
+      parseFloat(ventas_efectivo) - m_inicial - ing_man + egr_man + t_retiros;
 
-    // 7. Guardar en la Base de Datos
-    const queryUpdate = `
+    // 6. Diferencia (Conteo vs Sistema)
+    const diferencia = parseFloat(ventas_efectivo) - esperado_en_cajon;
+
+    // 7. Actualizar la Base de Datos
+    await db.execute(
+      `
       UPDATE arqueos SET 
         fecha_cierre = ?, 
         monto_final = ?, 
@@ -302,34 +314,54 @@ const closeArqueo = async (req, res) => {
         ventas_mercadopago = ?, 
         ventas_transferencia = ?, 
         estado = 'Cerrado' 
-      WHERE id = ?
-    `;
+      WHERE id = ?`,
+      [
+        fecha_cierre,
+        monto_final,
+        esperado_en_cajon,
+        diferencia,
+        venta_efectivo_fisica, // 👈 AHORA SÍ: Guarda los 10.000 de venta, no los 20.000 del cajón
+        ventas_tarjeta,
+        ventas_mercadopago,
+        ventas_transferencia,
+        id,
+      ]
+    );
 
-    await db.execute(queryUpdate, [
-      fecha_cierre,
-      monto_final,
-      esperado_efectivo, // Guardamos el esperado correcto
-      diferencia,
-      ventas_efectivo,
-      ventas_tarjeta,
-      ventas_mercadopago,
-      ventas_transferencia,
-      id,
-    ]);
-
+    // 8. Log y Sockets
     const io = req.app.get("socketio");
     if (io) io.emit("update-dashboard");
-
     await registrarLog(
       req,
       "CERRAR",
       "ARQUEOS",
-      `Cierre de caja ID ${id}. Diferencia: ${diferencia.toFixed(2)}`
+      `Cierre ID ${id}. Venta declarada: ${venta_efectivo_fisica}. Dif: ${diferencia}`
     );
 
-    res.json({ success: true, diferencia: diferencia });
+    // 9. WhatsApp Directo (Replicando lógica de clientes)
+    const fmt = (val) =>
+      new Intl.NumberFormat("es-AR", {
+        style: "currency",
+        currency: "ARS",
+      }).format(val || 0);
+    const mensaje =
+      `📊 *RESUMEN DE CIERRE* 📊\n` +
+      `👤 *Cajero:* ${infoEmpresa.usuario}\n\n` +
+      `💰 *Venta Efectivo:* ${fmt(venta_efectivo_fisica)}\n` +
+      `💰 *Venta MercadoPago:* ${fmt(ventas_mercadopago)}\n` +
+      `💰 *Venta Tarjeta:* ${fmt(ventas_tarjeta)}\n` +
+      `💰 *Venta Transferencia:* ${fmt(ventas_transferencia)}\n` +
+      `💸 *Diferencia:* ${fmt(diferencia)}\n` +
+      `🏧 *Retiros:* ${fmt(t_retiros)}\n\n` +
+      `🤖 _Enterprise Retail BI_`;
+
+    await sendWS(infoEmpresa.telefono, mensaje).catch((e) =>
+      console.log("WS Error")
+    );
+
+    res.json({ success: true, diferencia });
   } catch (error) {
-    console.error("Error crítico en cierre:", error);
+    console.error("Error en cierre:", error);
     res.status(500).json({ success: false, message: "Error interno" });
   }
 };

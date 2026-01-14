@@ -1161,17 +1161,11 @@ const postRecapturaWhatsApp = async (req, res) => {
     const { id } = req.params;
     const empresa_id = req.user.empresa_id;
 
-    // 1. Obtenemos los datos del cliente y su producto favorito
     const query = `
-      SELECT 
-        c.nombre_cliente, c.telefono,
+      SELECT c.nombre_cliente, c.telefono,
         DATEDIFF(CURDATE(), (SELECT MAX(fecha) FROM ventas WHERE cliente_id = c.id)) as dias_ausente,
-        (
-          SELECT p.nombre FROM detalle_ventas dv 
-          JOIN ventas v2 ON dv.venta_id = v2.id 
-          JOIN productos p ON dv.producto_id = p.id
-          WHERE v2.cliente_id = c.id GROUP BY p.id ORDER BY SUM(dv.cantidad) DESC LIMIT 1
-        ) as producto_favorito
+        (SELECT p.nombre FROM detalle_ventas dv JOIN ventas v2 ON dv.venta_id = v2.id JOIN productos p ON dv.producto_id = p.id
+         WHERE v2.cliente_id = c.id GROUP BY p.id ORDER BY SUM(dv.cantidad) DESC LIMIT 1) as producto_favorito
       FROM clientes c WHERE c.id = ? AND c.empresa_id = ?
     `;
 
@@ -1180,37 +1174,40 @@ const postRecapturaWhatsApp = async (req, res) => {
       return res.status(404).json({ message: "Cliente no encontrado" });
 
     const cliente = rows[0];
+    const mensaje = `¡Hola *${
+      cliente.nombre_cliente
+    }*! 👋\n\nTe extrañamos en el local. Hace *${
+      cliente.dias_ausente
+    } días* que no nos visitas.\n\nJusto entró stock de *${
+      cliente.producto_favorito || "tus productos favoritos"
+    }* esperándote. 🛍️\n\n🎁 ¡En tu próxima compra presentá este mensaje y te regalamos un *10% de descuento*!\n\n¡Te esperamos pronto! 😊`;
 
-    // 2. Construimos el mensaje (Igual que el anterior pero para el Bot)
-    const mensaje =
-      `¡Hola *${cliente.nombre_cliente}*! 👋\n\n` +
-      `Te extrañamos en el local. Hace *${cliente.dias_ausente} días* que no nos visitas.\n\n` +
-      `Justo entró stock de *${
-        cliente.producto_favorito || "tus productos favoritos"
-      }* esperándote. 🛍️\n\n` +
-      `🎁 ¡En tu próxima compra presentá este mensaje y te regalamos un *10% de descuento*!\n\n` +
-      `¡Te esperamos pronto! 😊`;
+    // 🚀 LÓGICA DE CONTROL DE ENVÍO 🚀
+    const enviado = await sendWS(cliente.telefono, mensaje);
 
-    // 3. ENVIAR DIRECTO (Igual que el ticket)
-    await sendWS(cliente.telefono, mensaje);
-
-    // 4. LOG de la acción
-    await registrarLog(
-      req,
-      "WHATSAPP",
-      "CLIENTES",
-      `Mensaje de recaptura enviado a ${cliente.nombre_cliente}`
-    );
-
-    res.json({
-      success: true,
-      message: "Mensaje enviado correctamente por el Bot.",
-    });
+    if (enviado) {
+      await registrarLog(
+        req,
+        "WHATSAPP",
+        "CLIENTES",
+        `Mensaje de recaptura enviado a ${cliente.nombre_cliente}`
+      );
+      return res.json({
+        success: true,
+        message: "Mensaje enviado correctamente.",
+      });
+    } else {
+      // Si el sendWS devolvió false, avisamos al frontend
+      return res.status(500).json({
+        success: false,
+        message: "El Bot no pudo procesar el envío. Verifique el número.",
+      });
+    }
   } catch (error) {
-    console.error("ERROR WS RECAPTURA:", error);
+    console.error("ERROR RECAPTURA:", error);
     res
       .status(500)
-      .json({ success: false, message: "Error al enviar WhatsApp" });
+      .json({ success: false, message: "Error interno del servidor" });
   }
 };
 
