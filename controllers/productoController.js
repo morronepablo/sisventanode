@@ -941,6 +941,108 @@ const getSimulacionImpacto = async (req, res) => {
   }
 };
 
+const getAnaliticaPareto = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    // 🚀 ALGORITMO DE AUDITORÍA TOTAL (Ventas Directas + Ventas por Combos)
+    const query = `
+      SELECT 
+        p.id, p.codigo, p.nombre, p.stock, p.stock_minimo,
+        (
+          SELECT IFNULL(SUM(total_neto_producto), 0)
+          FROM (
+            -- A. FACTURACIÓN POR VENTAS DIRECTAS
+            SELECT 
+              v.fecha, dv.producto_id,
+              (dv.cantidad * dv.precio_venta) * 
+              (CASE WHEN (SELECT SUM(dv_t.cantidad * dv_t.precio_venta) FROM detalle_ventas dv_t WHERE dv_t.venta_id = v.id) = 0 THEN 1 
+               ELSE (v.precio_total / (SELECT SUM(dv_t.cantidad * dv_t.precio_venta) FROM detalle_ventas dv_t WHERE dv_t.venta_id = v.id)) END) as total_neto_producto
+            FROM detalle_ventas dv
+            JOIN ventas v ON dv.venta_id = v.id
+            WHERE v.empresa_id = ? AND dv.producto_id IS NOT NULL
+
+            UNION ALL
+
+            -- B. FACTURACIÓN PRORRATEADA POR VENTAS EN COMBOS
+            SELECT 
+              v.fecha, cp.producto_id,
+              ((dv.cantidad * cp.cantidad) * p_inner.precio_venta) * 
+              (CASE WHEN (SELECT SUM(dv_t2.cantidad * dv_t2.precio_venta) FROM detalle_ventas dv_t2 WHERE dv_t2.venta_id = v.id) = 0 THEN 1 
+               ELSE (v.precio_total / (SELECT SUM(dv_t2.cantidad * dv_t2.precio_venta) FROM detalle_ventas dv_t2 WHERE dv_t2.venta_id = v.id)) END) as total_neto_producto
+            FROM detalle_ventas dv
+            JOIN ventas v ON dv.venta_id = v.id
+            JOIN combo_producto cp ON dv.combo_id = cp.combo_id
+            JOIN productos p_inner ON cp.producto_id = p_inner.id
+            WHERE v.empresa_id = ? AND dv.combo_id IS NOT NULL
+          ) as consolidado
+          WHERE consolidado.producto_id = p.id 
+            AND consolidado.fecha >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)
+        ) as facturacion_acumulada
+      FROM productos p
+      WHERE p.empresa_id = ?
+      ORDER BY facturacion_acumulada DESC
+    `;
+
+    // Pasamos empresa_id 3 veces (Subconsulta A, Subconsulta B y Lista Principal)
+    const [productos] = await db.execute(query, [
+      empresa_id,
+      empresa_id,
+      empresa_id,
+    ]);
+
+    const facturacionTotalGlobal = productos.reduce(
+      (acc, curr) => acc + parseFloat(curr.facturacion_acumulada),
+      0
+    );
+
+    let acumulado = 0;
+    const reporteFinal = productos.map((p) => {
+      const facturacion = parseFloat(p.facturacion_acumulada);
+      acumulado += facturacion;
+
+      const porcentajeAcumulado =
+        facturacionTotalGlobal > 0
+          ? (acumulado / facturacionTotalGlobal) * 100
+          : 100;
+
+      let clase = "D";
+      let color = "#6c757d";
+
+      if (facturacion > 0) {
+        if (porcentajeAcumulado <= 80) {
+          clase = "A";
+          color = "#FFD700";
+        } else if (porcentajeAcumulado <= 95) {
+          clase = "B";
+          color = "#C0C0C0";
+        } else {
+          clase = "C";
+          color = "#CD7F32";
+        }
+      }
+
+      const riesgoQuiebre = clase === "A" && p.stock <= p.stock_minimo;
+
+      return {
+        ...p,
+        porcentaje_aporte:
+          facturacionTotalGlobal > 0
+            ? ((facturacion / facturacionTotalGlobal) * 100).toFixed(2)
+            : "0.00",
+        clase,
+        color,
+        riesgoQuiebre,
+      };
+    });
+
+    res.json(reporteFinal);
+  } catch (error) {
+    console.error("ERROR PARETO GLOBAL:", error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
 const countProductos = async (req, res) => {
   try {
     const [rows] = await db.execute(
@@ -979,6 +1081,7 @@ module.exports = {
   getAuditoriaMargenes,
   getProductosMuertos,
   getSimulacionImpacto,
+  getAnaliticaPareto,
   countProductos,
   countBajoStock,
   generarReporteStock,

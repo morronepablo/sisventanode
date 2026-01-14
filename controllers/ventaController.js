@@ -27,8 +27,33 @@ const getListadoVentas = async (req, res) => {
     const result = [];
 
     for (const v of ventas) {
-      const detalles = await Venta.getDetallesByVentaId(v.id);
-      result.push({ ...v, detalles });
+      const detallesRaw = await Venta.getDetallesByVentaId(v.id);
+
+      // 🚀 PROCESAMOS CADA DETALLE PARA QUE EL PRECIO SEA REAL 🚀
+      const detallesProcesados = detallesRaw.map((d) => {
+        let precioUnitario = 0;
+        if (d.producto_id) {
+          // Lógica de porcentaje o precio fijo para productos
+          if (d.aplicar_porcentaje == 1) {
+            precioUnitario =
+              parseFloat(d.precio_compra) *
+              (1 + (parseFloat(d.valor_porcentaje) || 0) / 100);
+          } else {
+            precioUnitario = parseFloat(d.precio_venta) || 0;
+          }
+        } else if (d.combo_id) {
+          // Si es combo, usamos el precio del combo guardado
+          precioUnitario = parseFloat(d.combo_precio) || 0;
+        }
+
+        return {
+          ...d,
+          precio_unitario: precioUnitario,
+          importe_neto: parseFloat(d.cantidad) * precioUnitario,
+        };
+      });
+
+      result.push({ ...v, detalles: detallesProcesados });
     }
     res.json(result);
   } catch (error) {
