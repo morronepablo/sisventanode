@@ -51,10 +51,7 @@ const getCompraById = async (req, res) => {
 
 const getTmpCompras = async (req, res) => {
   try {
-    const { usuario_id } = req.query;
-    if (!usuario_id)
-      return res.status(400).json({ message: "Falta usuario_id" });
-    const items = await Compra.getTmpItems(usuario_id);
+    const items = await Compra.getTmpItems(req.query.usuario_id);
     res.json(items);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -63,7 +60,22 @@ const getTmpCompras = async (req, res) => {
 
 const postTmpCompra = async (req, res) => {
   try {
-    await Compra.addTmpItem(req.body);
+    // Al agregar al carrito, traemos el precio_compra actual del producto como base
+    const [prod] = await db.execute(
+      "SELECT precio_compra FROM productos WHERE id = ?",
+      [req.body.producto_id]
+    );
+    const precio_base = prod[0] ? prod[0].precio_compra : 0;
+
+    await db.execute(
+      "INSERT INTO tmp_compras (producto_id, cantidad, precio_compra, usuario_id, created_at, updated_at) VALUES (?, ?, ?, ?, NOW(), NOW())",
+      [
+        req.body.producto_id,
+        req.body.cantidad,
+        precio_base,
+        req.body.usuario_id,
+      ]
+    );
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -80,35 +92,86 @@ const deleteTmpCompra = async (req, res) => {
 };
 
 const storeCompra = async (req, res) => {
-  console.log("--- INICIO STORE COMPRA ---");
+  const connection = await db.getConnection(); // Obtenemos la conexión única
   try {
-    const { id_proveedor, comprobante, numero, precio_total, empresa_id } =
-      req.body;
+    await connection.beginTransaction(); // Iniciamos la transacción aquí
 
-    // Ejecutar el guardado en el modelo
-    await Compra.store(req.body, req.body.usuario_id, req.body.empresa_id);
-    console.log(
-      `[COMPRAS] Compra guardada con éxito para empresa ${empresa_id}`
+    const {
+      id_proveedor,
+      comprobante,
+      numero,
+      precio_total,
+      empresa_id,
+      usuario_id,
+    } = req.body;
+
+    // 1. Obtener items del carrito para comparar precios
+    // Usamos 'connection' para asegurar que estamos dentro de la transacción
+    const [items] = await connection.execute(
+      "SELECT * FROM tmp_compras WHERE usuario_id = ?",
+      [usuario_id]
     );
 
-    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    for (const item of items) {
+      const [prod] = await connection.execute(
+        "SELECT precio_compra, valor_porcentaje, nombre FROM productos WHERE id = ?",
+        [item.producto_id]
+      );
+
+      const costoNuevo = parseFloat(item.precio_compra);
+      const costoAnterior = parseFloat(prod[0].precio_compra);
+      const margen = parseFloat(prod[0].valor_porcentaje || 0);
+
+      // 2. Si el costo es diferente, actualizamos Producto y grabamos Historial
+      if (costoNuevo !== costoAnterior) {
+        // Cálculo del nuevo precio de venta (Costo + Margen original)
+        const nuevoPrecioVenta = costoNuevo * (1 + margen / 100);
+
+        await connection.execute(
+          "UPDATE productos SET precio_compra = ?, precio_venta = ?, updated_at = NOW() WHERE id = ?",
+          [costoNuevo, nuevoPrecioVenta.toFixed(2), item.producto_id]
+        );
+
+        // Guardamos el cambio en el historial para los gráficos de inflación
+        await connection.execute(
+          "INSERT INTO historial_precios (producto_id, precio_anterior, precio_nuevo, costo_anterior, costo_nuevo, fecha_cambio) VALUES (?, ?, ?, ?, ?, NOW())",
+          [
+            item.producto_id,
+            (costoAnterior * (1 + margen / 100)).toFixed(2), // Precio de venta anterior
+            nuevoPrecioVenta.toFixed(2), // Precio de venta nuevo
+            costoAnterior, // Costo anterior
+            costoNuevo, // Costo nuevo
+          ]
+        );
+      }
+    }
+
+    // 3. 🚀 CLAVE: Pasar la 'connection' como cuarto parámetro al modelo 🚀
+    // Esto evita el Lock Timeout porque el modelo usará la transacción abierta aquí
+    await Compra.store(req.body, usuario_id, empresa_id, connection);
+
+    await connection.commit(); // Si todo salió bien, guardamos los cambios
+
     const io = req.app.get("socketio");
     if (io) io.emit("update-dashboard");
 
-    // REGISTRO DE LOG
     await registrarLog(
       req,
       "CREAR",
       "COMPRAS",
-      `Se registró una compra de $${precio_total}. Comprobante: ${comprobante} - ${numero}. Proveedor ID: ${id_proveedor}`
+      `Compra registrada $${precio_total}. Recalculo de precios ejecutado.`
     );
 
     res.json({ success: true });
   } catch (error) {
-    console.error("[COMPRAS ERROR] Fallo al registrar compra:", error);
+    // Si algo falla, el rollback deshace los cambios en productos, historial y compra
+    if (connection) await connection.rollback();
+    console.error("ERROR EN STORE COMPRA:", error.message);
     res.status(500).json({ success: false, message: error.message });
+  } finally {
+    // IMPORTANTÍSIMO: Liberar la conexión para que otros puedan usarla
+    if (connection) connection.release();
   }
-  console.log("--- FIN STORE COMPRA ---");
 };
 
 const deleteCompra = async (req, res) => {
@@ -658,6 +721,81 @@ const updateTmpQuantity = async (req, res) => {
   }
 };
 
+const updateTmpPrice = async (req, res) => {
+  try {
+    const { id } = req.params; // ID de la tabla tmp_compras
+    const { precio_compra } = req.body;
+
+    await db.execute(
+      "UPDATE tmp_compras SET precio_compra = ?, updated_at = NOW() WHERE id = ?",
+      [precio_compra, id]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Error al actualizar precio:", error);
+    res.status(500).json({ message: "Error interno" });
+  }
+};
+
+const getAuditoriaTraicion = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    // 1. Calculamos la Inflación Promedio del Local (últimos 30 días)
+    const [inflacionLocal] = await db.execute(
+      `
+      SELECT AVG((costo_nuevo - costo_anterior) / costo_anterior * 100) as promedio
+      FROM historial_precios hp
+      JOIN productos p ON hp.producto_id = p.id
+      WHERE p.empresa_id = ? AND hp.fecha_cambio >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+      AND hp.costo_anterior > 0
+    `,
+      [empresa_id]
+    );
+
+    const avgInflation = parseFloat(inflacionLocal[0].promedio || 0);
+
+    // 2. Buscamos productos cuyo último aumento supere el promedio
+    // CORRECCIÓN: Tabla 'proveedors' y columna 'empresa'
+    const query = `
+      SELECT 
+        p.nombre, 
+        pr.empresa as proveedor,
+        hp.costo_anterior,
+        hp.costo_nuevo,
+        hp.fecha_cambio,
+        ((hp.costo_nuevo - hp.costo_anterior) / hp.costo_anterior * 100) as aumento_producto
+      FROM historial_precios hp
+      JOIN productos p ON hp.producto_id = p.id
+      -- Buscamos el proveedor a través de la última compra registrada
+      JOIN proveedors pr ON pr.id = (
+          SELECT c.proveedor_id FROM detalle_compras dc 
+          JOIN compras c ON dc.compra_id = c.id 
+          WHERE dc.producto_id = p.id ORDER BY c.fecha DESC LIMIT 1
+      )
+      WHERE p.empresa_id = ? 
+        AND hp.fecha_cambio >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+      HAVING aumento_producto > (? + 5)
+      ORDER BY aumento_producto DESC
+    `;
+
+    const [anomalias] = await db.execute(query, [empresa_id, avgInflation]);
+
+    res.json({
+      promedio_tienda: avgInflation.toFixed(2),
+      anomalias: anomalias.map((a) => ({
+        ...a,
+        aumento_producto: parseFloat(a.aumento_producto).toFixed(2),
+        brecha: (a.aumento_producto - avgInflation).toFixed(2),
+      })),
+    });
+  } catch (error) {
+    console.error("ERROR TRAICION:", error.message);
+    res.status(500).json({ error: "Error al auditar aumentos de proveedores" });
+  }
+};
+
 const countCompras = async (req, res) => {
   try {
     const [rows] = await db.execute(
@@ -758,6 +896,8 @@ module.exports = {
   getInformeNoPagadas,
   generarInformeNoPagadasPDF,
   updateTmpQuantity,
+  updateTmpPrice,
+  getAuditoriaTraicion,
   countCompras,
   getComprasSummary,
   getComprasMetrics,

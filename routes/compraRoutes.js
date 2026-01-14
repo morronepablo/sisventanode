@@ -17,6 +17,8 @@ const {
   getInformeNoPagadas,
   generarInformeNoPagadasPDF,
   updateTmpQuantity,
+  updateTmpPrice,
+  getAuditoriaTraicion,
   countCompras,
   getComprasSummary,
   getComprasMetrics,
@@ -43,11 +45,13 @@ router.get("/informes/proveedores", getInformeProveedores);
 router.get("/informes/proveedores-pdf", generarInformeProveedoresPDF);
 router.get("/informes/no-pagadas", getInformeNoPagadas);
 router.get("/informes/no-pagadas-pdf", generarInformeNoPagadasPDF);
+router.get("/auditoria-traicion", getAuditoriaTraicion);
 
 // --- RUTAS DEL CARRITO TEMPORAL (Rutas Fijas) ---
 router.get("/tmp", getTmpCompras);
 router.post("/tmp", postTmpCompra);
 router.put("/tmp/:id", updateTmpQuantity);
+router.put("/tmp/price/:id", updateTmpPrice);
 router.delete("/tmp/:id", deleteTmpCompra);
 router.post("/update-precio", updatePrecioCompra);
 
