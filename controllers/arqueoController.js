@@ -12,19 +12,20 @@ const getAllArqueos = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
 
-    // ACTUALIZAMOS LA QUERY PARA INCLUIR EL CAMPO total_retiros
     const query = `
       SELECT 
         a.*, 
         u.name as usuario_nombre,
-        -- Suma de ingresos/egresos manuales
-        (SELECT IFNULL(SUM(monto), 0) FROM movimiento_cajas WHERE arqueo_id = a.id AND tipo = 'Ingreso') as total_ingresos,
-        (SELECT IFNULL(SUM(monto), 0) FROM movimiento_cajas WHERE arqueo_id = a.id AND tipo = 'Egreso') as total_egresos,
+        -- 🚀 FILTRAMOS: Solo ingresos manualES (Que no sean ventas automáticas)
+        (SELECT IFNULL(SUM(monto), 0) FROM movimiento_cajas 
+         WHERE arqueo_id = a.id AND tipo = 'Ingreso' 
+         AND descripcion NOT LIKE 'Venta Ticket%') as total_ingresos_manual,
+
+        (SELECT IFNULL(SUM(monto), 0) FROM movimiento_cajas 
+         WHERE arqueo_id = a.id AND tipo = 'Egreso') as total_egresos,
         
-        -- 🚀 CLAVE: SUMA DE RETIROS DE SEGURIDAD 🚀
         (SELECT IFNULL(SUM(monto), 0) FROM retiros_caja WHERE arqueo_id = a.id) as total_retiros,
 
-        -- Desglose de Ventas
         (SELECT IFNULL(SUM(efectivo), 0) FROM ventas WHERE arqueo_id = a.id) as ventas_efectivo,
         (SELECT IFNULL(SUM(tarjeta), 0) FROM ventas WHERE arqueo_id = a.id) as ventas_tarjeta,
         (SELECT IFNULL(SUM(mercadopago), 0) FROM ventas WHERE arqueo_id = a.id) as ventas_mercadopago
@@ -36,11 +37,10 @@ const getAllArqueos = async (req, res) => {
 
     const [rows] = await db.execute(query, [empresa_id]);
 
-    // Para el acordeón (detalles), traemos los movimientos y los retiros también
     const results = await Promise.all(
       rows.map(async (arq) => {
         const [movs] = await db.execute(
-          "SELECT * FROM movimiento_cajas WHERE arqueo_id = ?",
+          "SELECT * FROM movimiento_cajas WHERE arqueo_id = ? ORDER BY created_at ASC",
           [arq.id]
         );
         return { ...arq, movimientos: movs };
@@ -234,57 +234,63 @@ const storeMovimiento = async (req, res) => {
 
 const closeArqueo = async (req, res) => {
   try {
-    const { id } = req.params; // ID del arqueo
+    const { id } = req.params;
     const {
       fecha_cierre,
-      monto_final,
-      ventas_efectivo,
+      monto_final, // Total contado (Efe + Tarj + MP)
+      ventas_efectivo, // Solo el Efectivo que el cajero contó
       ventas_tarjeta,
       ventas_mercadopago,
       ventas_transferencia,
     } = req.body;
 
-    // 1. Obtener el arqueo actual para saber el monto inicial
+    // 1. Obtener el arqueo para saber el Monto Inicial
     const [arqueoRows] = await db.execute(
       "SELECT monto_inicial FROM arqueos WHERE id = ?",
       [id]
     );
-    if (arqueoRows.length === 0)
-      return res.status(404).json({ message: "Arqueo no encontrado" });
     const monto_inicial = parseFloat(arqueoRows[0].monto_inicial);
 
-    // 2. Sumar Ingresos y Egresos Manuales (Movimientos de caja)
-    const [movRows] = await db.execute(
-      "SELECT tipo, SUM(monto) as total FROM movimiento_cajas WHERE arqueo_id = ? GROUP BY tipo",
+    // 2. Obtener las ventas REALES en efectivo desde la tabla 'ventas'
+    const [salesRows] = await db.execute(
+      "SELECT IFNULL(SUM(efectivo), 0) as total FROM ventas WHERE arqueo_id = ?",
       [id]
     );
-    let total_ingresos_man = 0;
-    let total_egresos_man = 0;
-    movRows.forEach((row) => {
-      if (row.tipo === "Ingreso") total_ingresos_man = parseFloat(row.total);
-      if (row.tipo === "Egreso") total_egresos_man = parseFloat(row.total);
-    });
+    const total_ventas_efectivo = parseFloat(salesRows[0].total);
 
-    // 3. 🚀 CLAVE: Obtener el total de Retiros de Seguridad realizados 🚀
+    // 3. Obtener movimientos MANUALES (Aportes de cambio o Gastos)
+    // IMPORTANTÍSIMO: Filtramos para NO sumar las ventas que se registran en movimientos
+    const [movRows] = await db.execute(
+      `SELECT 
+        SUM(CASE WHEN tipo = 'Ingreso' AND descripcion NOT LIKE 'Venta%' THEN monto ELSE 0 END) as ingresos_manuales,
+        SUM(CASE WHEN tipo = 'Egreso' THEN monto ELSE 0 END) as egresos_manuales
+       FROM movimiento_cajas WHERE arqueo_id = ?`,
+      [id]
+    );
+    const ing_manual = parseFloat(movRows[0].ingresos_manuales || 0);
+    const egr_manual = parseFloat(movRows[0].egresos_manuales || 0);
+
+    // 4. Obtener los Retiros de Seguridad (Lo que sacó el dueño)
     const [retRows] = await db.execute(
       "SELECT IFNULL(SUM(monto), 0) as total FROM retiros_caja WHERE arqueo_id = ?",
       [id]
     );
-    const total_retiros_seguridad = parseFloat(retRows[0].total);
+    const total_retiros = parseFloat(retRows[0].total);
 
-    // 4. CALCULAR MONTO ESPERADO (La matemática que fallaba)
-    // (Inicial + Ventas Efectivo + Ingresos Manuales) - (Egresos Manuales + Retiros Seguridad)
-    const monto_esperado =
+    // 5. 🚀 LA MATEMÁTICA DEFINITIVA (Efectivo Esperado) 🚀
+    // Lo que debería haber en el cajón es:
+    // (Inicial + Ventas en Efectivo + Entradas Manuales) - (Gastos Manuales + Retiros del Dueño)
+    const esperado_efectivo =
       monto_inicial +
-      parseFloat(ventas_efectivo) +
-      total_ingresos_man -
-      total_egresos_man -
-      total_retiros_seguridad;
+      total_ventas_efectivo +
+      ing_manual -
+      egr_manual -
+      total_retiros;
 
-    // 5. Calcular Diferencia (Lo que el cajero entregó vs lo que el sistema dice que hay)
-    const diferencia = parseFloat(monto_final) - monto_esperado;
+    // 6. Diferencia Real: Lo que contó el cajero vs lo que el sistema dice que hay
+    const diferencia = parseFloat(ventas_efectivo) - esperado_efectivo;
 
-    // 6. Actualizar el Arqueo en la Base de Datos
+    // 7. Guardar en la Base de Datos
     const queryUpdate = `
       UPDATE arqueos SET 
         fecha_cierre = ?, 
@@ -302,7 +308,7 @@ const closeArqueo = async (req, res) => {
     await db.execute(queryUpdate, [
       fecha_cierre,
       monto_final,
-      monto_esperado,
+      esperado_efectivo, // Guardamos el esperado correcto
       diferencia,
       ventas_efectivo,
       ventas_tarjeta,
@@ -311,7 +317,6 @@ const closeArqueo = async (req, res) => {
       id,
     ]);
 
-    // 7. Emitir evento Socket.io y registrar Log
     const io = req.app.get("socketio");
     if (io) io.emit("update-dashboard");
 
@@ -322,16 +327,10 @@ const closeArqueo = async (req, res) => {
       `Cierre de caja ID ${id}. Diferencia: ${diferencia.toFixed(2)}`
     );
 
-    res.json({
-      success: true,
-      message: "Caja cerrada con éxito",
-      diferencia: diferencia,
-    });
+    res.json({ success: true, diferencia: diferencia });
   } catch (error) {
-    console.error("Error al cerrar arqueo:", error);
-    res
-      .status(500)
-      .json({ message: "Error interno del servidor", error: error.message });
+    console.error("Error crítico en cierre:", error);
+    res.status(500).json({ success: false, message: "Error interno" });
   }
 };
 

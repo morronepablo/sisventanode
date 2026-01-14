@@ -62,4 +62,47 @@ const getAnomalias = async (req, res) => {
   }
 };
 
-module.exports = { getAnomalias };
+const getReporteIntegridad = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    const query = `
+      SELECT 
+        u.name as usuario,
+        COUNT(CASE WHEN a.tipo_evento = 'ITEM_BORRADO' THEN 1 END) as borrados,
+        IFNULL(SUM(CASE WHEN a.tipo_evento = 'ITEM_BORRADO' THEN a.monto_afectado END), 0) as monto_borrados,
+        (SELECT COUNT(*) FROM ventas WHERE usuario_id = u.id AND precio_total = 0) as tickets_cero,
+        (SELECT COUNT(*) FROM ventas WHERE usuario_id = u.id AND descuento_porcentaje > 20) as descuentos_altos
+      FROM users u
+      LEFT JOIN auditoria_seguridad a ON u.id = a.usuario_id
+      WHERE u.empresa_id = ?
+      GROUP BY u.id
+    `;
+
+    const [stats] = await db.execute(query, [empresa_id]);
+
+    const reporte = stats.map((s) => {
+      // Calculamos nivel de riesgo (Heurística simple)
+      let riesgo = "BAJO";
+      let color = "success";
+      let puntos =
+        s.borrados * 2 + s.tickets_cero * 10 + s.descuentos_altos * 5;
+
+      if (puntos > 50) {
+        riesgo = "CRÍTICO";
+        color = "danger";
+      } else if (puntos > 20) {
+        riesgo = "MEDIO";
+        color = "warning text-dark";
+      }
+
+      return { ...s, riesgo, color, puntos };
+    });
+
+    res.json(reporte);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+module.exports = { getAnomalias, getReporteIntegridad };

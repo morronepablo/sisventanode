@@ -148,10 +148,56 @@ const postTmpVenta = async (req, res) => {
 
 const deleteTmpVenta = async (req, res) => {
   try {
-    await Venta.deleteTmpItem(req.params.id);
+    const { id } = req.params; // ID de la fila en tmp_ventas
+
+    // 1. Buscamos qué se está borrando (usamos LEFT JOIN para que no falle si es uno u otro)
+    const [rows] = await db.execute(
+      `
+      SELECT t.cantidad, 
+             p.nombre as prod_nombre, p.precio_venta as prod_precio,
+             c.nombre as combo_nombre
+      FROM tmp_ventas t
+      LEFT JOIN productos p ON t.producto_id = p.id
+      LEFT JOIN combos c ON t.combo_id = c.id
+      WHERE t.id = ?`,
+      [id]
+    );
+
+    if (rows.length > 0) {
+      const item = rows[0];
+      // Si es producto usa prod_nombre, si es combo usa combo_nombre
+      const nombre =
+        item.prod_nombre || item.combo_nombre || "Ítem desconocido";
+
+      // El precio del producto lo tenemos, para el combo usamos 0 o podrías usar item.combo_precio si existiera
+      const precio = parseFloat(item.prod_precio || 0);
+      const cantidad = parseFloat(item.cantidad || 0);
+
+      // 2. REGISTRO PARA EL AUDITOR DE TICKETS
+      // Capturamos el caja_id de la sesión del usuario o del proceso
+      const cajaId = req.user.caja_id || Number(process.env.CAJA_ID || 1);
+
+      await db.execute(
+        "INSERT INTO auditoria_seguridad (usuario_id, caja_id, tipo_evento, detalle, monto_afectado) VALUES (?, ?, 'ITEM_BORRADO', ?, ?)",
+        [
+          req.user.id,
+          cajaId,
+          `Borro ${cantidad} unid. de ${nombre}`,
+          precio * cantidad,
+        ]
+      );
+    }
+
+    // 3. 🚀 EJECUTAMOS EL BORRADO FÍSICO 🚀
+    await Venta.deleteTmpItem(id);
+
     res.json({ success: true });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error("ERROR CRÍTICO AL BORRAR ITEM:", error.message);
+    // Aunque falle la auditoría, intentamos que el usuario pueda seguir trabajando
+    res
+      .status(500)
+      .json({ success: false, message: "Error al eliminar el ítem" });
   }
 };
 
