@@ -332,4 +332,53 @@ const getPrediccionBI = async (req, res) => {
   }
 };
 
-module.exports = { getFullChartData, getPrediccionBI };
+const getTermometroCategorias = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    // Usamos created_at de la tabla ventas para obtener la hora real
+    const query = `
+      SELECT hora, categoria, SUM(cantidad) as cantidad_items
+      FROM (
+          -- A. Productos vendidos directamente
+          SELECT 
+            HOUR(v.created_at) as hora, 
+            c.nombre as categoria, 
+            dv.cantidad
+          FROM detalle_ventas dv
+          JOIN ventas v ON dv.venta_id = v.id
+          JOIN productos p ON dv.producto_id = p.id
+          JOIN categorias c ON p.categoria_id = c.id
+          WHERE v.empresa_id = ? 
+            AND v.created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+
+          UNION ALL
+
+          -- B. Productos vendidos dentro de combos
+          SELECT 
+            HOUR(v.created_at) as hora, 
+            c.nombre as categoria, 
+            (dv.cantidad * cp.cantidad) as cantidad
+          FROM detalle_ventas dv
+          JOIN ventas v ON dv.venta_id = v.id
+          JOIN combo_producto cp ON dv.combo_id = cp.combo_id
+          JOIN productos p ON cp.producto_id = p.id
+          JOIN categorias c ON p.categoria_id = c.id
+          WHERE v.empresa_id = ? 
+            AND v.created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+      ) as t
+      GROUP BY hora, categoria
+      ORDER BY hora ASC, cantidad_items DESC
+    `;
+
+    // Pasamos el empresa_id dos veces por el UNION
+    const [rows] = await db.execute(query, [empresa_id, empresa_id]);
+
+    res.json(rows);
+  } catch (error) {
+    console.error("ERROR TERMÓMETRO:", error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+module.exports = { getFullChartData, getPrediccionBI, getTermometroCategorias };

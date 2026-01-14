@@ -4,6 +4,7 @@ const router = express.Router();
 const {
   getFullChartData,
   getPrediccionBI,
+  getTermometroCategorias,
 } = require("../controllers/dashboardController");
 const authMiddleware = require("../middlewares/authMiddleware");
 
@@ -13,5 +14,6 @@ router.use(authMiddleware);
 // Esta ruta responderá a: /api/dashboard/charts
 router.get("/charts", getFullChartData);
 router.get("/prediction", getPrediccionBI);
+router.get("/termometro-categorias", getTermometroCategorias);
 
 module.exports = router;
