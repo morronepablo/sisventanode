@@ -24,6 +24,7 @@ const {
   getClientesPerdidos,
   postRecapturaWhatsApp,
   getSegmentacionClientes,
+  getClienteScoring,
   cargarSaldoBilletera,
 } = require("../controllers/clienteController");
 const authMiddleware = require("../middlewares/authMiddleware");
@@ -40,6 +41,7 @@ router.get("/informes/cobranzas", getInformeCobranzas);
 router.get("/informes/cobranzas-pdf", generarReporteCobranzasPDF);
 router.get("/recaptura", getClientesPerdidos);
 router.get("/segmentacion-rfm", getSegmentacionClientes);
+router.get("/bi/scoring", getClienteScoring);
 
 // Rutas de Gestión de Pagos y Tickets
 router.get("/pagos/ticket/:pagoId", getReciboPagoTicket);

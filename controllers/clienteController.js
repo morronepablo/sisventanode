@@ -1308,6 +1308,75 @@ const cargarSaldoBilletera = async (req, res) => {
   }
 };
 
+const getClienteScoring = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    const query = `
+      SELECT 
+        c.id, 
+        c.nombre_cliente,
+        c.cuil_codigo,
+        SUM(CASE WHEN ct.tipo = 'deuda' THEN ct.importe ELSE 0 END) - 
+        SUM(CASE WHEN ct.tipo = 'pago' THEN ct.importe ELSE 0 END) as deuda_actual,
+        MIN(CASE WHEN ct.tipo = 'deuda' THEN ct.fecha ELSE NULL END) as fecha_antigua
+      FROM clientes c
+      INNER JOIN compras_cta_cte ct ON c.id = ct.cliente_id
+      WHERE c.empresa_id = ?
+      GROUP BY c.id
+      HAVING deuda_actual > 0
+    `;
+
+    const [rows] = await db.execute(query, [empresa_id]);
+
+    const scoring = rows.map((cl) => {
+      const hoy = new Date();
+      const fechaDeuda = new Date(cl.fecha_antigua);
+      const moraActual = Math.floor((hoy - fechaDeuda) / (1000 * 60 * 60 * 24));
+
+      let rango = "";
+      let color = "";
+      let escudo = "";
+      let recomendacion = "";
+
+      // NUEVA ESCALA DE DESAFÍO: 30, 60, 90 días
+      if (moraActual <= 30) {
+        rango = "ACEPTABLE";
+        color = "text-success";
+        escudo = "fas fa-shield-alt";
+        recomendacion = "Bajo control. Se puede seguir operando.";
+      } else if (moraActual > 30 && moraActual <= 60) {
+        rango = "RIESGO LEVE";
+        color = "text-warning";
+        escudo = "fas fa-exclamation-triangle";
+        recomendacion = "Mora detectada. Exigir pago parcial.";
+      } else {
+        rango = "MOROSO RIESGOSO";
+        color = "text-danger";
+        escudo = "fas fa-skull-crossbones";
+        recomendacion = "INCUMPLIMIENTO GRAVE. Bloquear cuenta.";
+      }
+
+      return {
+        id: cl.id,
+        nombre_cliente: cl.nombre_cliente,
+        cuil_codigo: cl.cuil_codigo,
+        mora: moraActual,
+        deuda_actual: parseFloat(cl.deuda_actual),
+        rango,
+        color,
+        escudo,
+        recomendacion,
+      };
+    });
+
+    res.json(scoring);
+  } catch (error) {
+    console.error("❌ ERROR EN SCORING:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
 module.exports = {
   getListadoClientes,
   createCliente,
@@ -1332,4 +1401,5 @@ module.exports = {
   postRecapturaWhatsApp,
   getSegmentacionClientes,
   cargarSaldoBilletera,
+  getClienteScoring,
 };
