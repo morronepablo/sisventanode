@@ -7,8 +7,8 @@ const db = require("../config/db");
 const { registrarLog } = require("../utils/logger");
 const { sendWS } = require("../utils/whatsapp"); // 👈 1. Importar WhatsApp
 
-// Definición de la terminal activa para reportes y registros
-const MY_CAJA = () => Number(process.env.CAJA_ID || 1);
+// 🚀 REGLA DE ORO: Definir MY_CAJA como constante para todo el archivo
+const MY_CAJA = Number(process.env.CAJA_ID || 1);
 
 const getEmpresaPhone = async (empresa_id) => {
   const [rows] = await db.execute(

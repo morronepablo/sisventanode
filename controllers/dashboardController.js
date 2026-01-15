@@ -336,34 +336,42 @@ const getTermometroCategorias = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
 
-    // Usamos created_at de la tabla ventas para obtener la hora real
     const query = `
-      SELECT hora, categoria, SUM(cantidad) as cantidad_items
+      SELECT hora, categoria, SUM(volumen_ajustado) as cantidad_items
       FROM (
-          -- A. Productos vendidos directamente
+          -- A. Productos vendidos directamente (Normalizados por Unidad de Medida)
           SELECT 
             HOUR(v.created_at) as hora, 
             c.nombre as categoria, 
-            dv.cantidad
+            -- Si la unidad es 'Unidad', sumamos cantidad. Si es peso (gramos/kg), contamos como 1 evento de venta.
+            CASE 
+              WHEN u.nombre = 'Unidad' THEN dv.cantidad 
+              ELSE 1 
+            END as volumen_ajustado
           FROM detalle_ventas dv
           JOIN ventas v ON dv.venta_id = v.id
           JOIN productos p ON dv.producto_id = p.id
           JOIN categorias c ON p.categoria_id = c.id
+          JOIN unidads u ON p.unidad_id = u.id
           WHERE v.empresa_id = ? 
             AND v.created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
 
           UNION ALL
 
-          -- B. Productos vendidos dentro de combos
+          -- B. Productos vendidos dentro de combos (Normalizados)
           SELECT 
             HOUR(v.created_at) as hora, 
             c.nombre as categoria, 
-            (dv.cantidad * cp.cantidad) as cantidad
+            CASE 
+              WHEN u.nombre = 'Unidad' THEN (dv.cantidad * cp.cantidad) 
+              ELSE 1 
+            END as volumen_ajustado
           FROM detalle_ventas dv
           JOIN ventas v ON dv.venta_id = v.id
           JOIN combo_producto cp ON dv.combo_id = cp.combo_id
           JOIN productos p ON cp.producto_id = p.id
           JOIN categorias c ON p.categoria_id = c.id
+          JOIN unidads u ON p.unidad_id = u.id
           WHERE v.empresa_id = ? 
             AND v.created_at >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
       ) as t
@@ -371,9 +379,7 @@ const getTermometroCategorias = async (req, res) => {
       ORDER BY hora ASC, cantidad_items DESC
     `;
 
-    // Pasamos el empresa_id dos veces por el UNION
     const [rows] = await db.execute(query, [empresa_id, empresa_id]);
-
     res.json(rows);
   } catch (error) {
     console.error("ERROR TERMÓMETRO:", error);
