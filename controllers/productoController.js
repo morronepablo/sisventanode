@@ -1062,6 +1062,78 @@ const getAnaliticaPareto = async (req, res) => {
   }
 };
 
+const getOraculoStock = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    const query = `
+      SELECT 
+        p.id, p.nombre, p.stock, p.stock_minimo,
+        COALESCE(SUM(dv.cantidad), 0) as total_vendido_30_dias,
+        (COALESCE(SUM(dv.cantidad), 0) / 30) as velocidad_diaria
+      FROM productos p
+      LEFT JOIN detalle_ventas dv ON p.id = dv.producto_id
+      LEFT JOIN ventas v ON dv.venta_id = v.id AND v.fecha >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+      WHERE p.empresa_id = ?
+      GROUP BY p.id
+      ORDER BY velocidad_diaria DESC
+    `;
+
+    const [rows] = await db.execute(query, [empresa_id]);
+
+    const proyecciones = rows.map((p) => {
+      const vDiaria = parseFloat(p.velocidad_diaria);
+      const stockActual = parseFloat(p.stock);
+      const minimo = parseFloat(p.stock_minimo);
+
+      // LÓGICA CORREGIDA:
+      // Si el stock ya es menor o igual al mínimo, los días restantes para alerta son 0 (Urgente)
+      let diasRestantes = 999;
+      if (stockActual <= minimo) {
+        diasRestantes = 0;
+      } else if (vDiaria > 0) {
+        // Días que faltan para tocar el mínimo
+        diasRestantes = Math.floor((stockActual - minimo) / vDiaria);
+      }
+
+      let fechaQuiebre = new Date();
+      fechaQuiebre.setDate(
+        fechaQuiebre.getDate() + (diasRestantes === 999 ? 0 : diasRestantes)
+      );
+
+      return {
+        id: p.id,
+        nombre: p.nombre,
+        stock: p.stock,
+        stock_minimo: p.stock_minimo,
+        vDiaria: vDiaria.toFixed(2),
+        diasRestantes: diasRestantes,
+        fechaQuiebre:
+          diasRestantes === 0
+            ? "¡HOY!"
+            : diasRestantes < 999
+            ? fechaQuiebre.toISOString().split("T")[0]
+            : "N/A",
+        // Prioridad: 0 días es CRÍTICO, hasta 7 días es PRECAUCIÓN
+        nivelRiesgo:
+          diasRestantes <= 2
+            ? "CRÍTICO"
+            : diasRestantes <= 7
+            ? "PRECAUCIÓN"
+            : "SEGURO",
+      };
+    });
+
+    // Ordenamos: Primero los que tienen 0 días (stock mínimo alcanzado), luego por días ascendente
+    proyecciones.sort((a, b) => a.diasRestantes - b.diasRestantes);
+
+    res.json(proyecciones);
+  } catch (error) {
+    console.error("❌ ERROR EN EL ORÁCULO:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const countProductos = async (req, res) => {
   try {
     const [rows] = await db.execute(
@@ -1101,6 +1173,7 @@ module.exports = {
   getProductosMuertos,
   getSimulacionImpacto,
   getAnaliticaPareto,
+  getOraculoStock,
   countProductos,
   countBajoStock,
   generarReporteStock,
