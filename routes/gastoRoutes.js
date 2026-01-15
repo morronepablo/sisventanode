@@ -10,6 +10,7 @@ const {
   getInformeCirujano,
   getPuntoEquilibrio,
   getGastosHormiga,
+  getSaludFinanciera,
   storeCategoriaGasto,
   getCategoriaGastoById,
   updateCategoriaGasto,
@@ -24,6 +25,7 @@ router.get("/count", countGastos);
 router.get("/informes/cirujano", getInformeCirujano);
 router.get("/informes/punto-equilibrio", getPuntoEquilibrio);
 router.get("/informes/gastos-hormiga", getGastosHormiga);
+router.get("/informes/salud-financiera", getSaludFinanciera);
 router.get("/", getListadoGastos);
 router.get("/categorias", getCategoriasGastos);
 router.post("/categorias", storeCategoriaGasto);

@@ -484,6 +484,58 @@ const getGastosHormiga = async (req, res) => {
   }
 };
 
+const getSaludFinanciera = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+    const hoy = new Date();
+    const inicioMes = new Date(hoy.getFullYear(), hoy.getMonth(), 1)
+      .toISOString()
+      .split("T")[0];
+    const finMes = new Date(hoy.getFullYear(), hoy.getMonth() + 1, 0)
+      .toISOString()
+      .split("T")[0];
+
+    // 1. INGRESOS: Suma de Ventas Reales (precio_total)
+    const [ventasRes] = await db.execute(
+      "SELECT SUM(precio_total) as total FROM ventas WHERE empresa_id = ? AND (fecha BETWEEN ? AND ?)",
+      [empresa_id, inicioMes, finMes]
+    );
+    const ingresos = parseFloat(ventasRes[0].total || 0);
+
+    // 2. EGRESOS OPERATIVOS: Suma de Gastos (monto)
+    const [gastosRes] = await db.execute(
+      "SELECT SUM(monto) as total FROM gastos WHERE empresa_id = ? AND (fecha BETWEEN ? AND ?)",
+      [empresa_id, inicioMes, finMes]
+    );
+    const egresosGastos = parseFloat(gastosRes[0].total || 0);
+
+    // 3. EGRESOS INVERSIÓN: Suma de Compras (precio_total) 👈 CORREGIDO AQUÍ
+    const [comprasRes] = await db.execute(
+      "SELECT SUM(precio_total) as total FROM compras WHERE empresa_id = ? AND (fecha BETWEEN ? AND ?)",
+      [empresa_id, inicioMes, finMes]
+    );
+    const egresosCompras = parseFloat(comprasRes[0].total || 0);
+
+    const totalEgresos = egresosGastos + egresosCompras;
+    const balanceNeto = ingresos - totalEgresos;
+
+    res.json({
+      success: true,
+      ingresos,
+      egresos: {
+        totales: totalEgresos,
+        operativos: egresosGastos,
+        mercaderia: egresosCompras,
+      },
+      balanceNeto,
+      estado: balanceNeto >= 0 ? "SALUDABLE" : "CRÍTICO",
+    });
+  } catch (error) {
+    console.error("❌ ERROR EN SALUD FINANCIERA:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 const countGastos = async (req, res) => {
   try {
     const [rows] = await db.execute("SELECT COUNT(*) AS total FROM gastos");
@@ -507,5 +559,6 @@ module.exports = {
   deleteCategoriaGasto,
   getPuntoEquilibrio,
   getGastosHormiga,
+  getSaludFinanciera,
   countGastos,
 };
