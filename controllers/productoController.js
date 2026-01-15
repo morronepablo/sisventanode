@@ -765,50 +765,72 @@ const getAuditoriaMargenes = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
 
-    // Mejoramos la consulta para manejar costos en 0 y asegurar el cálculo
+    // CONSULTA NIVEL DIOS:
+    // - Buscamos el costo de la ÚLTIMA factura de compra (Costo de Reposición)
+    // - Buscamos cuánto se vendió de este producto en los últimos 30 días
     const query = `
       SELECT 
-        p.id, p.codigo, p.nombre, p.precio_compra, p.precio_venta,
+        p.id, p.nombre, p.precio_venta,
         c.nombre as categoria_nombre,
         c.margen_objetivo,
-        -- Si el costo es 0, el margen es 0 para que salte la alerta
-        CASE 
-          WHEN p.precio_compra <= 0 THEN 0 
-          ELSE (((p.precio_venta - p.precio_compra) / p.precio_compra) * 100) 
-        END as margen_actual
+        -- 1. Costo de Reposición (Última factura o el costo del producto si no hay compras)
+        COALESCE(
+          (SELECT dc.precio_compra FROM detalle_compras dc 
+           JOIN compras com ON dc.compra_id = com.id 
+           WHERE dc.producto_id = p.id AND com.empresa_id = ? 
+           ORDER BY com.fecha DESC, com.id DESC LIMIT 1),
+          p.precio_compra
+        ) as ultimo_costo,
+        -- 2. Volumen de venta (Últimos 30 días)
+        COALESCE(
+          (SELECT SUM(dv.cantidad) FROM detalle_ventas dv 
+           JOIN ventas v ON dv.venta_id = v.id 
+           WHERE dv.producto_id = p.id AND v.fecha >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) AND v.empresa_id = ?),
+          0
+        ) as ventas_30_dias
       FROM productos p
       JOIN categorias c ON p.categoria_id = c.id
       WHERE p.empresa_id = ? 
         AND c.margen_objetivo > 0
-      HAVING margen_actual < c.margen_objetivo
-      ORDER BY (c.margen_objetivo - margen_actual) DESC
+      HAVING ( (precio_venta - ultimo_costo) / ultimo_costo * 100 ) < c.margen_objetivo
+      ORDER BY (c.margen_objetivo - ((precio_venta - ultimo_costo) / ultimo_costo * 100)) DESC
     `;
 
-    const [productos] = await db.execute(query, [empresa_id]);
+    const [productos] = await db.execute(query, [
+      empresa_id,
+      empresa_id,
+      empresa_id,
+    ]);
 
     const reporte = productos.map((p) => {
-      const costo = parseFloat(p.precio_compra);
+      const costo = parseFloat(p.ultimo_costo);
+      const ventaActual = parseFloat(p.precio_venta);
       const obj = parseFloat(p.margen_objetivo);
+      const ventasMes = parseFloat(p.ventas_30_dias);
 
-      // Precio Sugerido = Costo * (1 + Objetivo/100)
+      const margenActual = ((ventaActual - costo) / costo) * 100;
       const precioSugerido = costo * (1 + obj / 100);
+
+      // CÁLCULO BI: ¿Cuánta plata dejé de ganar este mes por tener el precio viejo?
+      const perdidaMes = (precioSugerido - ventaActual) * ventasMes;
 
       return {
         id: p.id,
-        codigo: p.codigo,
         nombre: p.nombre,
         categoria_nombre: p.categoria_nombre,
-        precio_compra: costo.toFixed(2),
-        precio_venta: parseFloat(p.precio_venta).toFixed(2),
-        margen_actual: parseFloat(p.margen_actual).toFixed(2),
+        ultimo_costo: costo.toFixed(2),
+        precio_venta: ventaActual.toFixed(2),
+        margen_actual: margenActual.toFixed(2),
         margen_objetivo: obj.toFixed(2),
         precio_sugerido: precioSugerido.toFixed(2),
+        ventas_30_dias: ventasMes,
+        perdida_estimada: perdidaMes.toFixed(2),
       };
     });
 
     res.json(reporte);
   } catch (error) {
-    console.error("ERROR GUARDIAN:", error);
+    console.error("ERROR GUARDIAN BI:", error);
     res.status(500).json({ message: "Error al auditar márgenes" });
   }
 };
