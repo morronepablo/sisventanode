@@ -420,6 +420,55 @@ const getRankingProveedoresBI = async (req, res) => {
       .json({ error: "Error al calcular rentabilidad de proveedores" });
   }
 };
+
+const getRadarInflacion = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    // CONSULTA CORREGIDA
+    // Cambiamos 'contacto_nombre' por 'contacto'
+    // Aseguramos que la tabla sea 'proveedores'
+    const query = `
+      SELECT 
+        prov.id as proveedor_id,
+        prov.empresa as proveedor_nombre,
+        prov.contacto, 
+        COUNT(DISTINCT p.id) as productos_analizados,
+        AVG(((dc_actual.precio_compra - dc_anterior.precio_compra) / dc_anterior.precio_compra) * 100) as inflacion_promedio,
+        MAX(c_actual.fecha) as ultima_factura
+      FROM detalle_compras dc_actual
+      JOIN compras c_actual ON dc_actual.compra_id = c_actual.id
+      JOIN productos p ON dc_actual.producto_id = p.id
+      JOIN proveedors prov ON c_actual.proveedor_id = prov.id
+      JOIN detalle_compras dc_anterior ON dc_actual.producto_id = dc_anterior.producto_id
+      JOIN compras c_anterior ON dc_anterior.compra_id = c_anterior.id AND c_anterior.proveedor_id = prov.id
+      WHERE c_actual.empresa_id = ? 
+        AND c_actual.fecha > c_anterior.fecha 
+        AND c_actual.fecha >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)
+      GROUP BY prov.id
+      ORDER BY inflacion_promedio DESC
+    `;
+
+    const [rows] = await db.execute(query, [empresa_id]);
+
+    const result = rows.map((r) => ({
+      ...r,
+      inflacion_promedio: parseFloat(r.inflacion_promedio || 0).toFixed(2),
+      estado:
+        r.inflacion_promedio > 15
+          ? "CRÍTICO"
+          : r.inflacion_promedio > 8
+          ? "ALERTA"
+          : "ESTABLE",
+    }));
+
+    res.json(result);
+  } catch (error) {
+    console.error("❌ ERROR RADAR INFLACION:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const countProveedores = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
@@ -468,6 +517,7 @@ module.exports = {
   getInformeCuentasPorPagar,
   generarReporteCuentasPorPagarPDF,
   getRankingProveedoresBI,
+  getRadarInflacion,
   countProveedores,
   getProveedoresSummary,
 };
