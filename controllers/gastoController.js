@@ -395,6 +395,95 @@ const getPuntoEquilibrio = async (req, res) => {
   }
 };
 
+const getGastosHormiga = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+    // Definimos qué es un "Gasto Hormiga".
+    // En Argentina hoy, pongamos $5.000 como base, pero el usuario podría verlo.
+    const UMBRAL_HORMIGA = 5000;
+
+    const hoy = new Date();
+    const inicioMes = new Date(hoy.getFullYear(), hoy.getMonth(), 1)
+      .toISOString()
+      .split("T")[0];
+    const finMes = new Date(hoy.getFullYear(), hoy.getMonth() + 1, 0)
+      .toISOString()
+      .split("T")[0];
+
+    const inicioMesAnt = new Date(hoy.getFullYear(), hoy.getMonth() - 1, 1)
+      .toISOString()
+      .split("T")[0];
+    const finMesAnt = new Date(hoy.getFullYear(), hoy.getMonth(), 0)
+      .toISOString()
+      .split("T")[0];
+
+    // 1. Gastos Hormiga MES ACTUAL
+    const queryActual = `
+      SELECT COUNT(*) as cantidad, SUM(monto) as total 
+      FROM gastos 
+      WHERE empresa_id = ? AND monto <= ? AND (fecha BETWEEN ? AND ?)
+    `;
+
+    // 2. Gastos Hormiga MES ANTERIOR (Para comparar tendencia)
+    const [actualRes] = await db.execute(queryActual, [
+      empresa_id,
+      UMBRAL_HORMIGA,
+      inicioMes,
+      finMes,
+    ]);
+    const [anteriorRes] = await db.execute(queryActual, [
+      empresa_id,
+      UMBRAL_HORMIGA,
+      inicioMesAnt,
+      finMesAnt,
+    ]);
+
+    const actual = {
+      cantidad: actualRes[0].cantidad || 0,
+      total: parseFloat(actualRes[0].total || 0),
+    };
+
+    const anterior = {
+      cantidad: anteriorRes[0].cantidad || 0,
+      total: parseFloat(anteriorRes[0].total || 0),
+    };
+
+    // 3. Ranking de categorías "más hormigas" (donde más se escapa la plata)
+    const queryRanking = `
+      SELECT cg.nombre as categoria, COUNT(*) as cantidad, SUM(g.monto) as total
+      FROM gastos g
+      JOIN categorias_gastos cg ON g.categoria_gasto_id = cg.id
+      WHERE g.empresa_id = ? AND g.monto <= ? AND (g.fecha BETWEEN ? AND ?)
+      GROUP BY cg.id
+      ORDER BY total DESC
+    `;
+    const [ranking] = await db.execute(queryRanking, [
+      empresa_id,
+      UMBRAL_HORMIGA,
+      inicioMes,
+      finMes,
+    ]);
+
+    // 4. Calcular tendencia
+    let tendenciaMonto = 0;
+    if (anterior.total > 0) {
+      tendenciaMonto = ((actual.total - anterior.total) / anterior.total) * 100;
+    }
+
+    res.json({
+      success: true,
+      umbral: UMBRAL_HORMIGA,
+      actual,
+      anterior,
+      tendenciaMonto: tendenciaMonto.toFixed(1),
+      ranking,
+    });
+  } catch (error) {
+    console.error("❌ ERROR EN RADAR HORMIGA:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 const countGastos = async (req, res) => {
   try {
     const [rows] = await db.execute("SELECT COUNT(*) AS total FROM gastos");
@@ -417,5 +506,6 @@ module.exports = {
   updateCategoriaGasto,
   deleteCategoriaGasto,
   getPuntoEquilibrio,
+  getGastosHormiga,
   countGastos,
 };

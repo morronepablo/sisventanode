@@ -9,6 +9,7 @@ const {
   deleteGasto,
   getInformeCirujano,
   getPuntoEquilibrio,
+  getGastosHormiga,
   storeCategoriaGasto,
   getCategoriaGastoById,
   updateCategoriaGasto,
@@ -22,6 +23,7 @@ router.use(authMiddleware);
 router.get("/count", countGastos);
 router.get("/informes/cirujano", getInformeCirujano);
 router.get("/informes/punto-equilibrio", getPuntoEquilibrio);
+router.get("/informes/gastos-hormiga", getGastosHormiga);
 router.get("/", getListadoGastos);
 router.get("/categorias", getCategoriasGastos);
 router.post("/categorias", storeCategoriaGasto);
