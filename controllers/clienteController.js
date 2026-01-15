@@ -35,7 +35,8 @@ const getListadoClientes = async (req, res) => {
 
 const createCliente = async (req, res) => {
   try {
-    const { nombre_cliente, cuil_codigo, telefono, email } = req.body;
+    const { nombre_cliente, cuil_codigo, telefono, email, fecha_nacimiento } =
+      req.body;
     const empresa_id = req.user.empresa_id;
 
     if (!nombre_cliente || !cuil_codigo) {
@@ -49,6 +50,7 @@ const createCliente = async (req, res) => {
       cuil_codigo,
       telefono,
       email,
+      fecha_nacimiento: fecha_nacimiento || null, // Guardar null si viene vacío
       empresa_id,
     });
 
@@ -575,6 +577,8 @@ const getHistorialCliente = async (req, res) => {
 const updateCliente = async (req, res) => {
   try {
     const { id } = req.params;
+    const { nombre_cliente, cuil_codigo, telefono, email, fecha_nacimiento } =
+      req.body; // 👈 Extraemos fecha_nacimiento
     const empresa_id = req.user.empresa_id;
 
     const clienteAnterior = await Cliente.findById(id);
@@ -588,20 +592,27 @@ const updateCliente = async (req, res) => {
       "created_at",
     ]);
 
+    // 👈 AÑADIMOS fecha_nacimiento AL UPDATE
     await db.execute(
-      `UPDATE clientes SET nombre_cliente = ?, cuil_codigo = ?, telefono = ?, email = ?, updated_at = NOW() 
+      `UPDATE clientes 
+       SET nombre_cliente = ?, 
+           cuil_codigo = ?, 
+           telefono = ?, 
+           email = ?, 
+           fecha_nacimiento = ?, 
+           updated_at = NOW() 
        WHERE id = ? AND empresa_id = ?`,
       [
-        req.body.nombre_cliente,
-        req.body.cuil_codigo,
-        req.body.telefono,
-        req.body.email,
+        nombre_cliente,
+        cuil_codigo,
+        telefono,
+        email,
+        fecha_nacimiento || null, // 👈 Se guarda null si no se ingresó nada
         id,
         empresa_id,
       ]
     );
 
-    // 👈 2. EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
     const io = req.app.get("socketio");
     if (io) io.emit("update-dashboard");
 
@@ -609,11 +620,12 @@ const updateCliente = async (req, res) => {
       req,
       "EDITAR",
       "CLIENTES",
-      `Editó cliente: ${clienteAnterior.nombre_cliente}. Cambios: ${detalleCambios}`
+      `Editó cliente: ${clienteAnterior.nombre_cliente}. Cambios detectados: ${detalleCambios}`
     );
 
-    res.json({ message: "Cliente actualizado" });
+    res.json({ message: "Cliente actualizado correctamente" });
   } catch (error) {
+    console.error("Error al editar cliente:", error);
     res.status(500).json({ message: "Error al actualizar" });
   }
 };
@@ -1377,6 +1389,107 @@ const getClienteScoring = async (req, res) => {
   }
 };
 
+const getCelebracionesHoy = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    // 1. CUMPLEAÑOS: Obtenemos datos y calculamos la EDAD
+    const queryCumples = `
+      SELECT id, nombre_cliente, telefono, 'CUMPLEAÑOS' as tipo,
+             (YEAR(CURDATE()) - YEAR(fecha_nacimiento)) as edad
+      FROM clientes 
+      WHERE empresa_id = ? 
+        AND MONTH(fecha_nacimiento) = MONTH(CURDATE()) 
+        AND DAY(fecha_nacimiento) = DAY(CURDATE())
+    `;
+
+    // 2. ANIVERSARIOS: Calculamos los años transcurridos desde la PRIMERA VENTA
+    const queryAniversarios = `
+      SELECT 
+        c.id, 
+        c.nombre_cliente, 
+        c.telefono, 
+        'ANIVERSARIO' as tipo, 
+        (YEAR(CURDATE()) - YEAR(MIN(v.fecha))) as años
+      FROM clientes c
+      INNER JOIN ventas v ON c.id = v.cliente_id
+      WHERE c.empresa_id = ?
+      GROUP BY c.id
+      HAVING MONTH(MIN(v.fecha)) = MONTH(CURDATE()) 
+         AND DAY(MIN(v.fecha)) = DAY(CURDATE())
+         AND YEAR(MIN(v.fecha)) < YEAR(CURDATE())
+    `;
+
+    const [cumples] = await db.execute(queryCumples, [empresa_id]);
+    const [aniversarios] = await db.execute(queryAniversarios, [empresa_id]);
+
+    res.json({
+      success: true,
+      cumples,
+      aniversarios,
+      total: cumples.length + aniversarios.length,
+    });
+  } catch (error) {
+    console.error("ERROR CELEBRACIONES:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const postCelebracionWhatsApp = async (req, res) => {
+  try {
+    const { id, tipo } = req.body;
+    const empresa_id = req.user.empresa_id;
+
+    // Buscamos al cliente y su fecha de primera venta para el cálculo real
+    const query = `
+      SELECT c.nombre_cliente, c.telefono,
+             (YEAR(CURDATE()) - YEAR(fecha_nacimiento)) as edad_cumple,
+             (SELECT YEAR(CURDATE()) - YEAR(MIN(fecha)) FROM ventas WHERE cliente_id = c.id) as años_tienda
+      FROM clientes c
+      WHERE c.id = ? AND c.empresa_id = ?
+    `;
+    const [rows] = await db.execute(query, [id, empresa_id]);
+
+    if (rows.length === 0)
+      return res.status(404).json({ message: "Cliente no encontrado" });
+
+    const cliente = rows[0];
+    const nombre = cliente.nombre_cliente.split(" ")[0];
+    let mensaje = "";
+
+    if (tipo === "CUMPLEAÑOS") {
+      mensaje = `¡Hola *${nombre}*! 👋\n\nTe saludamos de *ENTERPRISE RETAIL*. ¡Te deseamos un muy feliz cumple número ${cliente.edad_cumple}! 🎉\n\nQueremos regalarte un *10% OFF* en tu compra de hoy para festejar. 🎂\n\n¡Pasá a visitarnos! 😊`;
+    } else {
+      // Si por alguna razón el cálculo da 0 (ej. bindeo de fechas), forzamos a que sea al menos 1
+      const añosReales = cliente.años_tienda > 0 ? cliente.años_tienda : 1;
+      mensaje = `¡Hola *${nombre}*! 👋\n\n¡Hoy cumplís *${añosReales} ${
+        añosReales > 1 ? "años" : "año"
+      }* como cliente nuestro! 🎊\n\nRecordamos con alegría tu primera compra un día como hoy. ¡Gracias por elegirnos siempre! ❤️\n\nPasá por el local que tenemos un detalle preparado para vos. 🎁`;
+    }
+
+    const enviado = await sendWS(cliente.telefono, mensaje);
+
+    if (enviado) {
+      await registrarLog(
+        req,
+        "WHATSAPP",
+        "CLIENTES",
+        `Saludo de ${tipo} enviado a ${cliente.nombre_cliente}`
+      );
+      return res.json({
+        success: true,
+        message: "Saludo enviado correctamente.",
+      });
+    } else {
+      return res
+        .status(500)
+        .json({ success: false, message: "El Bot no pudo procesar el envío." });
+    }
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Error interno" });
+  }
+};
+
 module.exports = {
   getListadoClientes,
   createCliente,
@@ -1402,4 +1515,6 @@ module.exports = {
   getSegmentacionClientes,
   cargarSaldoBilletera,
   getClienteScoring,
+  getCelebracionesHoy,
+  postCelebracionWhatsApp,
 };

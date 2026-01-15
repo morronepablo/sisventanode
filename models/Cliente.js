@@ -33,19 +33,33 @@ const Cliente = {
   },
 
   create: async (datos) => {
-    const { nombre_cliente, cuil_codigo, telefono, email, empresa_id } = datos;
-    const query = `
-      INSERT INTO clientes 
-      (nombre_cliente, cuil_codigo, telefono, email, empresa_id, created_at, updated_at) 
-      VALUES (?, ?, ?, ?, ?, NOW(), NOW())
-    `;
-    const [result] = await db.execute(query, [
+    // 1. Extraemos la nueva columna 'fecha_nacimiento'
+    const {
       nombre_cliente,
       cuil_codigo,
       telefono,
       email,
+      fecha_nacimiento,
+      empresa_id,
+    } = datos;
+
+    // 2. Agregamos 'fecha_nacimiento' a la lista de columnas y un '?' extra en VALUES
+    const query = `
+      INSERT INTO clientes 
+      (nombre_cliente, cuil_codigo, telefono, email, fecha_nacimiento, empresa_id, created_at, updated_at) 
+      VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())
+    `;
+
+    // 3. Pasamos el valor al array de ejecución
+    const [result] = await db.execute(query, [
+      nombre_cliente,
+      cuil_codigo,
+      telefono || null,
+      email || null,
+      fecha_nacimiento || null, // Si viene vacío, se guarda como NULL en la DB
       empresa_id,
     ]);
+
     return result.insertId;
   },
 
