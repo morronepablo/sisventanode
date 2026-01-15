@@ -676,7 +676,7 @@ const getPrediccionCompra = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
 
-    // Eliminamos 'v.estado' ya que no existe en tu tabla ventas
+    // 🚀 Consulta que suma ventas directas + ventas por combos para cada producto
     const query = `
       SELECT 
           p.id,
@@ -686,21 +686,39 @@ const getPrediccionCompra = async (req, res) => {
           p.stock_minimo,
           p.precio_compra,
           IFNULL(u.nombre, 'Unid') as unidad_nombre,
-          (SELECT IFNULL(SUM(dv.cantidad), 0) 
-           FROM detalle_ventas dv 
-           JOIN ventas v ON dv.venta_id = v.id 
-           WHERE dv.producto_id = p.id 
-             AND v.empresa_id = ? 
-             AND v.fecha >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+          (
+            SELECT IFNULL(SUM(cantidad_salida), 0)
+            FROM (
+              -- Ventas directas
+              SELECT dv.producto_id, dv.cantidad as cantidad_salida, v.fecha
+              FROM detalle_ventas dv
+              JOIN ventas v ON dv.venta_id = v.id
+              WHERE v.empresa_id = ?
+              
+              UNION ALL
+              
+              -- Ventas a través de combos (Jamon/Queso)
+              SELECT cp.producto_id, (dv.cantidad * cp.cantidad) as cantidad_salida, v.fecha
+              FROM detalle_ventas dv
+              JOIN ventas v ON dv.venta_id = v.id
+              JOIN combo_producto cp ON dv.combo_id = cp.combo_id
+              WHERE v.empresa_id = ?
+            ) as todas_las_salidas
+            WHERE todas_las_salidas.producto_id = p.id 
+              AND todas_las_salidas.fecha >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
           ) as ventas_30_dias
       FROM productos p
       LEFT JOIN unidads u ON p.unidad_id = u.id
       WHERE p.empresa_id = ?
-      HAVING ventas_30_dias > 0 OR stock_actual <= stock_minimo
       ORDER BY ventas_30_dias DESC
     `;
 
-    const [productos] = await db.execute(query, [empresa_id, empresa_id]);
+    // Pasamos empresa_id 3 veces (Subconsulta A, Subconsulta B y Lista principal)
+    const [productos] = await db.execute(query, [
+      empresa_id,
+      empresa_id,
+      empresa_id,
+    ]);
 
     const reporte = productos.map((p) => {
       const vpd = parseFloat(p.ventas_30_dias) / 30;
@@ -711,6 +729,7 @@ const getPrediccionCompra = async (req, res) => {
           ? 999
           : 0;
 
+      // Sugerencia para cubrir 30 días
       let sugerencia = vpd * 30 - p.stock_actual;
       sugerencia = sugerencia > 0 ? Math.ceil(sugerencia) : 0;
 
@@ -726,7 +745,7 @@ const getPrediccionCompra = async (req, res) => {
         nombre: p.nombre,
         unidad: p.unidad_nombre,
         stock_actual: p.stock_actual,
-        ventas_mes: parseFloat(p.ventas_30_dias),
+        ventas_mes: parseFloat(p.ventas_30_dias).toFixed(2),
         vpd: parseFloat(vpd.toFixed(2)),
         dias_autonomia: diasAutonomia,
         sugerencia_compra: sugerencia,
