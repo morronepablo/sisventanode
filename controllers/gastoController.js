@@ -207,6 +207,124 @@ const deleteGasto = async (req, res) => {
   }
 };
 
+const getInformeCirujano = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+    const hoy = new Date();
+    const inicioMes = new Date(hoy.getFullYear(), hoy.getMonth(), 1)
+      .toISOString()
+      .split("T")[0];
+    const finMes = new Date(hoy.getFullYear(), hoy.getMonth() + 1, 0)
+      .toISOString()
+      .split("T")[0];
+
+    // Consulta con DESGLOSE por categoría
+    const queryGastos = `
+      SELECT 
+        cg.nombre as categoria,
+        cg.tipo,
+        SUM(g.monto) as total_categoria
+      FROM gastos g
+      JOIN categorias_gastos cg ON g.categoria_gasto_id = cg.id
+      WHERE g.empresa_id = ? AND g.fecha BETWEEN ? AND ?
+      GROUP BY cg.id
+    `;
+
+    const queryVentas = `SELECT SUM(precio_total) as total_ventas FROM ventas WHERE empresa_id = ? AND fecha BETWEEN ? AND ?`;
+
+    const [gastosRows] = await db.execute(queryGastos, [
+      empresa_id,
+      inicioMes,
+      finMes,
+    ]);
+    const [[ventasRes]] = await db.execute(queryVentas, [
+      empresa_id,
+      inicioMes,
+      finMes,
+    ]);
+
+    // Separar los datos para el frontend
+    const fijos_lista = gastosRows.filter((g) => g.tipo === "fijo");
+    const variables_lista = gastosRows.filter((g) => g.tipo === "variable");
+
+    const totalFijos = fijos_lista.reduce(
+      (acc, curr) => acc + parseFloat(curr.total_categoria),
+      0
+    );
+    const totalVariables = variables_lista.reduce(
+      (acc, curr) => acc + parseFloat(curr.total_categoria),
+      0
+    );
+
+    res.json({
+      totales: {
+        fijos: totalFijos,
+        variables: totalVariables,
+        ventas_totales: parseFloat(ventasRes.total_ventas || 0),
+      },
+      desglose: {
+        fijos: fijos_lista,
+        variables: variables_lista,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const storeCategoriaGasto = async (req, res) => {
+  try {
+    const { nombre, tipo } = req.body;
+    const [result] = await db.execute(
+      "INSERT INTO categorias_gastos (nombre, tipo, empresa_id) VALUES (?, ?, ?)",
+      [nombre, tipo, req.user.empresa_id]
+    );
+    res.json({ success: true, id: result.insertId });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Obtener una sola categoría
+const getCategoriaGastoById = async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      "SELECT * FROM categorias_gastos WHERE id = ?",
+      [req.params.id]
+    );
+    res.json(rows[0]);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Actualizar categoría
+const updateCategoriaGasto = async (req, res) => {
+  try {
+    const { nombre, tipo } = req.body;
+    await db.execute(
+      "UPDATE categorias_gastos SET nombre = ?, tipo = ? WHERE id = ?",
+      [nombre, tipo, req.params.id]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Eliminar categoría
+const deleteCategoriaGasto = async (req, res) => {
+  try {
+    const { id } = req.params;
+    await db.execute("DELETE FROM categorias_gastos WHERE id = ?", [id]);
+    res.json({ success: true });
+  } catch (error) {
+    res
+      .status(500)
+      .json({ message: "No se puede eliminar porque tiene gastos asociados" });
+  }
+};
+
 const countGastos = async (req, res) => {
   try {
     const [rows] = await db.execute("SELECT COUNT(*) AS total FROM gastos");
@@ -223,5 +341,10 @@ module.exports = {
   storeGasto,
   getGastoById,
   deleteGasto,
+  getInformeCirujano,
+  storeCategoriaGasto,
+  getCategoriaGastoById,
+  updateCategoriaGasto,
+  deleteCategoriaGasto,
   countGastos,
 };
