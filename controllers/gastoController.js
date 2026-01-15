@@ -325,6 +325,76 @@ const deleteCategoriaGasto = async (req, res) => {
   }
 };
 
+const getPuntoEquilibrio = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+    const hoy = new Date();
+    const inicioMes = new Date(hoy.getFullYear(), hoy.getMonth(), 1)
+      .toISOString()
+      .split("T")[0];
+    const finMes = new Date(hoy.getFullYear(), hoy.getMonth() + 1, 0)
+      .toISOString()
+      .split("T")[0];
+
+    // 1. SUMAR GASTOS TOTALES
+    const [gastosRes] = await db.execute(
+      "SELECT SUM(monto) as total FROM gastos WHERE empresa_id = ? AND (fecha BETWEEN ? AND ?)",
+      [empresa_id, inicioMes, finMes]
+    );
+    const gastosTotales = parseFloat(gastosRes[0].total || 0);
+
+    // 2. CALCULAR MARGEN REAL (Usando tus columnas: precio_venta y precio_compra)
+    const queryMargen = `
+      SELECT 
+        SUM(dv.cantidad * dv.precio_venta) as ventas_totales,
+        SUM(dv.cantidad * dv.precio_compra) as costo_total_mercaderia
+      FROM detalle_ventas dv
+      JOIN ventas v ON dv.venta_id = v.id
+      WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
+    `;
+
+    const [margenRes] = await db.execute(queryMargen, [
+      empresa_id,
+      inicioMes,
+      finMes,
+    ]);
+
+    const ventasActuales = parseFloat(margenRes[0].ventas_totales || 0);
+    const costoMercaderia = parseFloat(
+      margenRes[0].costo_total_mercaderia || 0
+    );
+
+    let margenPromedio = 0;
+    if (ventasActuales > 0) {
+      // Margen = (Ventas Totales - Costo Total de lo vendido) / Ventas Totales
+      margenPromedio = (ventasActuales - costoMercaderia) / ventasActuales;
+    } else {
+      // Si no hay ventas todavía, usamos un 30% estimado para la proyección
+      margenPromedio = 0.3;
+    }
+
+    // 3. PUNTO DE EQUILIBRIO (Venta necesaria para cubrir gastos)
+    const puntoEquilibrio =
+      margenPromedio > 0 ? gastosTotales / margenPromedio : 0;
+
+    res.json({
+      success: true,
+      gastosTotales,
+      margenPromedio: (margenPromedio * 100).toFixed(2),
+      puntoEquilibrio,
+      ventasActuales,
+      faltante: Math.max(puntoEquilibrio - ventasActuales, 0),
+      porcentajeAlcanzado:
+        puntoEquilibrio > 0
+          ? ((ventasActuales / puntoEquilibrio) * 100).toFixed(1)
+          : 0,
+    });
+  } catch (error) {
+    console.error("❌ ERROR EN PUNTO DE EQUILIBRIO:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 const countGastos = async (req, res) => {
   try {
     const [rows] = await db.execute("SELECT COUNT(*) AS total FROM gastos");
@@ -346,5 +416,6 @@ module.exports = {
   getCategoriaGastoById,
   updateCategoriaGasto,
   deleteCategoriaGasto,
+  getPuntoEquilibrio,
   countGastos,
 };
