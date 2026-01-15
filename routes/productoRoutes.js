@@ -16,6 +16,7 @@ const {
   getSimulacionImpacto,
   getAnaliticaPareto,
   getOraculoStock,
+  getCementerioStock,
   countProductos,
   countBajoStock,
   generarReporteStock,
@@ -45,6 +46,7 @@ router.get("/liquidador-inteligente", getProductosMuertos);
 router.get("/simulador-precios", getSimulacionImpacto);
 router.get("/radar-pareto", getAnaliticaPareto);
 router.get("/bi/oraculo-stock", getOraculoStock);
+router.get("/bi/cementerio", getCementerioStock);
 
 router.get("/", getAllProductos);
 router.get("/bajo-stock", getProductosBajoStock);

@@ -1156,6 +1156,77 @@ const getOraculoStock = async (req, res) => {
   }
 };
 
+const getCementerioStock = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+    const DIAS_INACTIVIDAD = 60;
+
+    // LÓGICA NIVEL DIOS (MySQL Friendly):
+    // Usamos GREATEST para comparar 3 fechas y COALESCE para evitar nulos.
+    const query = `
+      SELECT 
+        p.id, p.nombre, p.stock, p.precio_compra, p.precio_venta,
+        c.nombre as categoria_nombre,
+        GREATEST(
+          p.created_at,
+          COALESCE((
+            SELECT MAX(v1.fecha) 
+            FROM detalle_ventas dv1 
+            JOIN ventas v1 ON dv1.venta_id = v1.id 
+            WHERE dv1.producto_id = p.id AND v1.empresa_id = ?
+          ), '1970-01-01'),
+          COALESCE((
+            SELECT MAX(v2.fecha) 
+            FROM detalle_ventas dv2 
+            JOIN ventas v2 ON dv2.venta_id = v2.id 
+            JOIN combo_producto cp ON dv2.combo_id = cp.combo_id 
+            WHERE cp.producto_id = p.id AND v2.empresa_id = ?
+          ), '1970-01-01')
+        ) as ultima_actividad
+      FROM productos p
+      JOIN categorias c ON p.categoria_id = c.id
+      WHERE p.empresa_id = ? 
+        AND p.stock > 0
+      HAVING DATEDIFF(CURDATE(), ultima_actividad) >= ?
+      ORDER BY (p.stock * p.precio_compra) DESC
+    `;
+
+    // Pasamos empresa_id para las 2 subconsultas y para la principal
+    const [rows] = await db.execute(query, [
+      empresa_id,
+      empresa_id,
+      empresa_id,
+      DIAS_INACTIVIDAD,
+    ]);
+
+    const reporte = rows.map((p) => {
+      const capitalEnterrado =
+        parseFloat(p.stock) * parseFloat(p.precio_compra);
+      // Calculamos los días pasados desde la 'ultima_actividad' real
+      const hoy = new Date();
+      const act = new Date(p.ultima_actividad);
+      const diasInactivo = Math.floor((hoy - act) / (1000 * 60 * 60 * 24));
+
+      return {
+        id: p.id,
+        nombre: p.nombre,
+        categoria_nombre: p.categoria_nombre,
+        stock: p.stock,
+        precio_compra: p.precio_compra,
+        dias_inactivo: diasInactivo,
+        capital_enterrado: capitalEnterrado.toFixed(2),
+        sugerencia:
+          capitalEnterrado > 50000 ? "LIQUIDACIÓN URGENTE" : "CREAR COMBO",
+      };
+    });
+
+    res.json(reporte);
+  } catch (error) {
+    console.error("ERROR CEMENTERIO BI:", error);
+    res.status(500).json({ message: "Error al auditar stock inactivo" });
+  }
+};
+
 const countProductos = async (req, res) => {
   try {
     const [rows] = await db.execute(
@@ -1196,6 +1267,7 @@ module.exports = {
   getSimulacionImpacto,
   getAnaliticaPareto,
   getOraculoStock,
+  getCementerioStock,
   countProductos,
   countBajoStock,
   generarReporteStock,
