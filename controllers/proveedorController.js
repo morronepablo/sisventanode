@@ -530,6 +530,79 @@ const getSemaforoCumplimiento = async (req, res) => {
   }
 };
 
+const getMatrizDependencia = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    // CONSULTA NIVEL DIOS:
+    // 1. Calcula la utilidad (venta - costo) de cada ítem vendido en los últimos 90 días.
+    // 2. Busca quién fue el último proveedor que nos vendió ese producto.
+    // 3. Agrupa la utilidad total por proveedor.
+    const query = `
+      SELECT 
+        prov.empresa as proveedor_nombre,
+        SUM(dv.cantidad * (dv.precio_venta - dv.precio_compra)) as utilidad_generada,
+        COUNT(DISTINCT p.id) as variedad_productos
+      FROM detalle_ventas dv
+      JOIN ventas v ON dv.venta_id = v.id
+      JOIN productos p ON dv.producto_id = p.id
+      -- Buscamos el último proveedor que nos vendió este producto
+      JOIN (
+        SELECT dc.producto_id, c.proveedor_id
+        FROM detalle_compras dc
+        JOIN compras c ON dc.compra_id = c.id
+        WHERE c.empresa_id = ?
+        AND (dc.producto_id, c.fecha) IN (
+            SELECT producto_id, MAX(fecha) FROM detalle_compras JOIN compras ON detalle_compras.compra_id = compras.id GROUP BY producto_id
+        )
+      ) as ultimo_proveedor ON p.id = ultimo_proveedor.producto_id
+      JOIN proveedors prov ON ultimo_proveedor.proveedor_id = prov.id
+      WHERE v.empresa_id = ? AND v.fecha >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)
+      GROUP BY prov.id
+      ORDER BY utilidad_generada DESC
+    `;
+
+    const [rows] = await db.execute(query, [empresa_id, empresa_id]);
+
+    const utilidadTotal = rows.reduce(
+      (acc, curr) => acc + parseFloat(curr.utilidad_generada),
+      0
+    );
+
+    const result = rows.map((r) => {
+      const porcentaje =
+        utilidadTotal > 0
+          ? (parseFloat(r.utilidad_generada) / utilidadTotal) * 100
+          : 0;
+      let riesgo = "BAJO";
+      let color = "text-success";
+
+      if (porcentaje >= 50) {
+        riesgo = "CRÍTICO";
+        color = "text-danger";
+      } else if (porcentaje >= 25) {
+        riesgo = "MEDIO";
+        color = "text-warning";
+      }
+
+      return {
+        ...r,
+        porcentaje: porcentaje.toFixed(1),
+        riesgo,
+        color,
+      };
+    });
+
+    res.json({
+      utilidad_total: utilidadTotal,
+      proveedores: result,
+    });
+  } catch (error) {
+    console.error("ERROR MATRIZ:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const countProveedores = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
@@ -580,6 +653,7 @@ module.exports = {
   getRankingProveedoresBI,
   getRadarInflacion,
   getSemaforoCumplimiento,
+  getMatrizDependencia,
   countProveedores,
   getProveedoresSummary,
 };

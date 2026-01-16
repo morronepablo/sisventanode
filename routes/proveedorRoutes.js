@@ -15,6 +15,7 @@ const {
   getRankingProveedoresBI,
   getRadarInflacion,
   getSemaforoCumplimiento,
+  getMatrizDependencia,
   countProveedores,
   getProveedoresSummary,
 } = require("../controllers/proveedorController");
@@ -32,6 +33,7 @@ router.get("/informes/cuentas-por-pagar-pdf", generarReporteCuentasPorPagarPDF);
 router.get("/ranking-bi", getRankingProveedoresBI);
 router.get("/bi/radar-inflacion", getRadarInflacion);
 router.get("/bi/cumplimiento", getSemaforoCumplimiento);
+router.get("/bi/dependencia", getMatrizDependencia);
 
 router.get("/", getListadoProveedores);
 router.get("/con-deuda", getProveedoresConDeuda);
