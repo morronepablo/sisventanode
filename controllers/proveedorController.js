@@ -469,6 +469,67 @@ const getRadarInflacion = async (req, res) => {
   }
 };
 
+const getSemaforoCumplimiento = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    // CONSULTA BI:
+    // Compara la suma de lo pedido vs lo recibido de todas las OC finalizadas
+    const query = `
+      SELECT 
+        p.id, 
+        p.empresa as proveedor_nombre,
+        p.contacto,
+        COUNT(oc.id) as total_pedidos,
+        SUM(doc.cantidad_pedida) as total_unidades_pedidas,
+        SUM(doc.cantidad_recibida) as total_unidades_recibidas,
+        (SUM(doc.cantidad_recibida) / SUM(doc.cantidad_pedida) * 100) as score_cumplimiento
+      FROM proveedors p
+      JOIN ordenes_compra oc ON p.id = oc.proveedor_id
+      JOIN detalle_ordenes_compra doc ON oc.id = doc.orden_id
+      WHERE oc.empresa_id = ? AND oc.estado = 'Recibida'
+      GROUP BY p.id
+      ORDER BY score_cumplimiento ASC -- Los que menos cumplen primero para alertar
+    `;
+
+    const [rows] = await db.execute(query, [empresa_id]);
+
+    const result = rows.map((r) => {
+      const score = parseFloat(r.score_cumplimiento || 0);
+      let estado = "";
+      let color = "";
+      let icono = "";
+
+      if (score >= 95) {
+        estado = "EXCELENTE";
+        color = "text-success";
+        icono = "fa-circle-check";
+      } else if (score >= 80) {
+        estado = "ACEPTABLE";
+        color = "text-warning";
+        icono = "fa-circle-exclamation";
+      } else {
+        estado = "DEFICIENTE";
+        color = "text-danger";
+        icono = "fa-circle-xmark";
+      }
+
+      return {
+        ...r,
+        score: score.toFixed(1),
+        estado,
+        color,
+        icono,
+      };
+    });
+
+    res.json(result);
+  } catch (error) {
+    console.error("ERROR SEMAFORO:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const countProveedores = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
@@ -518,6 +579,7 @@ module.exports = {
   generarReporteCuentasPorPagarPDF,
   getRankingProveedoresBI,
   getRadarInflacion,
+  getSemaforoCumplimiento,
   countProveedores,
   getProveedoresSummary,
 };
