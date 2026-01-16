@@ -2102,6 +2102,100 @@ const getHeatmapVentas = async (req, res) => {
   }
 };
 
+const getRentabilidadReal = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+    const currentMonth = new Date().getMonth() + 1;
+    const currentYear = new Date().getFullYear();
+
+    // 1. Obtener comisiones bancarias configuradas
+    const [comisiones] = await db.execute(
+      "SELECT metodo, comision_porcentaje FROM config_comisiones_pagos WHERE empresa_id = ?",
+      [empresa_id]
+    );
+    const dCom = {};
+    comisiones.forEach(
+      (c) => (dCom[c.metodo] = parseFloat(c.comision_porcentaje) / 100)
+    );
+
+    // 2. Obtener VENTAS y COSTO DE MERCADERÍA del mes
+    const [ventas] = await db.execute(
+      `
+      SELECT 
+        v.id, v.precio_total, v.tarjeta, v.mercadopago, v.transferencia,
+        (SELECT IFNULL(SUM(dv.cantidad * dv.precio_compra), 0) FROM detalle_ventas dv WHERE dv.venta_id = v.id) as costo_vta
+      FROM ventas v
+      WHERE v.empresa_id = ? AND MONTH(v.fecha) = ? AND YEAR(v.fecha) = ?
+    `,
+      [empresa_id, currentMonth, currentYear]
+    );
+
+    // 3. Obtener DEVOLUCIONES del mes
+    const [devoluciones] = await db.execute(
+      `
+      SELECT IFNULL(SUM(precio_total), 0) as total_dev
+      FROM devoluciones 
+      WHERE empresa_id = ? AND MONTH(fecha) = ? AND YEAR(fecha) = ?
+    `,
+      [empresa_id, currentMonth, currentYear]
+    );
+
+    // 4. Obtener GASTOS OPERATIVOS del mes
+    const [gastos] = await db.execute(
+      `
+      SELECT IFNULL(SUM(monto), 0) as total_gas 
+      FROM gastos 
+      WHERE empresa_id = ? AND MONTH(fecha) = ? AND YEAR(fecha) = ?
+    `,
+      [empresa_id, currentMonth, currentYear]
+    );
+
+    const totalDevoluciones = parseFloat(devoluciones[0].total_dev || 0);
+    const totalGastosMes = parseFloat(gastos[0].total_gas || 0);
+
+    let brutoVentas = 0;
+    let costoMercaderiaTotal = 0;
+    let comisionesTotales = 0;
+
+    ventas.forEach((v) => {
+      brutoVentas += parseFloat(v.precio_total);
+      costoMercaderiaTotal += parseFloat(v.costo_vta);
+
+      // Cálculo de mordida de pasarelas
+      const mordidaTarjeta = parseFloat(v.tarjeta || 0) * (dCom.tarjeta || 0);
+      const mordidaMP =
+        parseFloat(v.mercadopago || 0) * (dCom.mercadopago || 0);
+      const mordidaTransf =
+        parseFloat(v.transferencia || 0) * (dCom.transferencia || 0);
+
+      comisionesTotales += mordidaTarjeta + mordidaMP + mordidaTransf;
+    });
+
+    // --- FÓRMULA DE GANANCIA NETA REAL ---
+    const facturacionLimpia = brutoVentas - totalDevoluciones;
+    const gananciaBruta = facturacionLimpia - costoMercaderiaTotal;
+    const gananciaNetaReal = gananciaBruta - comisionesTotales - totalGastosMes;
+
+    res.json({
+      success: true,
+      metricas: {
+        ventas_brutas: facturacionLimpia.toFixed(2),
+        costo_mercaderia: costoMercaderiaTotal.toFixed(2),
+        comisiones_bancarias: comisionesTotales.toFixed(2),
+        gastos_operativos: totalGastosMes.toFixed(2),
+        ganancia_neta_real: gananciaNetaReal.toFixed(2),
+        margen_limpio_porcentaje:
+          facturacionLimpia > 0
+            ? ((gananciaNetaReal / facturacionLimpia) * 100).toFixed(2)
+            : 0,
+      },
+    });
+  } catch (error) {
+    console.error("ERROR RENTABILIDAD BI:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const countVentas = async (req, res) => {
   try {
     const [rows] = await db.execute("SELECT COUNT(*) AS total FROM ventas");
@@ -2252,6 +2346,7 @@ module.exports = {
   getReporteRentabilidad,
   getEstadoResultados,
   getHeatmapVentas,
+  getRentabilidadReal,
   countVentas,
   getVentasSummary,
   getVentasDashboard,
