@@ -27,6 +27,7 @@ const {
   getReporteRentabilidad,
   getEstadoResultados,
   getRentabilidadReal,
+  getPodioVendedores,
 } = require("../controllers/ventaController");
 const authMiddleware = require("../middlewares/authMiddleware");
 
@@ -55,6 +56,7 @@ router.get("/informes/movimiento-stock", getInformeMovimientoStock);
 router.get("/reporte-rentabilidad", getReporteRentabilidad);
 router.get("/estado-resultados", getEstadoResultados);
 router.get("/bi/rentabilidad-neta", getRentabilidadReal);
+router.get("/bi/podio-vendedores", getPodioVendedores);
 
 router.get("/tmp", getTmpVentas);
 router.post("/tmp", postTmpVenta);

@@ -2211,6 +2211,48 @@ const getRentabilidadReal = async (req, res) => {
   }
 };
 
+const getPodioVendedores = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+    const currentMonth = new Date().getMonth() + 1;
+    const currentYear = new Date().getFullYear();
+
+    const query = `
+      SELECT 
+        u.name as usuario_nombre,
+        COUNT(v.id) as cantidad_ventas,
+        SUM(v.precio_total) as total_monto,
+        AVG(v.precio_total) as ticket_promedio,
+        -- Calculamos el promedio de ítems por ticket
+        (
+          SELECT AVG(items_por_venta) FROM (
+            SELECT venta_id, SUM(cantidad) as items_por_venta 
+            FROM detalle_ventas 
+            GROUP BY venta_id
+          ) as sub WHERE venta_id IN (SELECT id FROM ventas WHERE usuario_id = u.id)
+        ) as items_promedio
+      FROM ventas v
+      JOIN users u ON v.usuario_id = u.id
+      WHERE v.empresa_id = ? 
+        AND MONTH(v.fecha) = ? 
+        AND YEAR(v.fecha) = ?
+      GROUP BY u.id
+      ORDER BY total_monto DESC
+    `;
+
+    const [rows] = await db.execute(query, [
+      empresa_id,
+      currentMonth,
+      currentYear,
+    ]);
+
+    res.json(rows);
+  } catch (error) {
+    console.error("ERROR PODIO:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const countVentas = async (req, res) => {
   try {
     const [rows] = await db.execute("SELECT COUNT(*) AS total FROM ventas");
@@ -2362,6 +2404,7 @@ module.exports = {
   getEstadoResultados,
   getHeatmapVentas,
   getRentabilidadReal,
+  getPodioVendedores,
   countVentas,
   getVentasSummary,
   getVentasDashboard,
