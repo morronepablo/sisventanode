@@ -536,6 +536,86 @@ const getSaludFinanciera = async (req, res) => {
   }
 };
 
+const getOraculoFinanciero = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    // 1. SALDO ACTUAL (Ventas - Compras - Gastos del mes actual)
+    const [balanceRes] = await db.execute(
+      `
+      SELECT 
+        (SELECT COALESCE(SUM(precio_total),0) FROM ventas WHERE empresa_id = ? AND MONTH(fecha) = MONTH(CURDATE())) -
+        (SELECT COALESCE(SUM(precio_total),0) FROM compras WHERE empresa_id = ? AND MONTH(fecha) = MONTH(CURDATE())) -
+        (SELECT COALESCE(SUM(monto),0) FROM gastos WHERE empresa_id = ? AND MONTH(fecha) = MONTH(CURDATE())) as saldo_caja
+    `,
+      [empresa_id, empresa_id, empresa_id]
+    );
+
+    let saldoCajaActual = parseFloat(balanceRes[0].saldo_caja || 0);
+
+    // 2. CUENTAS POR COBRAR (Lo que los clientes te deben en CTA CTE)
+    const [cobrarRes] = await db.execute(
+      `
+      SELECT SUM(importe) as total FROM compras_cta_cte 
+      WHERE empresa_id = ? AND tipo = 'deuda'
+    `,
+      [empresa_id]
+    );
+    const totalCobrar = parseFloat(cobrarRes[0].total || 0);
+
+    // 3. CUENTAS POR PAGAR (Lo que debés a proveedores en CTA CTE)
+    // Usamos el cálculo: precio_total de compra - lo pagado
+    const [pagarRes] = await db.execute(
+      `
+      SELECT SUM(deuda) as total FROM compras WHERE empresa_id = ?
+    `,
+      [empresa_id]
+    );
+    const totalPagar = parseFloat(pagarRes[0].total || 0);
+
+    // 4. PROMEDIO DE VENTA DIARIA (Basado en los últimos 15 días)
+    const [promedioRes] = await db.execute(
+      `
+      SELECT SUM(precio_total) / 15 as promedio 
+      FROM ventas 
+      WHERE empresa_id = ? AND fecha >= DATE_SUB(CURDATE(), INTERVAL 15 DAY)
+    `,
+      [empresa_id]
+    );
+    const ventaDiariaPromedio = parseFloat(promedioRes[0].promedio || 0);
+
+    // 5. GENERAR PROYECCIÓN A 30 DÍAS (Semana a semana)
+    const proyeccion = [];
+    let saldoProyectado = saldoCajaActual;
+
+    // Simulamos 4 semanas
+    for (let i = 1; i <= 4; i++) {
+      const ingresosEstimados = ventaDiariaPromedio * 7 + totalCobrar * 0.2; // Ventas + 20% de cobranza
+      const egresosEstimados = totalPagar * 0.25; // Pagamos el 25% de la deuda por semana
+
+      saldoProyectado = saldoProyectado + ingresosEstimados - egresosEstimados;
+
+      proyeccion.push({
+        semana: `Semana ${i}`,
+        saldo: saldoProyectado.toFixed(2),
+        ingresos: ingresosEstimados.toFixed(2),
+        egresos: egresosEstimados.toFixed(2),
+      });
+    }
+
+    res.json({
+      saldoActual: saldoCajaActual,
+      totalCobrar,
+      totalPagar,
+      proyeccion,
+      riesgo: saldoProyectado < 0 ? "ALTO" : "BAJO",
+    });
+  } catch (error) {
+    console.error("❌ ERROR EN EL ORÁCULO FINANCIERO:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const countGastos = async (req, res) => {
   try {
     const [rows] = await db.execute("SELECT COUNT(*) AS total FROM gastos");
@@ -560,5 +640,6 @@ module.exports = {
   getPuntoEquilibrio,
   getGastosHormiga,
   getSaludFinanciera,
+  getOraculoFinanciero,
   countGastos,
 };
