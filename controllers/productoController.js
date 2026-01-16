@@ -1088,33 +1088,58 @@ const getOraculoStock = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
 
+    // CONSULTA NIVEL DIOS: Suma ventas directas + contenido de combos
     const query = `
       SELECT 
         p.id, p.nombre, p.stock, p.stock_minimo,
-        COALESCE(SUM(dv.cantidad), 0) as total_vendido_30_dias,
-        (COALESCE(SUM(dv.cantidad), 0) / 30) as velocidad_diaria
+        COALESCE(v_total.cantidad_30_dias, 0) as total_vendido_30_dias,
+        (COALESCE(v_total.cantidad_30_dias, 0) / 30) as velocidad_diaria
       FROM productos p
-      LEFT JOIN detalle_ventas dv ON p.id = dv.producto_id
-      LEFT JOIN ventas v ON dv.venta_id = v.id AND v.fecha >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+      LEFT JOIN (
+          SELECT producto_id, SUM(cantidad_sumada) as cantidad_30_dias
+          FROM (
+              -- 1. Ventas Directas del Producto
+              SELECT dv.producto_id, SUM(dv.cantidad) as cantidad_sumada
+              FROM detalle_ventas dv
+              JOIN ventas v ON dv.venta_id = v.id
+              WHERE v.empresa_id = ? AND v.fecha >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+                AND dv.producto_id IS NOT NULL
+              GROUP BY dv.producto_id
+
+              UNION ALL
+
+              -- 2. Ventas del Producto DENTRO de Combos
+              SELECT cp.producto_id, SUM(dv.cantidad * cp.cantidad) as cantidad_sumada
+              FROM detalle_ventas dv
+              JOIN ventas v ON dv.venta_id = v.id
+              JOIN combo_producto cp ON dv.combo_id = cp.combo_id
+              WHERE v.empresa_id = ? AND v.fecha >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+              GROUP BY cp.producto_id
+          ) as consolidado
+          GROUP BY producto_id
+      ) as v_total ON p.id = v_total.producto_id
       WHERE p.empresa_id = ?
       GROUP BY p.id
       ORDER BY velocidad_diaria DESC
     `;
 
-    const [rows] = await db.execute(query, [empresa_id]);
+    const [rows] = await db.execute(query, [
+      empresa_id,
+      empresa_id,
+      empresa_id,
+    ]);
 
     const proyecciones = rows.map((p) => {
       const vDiaria = parseFloat(p.velocidad_diaria);
       const stockActual = parseFloat(p.stock);
       const minimo = parseFloat(p.stock_minimo);
 
-      // LÓGICA CORREGIDA:
-      // Si el stock ya es menor o igual al mínimo, los días restantes para alerta son 0 (Urgente)
+      // Si el stock actual es menor o igual al mínimo, es prioridad 0
       let diasRestantes = 999;
       if (stockActual <= minimo) {
         diasRestantes = 0;
       } else if (vDiaria > 0) {
-        // Días que faltan para tocar el mínimo
+        // Días para llegar al stock mínimo
         diasRestantes = Math.floor((stockActual - minimo) / vDiaria);
       }
 
@@ -1126,9 +1151,9 @@ const getOraculoStock = async (req, res) => {
       return {
         id: p.id,
         nombre: p.nombre,
-        stock: p.stock,
-        stock_minimo: p.stock_minimo,
-        vDiaria: vDiaria.toFixed(2),
+        stock: stockActual,
+        stock_minimo: minimo,
+        vDiaria: vDiaria.toFixed(3), // 3 decimales para productos por peso (gramos)
         diasRestantes: diasRestantes,
         fechaQuiebre:
           diasRestantes === 0
@@ -1136,7 +1161,6 @@ const getOraculoStock = async (req, res) => {
             : diasRestantes < 999
             ? fechaQuiebre.toISOString().split("T")[0]
             : "N/A",
-        // Prioridad: 0 días es CRÍTICO, hasta 7 días es PRECAUCIÓN
         nivelRiesgo:
           diasRestantes <= 2
             ? "CRÍTICO"
@@ -1146,9 +1170,7 @@ const getOraculoStock = async (req, res) => {
       };
     });
 
-    // Ordenamos: Primero los que tienen 0 días (stock mínimo alcanzado), luego por días ascendente
     proyecciones.sort((a, b) => a.diasRestantes - b.diasRestantes);
-
     res.json(proyecciones);
   } catch (error) {
     console.error("❌ ERROR EN EL ORÁCULO:", error);

@@ -214,40 +214,37 @@ const storeVenta = async (req, res) => {
       items,
       cargar_vuelto_billetera,
       vuelto_monto,
-      pagos, // 👈 Extraemos el objeto pagos completo
+      pagos,
     } = req.body;
 
-    // 🚀 CLAVE: Obtenemos el monto usado de la billetera desde el objeto pagos
     const montoBilleteraUsado = parseFloat(pagos?.pago_billetera || 0);
-
     const empresa_id = req.user.empresa_id;
+
+    // 🚀 INICIALIZAMOS LA VARIABLE AQUÍ (Al principio para que sea global en la función)
+    let nombreClienteParaWS = "Consumidor Final";
 
     // 2. Guardar la venta (Maneja Multicaja, Stock y Puntos en la DB)
     const venta_id = await Venta.store(req.body, req.user.id, empresa_id);
 
-    // EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
+    // --- OBTENEMOS EL CANAL DE SOCKETS ---
     const io = req.app.get("socketio");
     if (io) io.emit("update-dashboard");
 
-    // 3. 🚀 LÓGICA DE CONSUMO DE BILLETERA (Si Natalia usó su saldo)
+    // 3. LÓGICA DE CONSUMO DE BILLETERA
     if (montoBilleteraUsado > 0 && Number(cliente_id) !== 1) {
-      // Verificamos saldo actual por seguridad
       const [cliente] = await db.execute(
         "SELECT saldo_billetera FROM clientes WHERE id = ?",
         [cliente_id]
       );
 
       if (cliente[0].saldo_billetera < montoBilleteraUsado) {
-        // Si por alguna razón el saldo es menor, podrías manejar un error aquí
         console.error("Saldo insuficiente en Billetera para la transacción.");
       } else {
-        // Descontar saldo de la billetera
         await db.execute(
           "UPDATE clientes SET saldo_billetera = saldo_billetera - ? WHERE id = ?",
           [montoBilleteraUsado, cliente_id]
         );
 
-        // Registrar el consumo en el historial de la billetera
         await db.execute(
           "INSERT INTO movimientos_billetera (cliente_id, monto, tipo, descripcion, caja_id, usuario_id) VALUES (?, ?, 'consumo', ?, ?, ?)",
           [
@@ -258,13 +255,10 @@ const storeVenta = async (req, res) => {
             req.user.id,
           ]
         );
-        console.log(
-          `[BILLETERA] Se descontaron $${montoBilleteraUsado} de la cuenta del cliente ID: ${cliente_id}`
-        );
       }
     }
 
-    // 4. LÓGICA DE CARGA DE VUELTO A BILLETERA (Si sobró dinero y el dueño lo virtualizó)
+    // 4. LÓGICA DE CARGA DE VUELTO A BILLETERA
     if (
       cargar_vuelto_billetera &&
       vuelto_monto > 0 &&
@@ -287,26 +281,32 @@ const storeVenta = async (req, res) => {
       );
     }
 
-    // 5. LÓGICA DE WHATSAPP AUTOMÁTICO (Respetando tu código existente)
+    // 5. LÓGICA DE WHATSAPP AUTOMÁTICO
     if (cliente_id && Number(cliente_id) !== 1) {
       const [clienteRows] = await db.execute(
         "SELECT nombre_cliente, telefono, puntos FROM clientes WHERE id = ?",
         [cliente_id]
       );
 
-      if (clienteRows.length > 0 && clienteRows[0].telefono) {
+      if (clienteRows.length > 0) {
         const cliente = clienteRows[0];
-        const token = req.headers.authorization?.split(" ")[1];
-        const baseUrl =
-          process.env.NODE_ENV === "production"
-            ? "https://sistema-ventas-backend-3nn3.onrender.com"
-            : "http://localhost:3001";
-        const linkTicket = `${baseUrl}/api/ventas/ticket/${venta_id}?token=${token}`;
 
-        const mensajeTicket = `¡Hola *${cliente.nombre_cliente}*! 👋\n\nGracias por tu compra. Link ticket: ${linkTicket}`;
-        await sendWS(cliente.telefono, mensajeTicket).catch((e) =>
-          console.error("Error WS:", e)
-        );
+        // 🚀 ASIGNAMOS EL NOMBRE REAL DEL CLIENTE
+        nombreClienteParaWS = cliente.nombre_cliente;
+
+        if (cliente.telefono) {
+          const token = req.headers.authorization?.split(" ")[1];
+          const baseUrl =
+            process.env.NODE_ENV === "production"
+              ? "https://sistema-ventas-backend-3nn3.onrender.com"
+              : "http://localhost:3001";
+          const linkTicket = `${baseUrl}/api/ventas/ticket/${venta_id}?token=${token}`;
+
+          const mensajeTicket = `¡Hola *${cliente.nombre_cliente}*! 👋\n\nGracias por tu compra. Link ticket: ${linkTicket}`;
+          await sendWS(cliente.telefono, mensajeTicket).catch((e) =>
+            console.error("Error WS:", e)
+          );
+        }
       }
     }
 
@@ -339,6 +339,21 @@ const storeVenta = async (req, res) => {
       "VENTAS",
       `Venta registrada con Billetera. Ticket: ${venta_id}. Cliente ID: ${cliente_id}`
     );
+
+    // 🚀 8. EMISIÓN PARA MODO WALL STREET 🚀
+    if (io) {
+      io.emit("wall-street-new-sale", {
+        monto: precio_total,
+        cliente: nombreClienteParaWS,
+        // 🚀 CAMBIO AQUÍ: hour12: false fuerza el formato 24hs
+        hora: new Date().toLocaleTimeString("es-AR", {
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        }),
+        esVentaOro: parseFloat(precio_total) > 20000,
+      });
+    }
 
     res.json({ success: true, venta_id });
   } catch (error) {
