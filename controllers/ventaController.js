@@ -2026,6 +2026,82 @@ const getEstadoResultados = async (req, res) => {
   }
 };
 
+const getHeatmapVentas = async (req, res) => {
+  try {
+    // Validación de seguridad BI
+    if (!req.user || !req.user.empresa_id) {
+      return res
+        .status(401)
+        .json({ message: "Usuario no autenticado o empresa no encontrada" });
+    }
+
+    const empresa_id = req.user.empresa_id;
+
+    // Usamos COALESCE y aseguramos que los nombres de columna existan
+    // fecha y created_at son los nombres estándar que vi en tus capturas
+    const query = `
+      SELECT 
+        DAYOFWEEK(fecha) as dia_numero,
+        HOUR(created_at) as hora,
+        SUM(precio_total) as total_facturado
+      FROM ventas
+      WHERE empresa_id = ? 
+        AND fecha >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)
+      GROUP BY dia_numero, hora
+    `;
+
+    const [rows] = await db.execute(query, [empresa_id]);
+
+    // Si no hay datos, enviamos una estructura vacía pero coherente
+    if (rows.length === 0) {
+      return res.json({
+        matrix: [],
+        conclusiones: {
+          pico_maximo: "No hay ventas suficientes para analizar aún.",
+          sugerencia:
+            "Realizá ventas para que el Oráculo pueda detectar patrones.",
+        },
+      });
+    }
+
+    // Buscamos la hora pico de forma segura
+    let maxVal = 0;
+    let horaPico = { hora: 0, diaNum: 1 };
+    const diasNombre = [
+      "",
+      "Domingo",
+      "Lunes",
+      "Martes",
+      "Miércoles",
+      "Jueves",
+      "Viernes",
+      "Sábado",
+    ];
+
+    rows.forEach((r) => {
+      const val = parseFloat(r.total_facturado);
+      if (val > maxVal) {
+        maxVal = val;
+        horaPico = { hora: r.hora, diaNum: r.dia_numero };
+      }
+    });
+
+    res.json({
+      matrix: rows,
+      conclusiones: {
+        pico_maximo: `Tu pico histórico es a las ${
+          horaPico.hora
+        }:00hs los días ${diasNombre[horaPico.diaNum]}.`,
+        sugerencia:
+          "Optimizá el personal en los horarios de color intenso (Rojo) y ahorrá energía en los claros.",
+      },
+    });
+  } catch (error) {
+    console.error("❌ ERROR HEATMAP:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const countVentas = async (req, res) => {
   try {
     const [rows] = await db.execute("SELECT COUNT(*) AS total FROM ventas");
@@ -2175,6 +2251,7 @@ module.exports = {
   enviarTicketPorWhatsApp,
   getReporteRentabilidad,
   getEstadoResultados,
+  getHeatmapVentas,
   countVentas,
   getVentasSummary,
   getVentasDashboard,

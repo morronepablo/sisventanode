@@ -21,6 +21,7 @@ const {
   generarInformeMetodosPagoPDF,
   getInformeMovimientoStock,
   generarInformeMovimientoStockPDF,
+  getHeatmapVentas,
   getVentasDashboard,
   enviarTicketPorWhatsApp,
   getReporteRentabilidad,
@@ -41,6 +42,7 @@ router.get("/informes/movimiento-stock-pdf", generarInformeMovimientoStockPDF);
 router.use(authMiddleware);
 
 // 2. RUTAS PROTEGIDAS
+router.get("/informes/heatmap", getHeatmapVentas);
 router.get("/dashboard-metrics", getVentasDashboard);
 router.get("/count", countVentas);
 router.get("/summary", getVentasSummary);
