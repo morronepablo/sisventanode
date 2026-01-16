@@ -553,14 +553,22 @@ const getOraculoFinanciero = async (req, res) => {
 
     let saldoCajaActual = parseFloat(balanceRes[0].saldo_caja || 0);
 
-    // 2. CUENTAS POR COBRAR (Lo que los clientes te deben en CTA CTE)
+    // 2. CUENTAS POR COBRAR (Sincronizado con el Navbar - Saldo Neto Real)
     const [cobrarRes] = await db.execute(
       `
-      SELECT SUM(importe) as total FROM compras_cta_cte 
-      WHERE empresa_id = ? AND tipo = 'deuda'
-    `,
+        SELECT SUM(saldo) as total FROM (
+          SELECT 
+            SUM(CASE WHEN tipo = 'deuda' THEN importe ELSE 0 END) - 
+            SUM(CASE WHEN tipo = 'pago' THEN importe ELSE 0 END) as saldo
+          FROM compras_cta_cte
+          WHERE empresa_id = ?
+          GROUP BY cliente_id
+          HAVING saldo > 0
+        ) as subquery
+      `,
       [empresa_id]
     );
+
     const totalCobrar = parseFloat(cobrarRes[0].total || 0);
 
     // 3. CUENTAS POR PAGAR (Lo que debés a proveedores en CTA CTE)

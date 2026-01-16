@@ -5,6 +5,7 @@ const pdf = require("html-pdf");
 const fs = require("fs");
 const path = require("path");
 const { registrarLog } = require("../utils/logger"); // 👈 Importamos el logger
+const { sendWS } = require("../utils/whatsapp");
 
 const getListadoCompras = async (req, res) => {
   try {
@@ -796,6 +797,135 @@ const getAuditoriaTraicion = async (req, res) => {
   }
 };
 
+const getSugerenciasCompra = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+    const DIAS_A_CUBRIR = 15;
+
+    // CONSULTA NIVEL OLIMPO (Suma Ventas Directas + Ventas en Combos)
+    const query = `
+      SELECT 
+        p.id, p.nombre, p.stock, p.stock_minimo,
+        prov.id as proveedor_id, prov.empresa as proveedor_nombre, prov.telefono as proveedor_tel,
+        COALESCE(v_stat.velocidad_diaria, 0) as velocidad_diaria
+      FROM productos p
+      -- 1. Buscamos el ULTIMO proveedor real (por ID de detalle compras)
+      INNER JOIN (
+          SELECT dc1.producto_id, c1.proveedor_id
+          FROM detalle_compras dc1
+          JOIN compras c1 ON dc1.compra_id = c1.id
+          WHERE dc1.id IN (
+              SELECT MAX(dc2.id) 
+              FROM detalle_compras dc2
+              JOIN compras c2 ON dc2.compra_id = c2.id
+              WHERE c2.empresa_id = ?
+              GROUP BY dc2.producto_id
+          )
+      ) as ultima_compra ON p.id = ultima_compra.producto_id
+      JOIN proveedors prov ON ultima_compra.proveedor_id = prov.id
+      -- 2. CALCULO DE VELOCIDAD REAL (DIRECTA + COMBOS)
+      LEFT JOIN (
+          SELECT producto_id, SUM(cantidad_total) / 30 as velocidad_diaria
+          FROM (
+              -- Ventas como producto individual
+              SELECT dv.producto_id, SUM(dv.cantidad) as cantidad_total
+              FROM detalle_ventas dv
+              JOIN ventas v ON dv.venta_id = v.id
+              WHERE v.fecha >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) 
+                AND v.empresa_id = ? AND dv.producto_id IS NOT NULL
+              GROUP BY dv.producto_id
+
+              UNION ALL
+
+              -- Ventas dentro de combos (Cantidad combo * Cantidad prod en combo)
+              SELECT cp.producto_id, SUM(dv.cantidad * cp.cantidad) as cantidad_total
+              FROM detalle_ventas dv
+              JOIN ventas v ON dv.venta_id = v.id
+              JOIN combo_producto cp ON dv.combo_id = cp.combo_id
+              WHERE v.fecha >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) 
+                AND v.empresa_id = ?
+              GROUP BY cp.producto_id
+          ) as ventas_combinadas
+          GROUP BY producto_id
+      ) as v_stat ON p.id = v_stat.producto_id
+      WHERE p.empresa_id = ?
+      GROUP BY p.id
+      HAVING p.stock <= p.stock_minimo OR (p.stock / NULLIF(velocidad_diaria, 0)) <= 7
+      ORDER BY proveedor_nombre ASC
+    `;
+
+    // Ahora pasamos empresa_id 4 veces para las subconsultas
+    const [rows] = await db.execute(query, [
+      empresa_id,
+      empresa_id,
+      empresa_id,
+      empresa_id,
+    ]);
+
+    const reporte = rows.map((p) => {
+      const vDiaria = parseFloat(p.velocidad_diaria);
+      const stockActual = parseFloat(p.stock);
+      const min = parseFloat(p.stock_minimo);
+
+      let sugerido = vDiaria * DIAS_A_CUBRIR - stockActual + min;
+
+      return {
+        ...p,
+        cantidad_sugerida: Math.ceil(Math.max(sugerido, 0)),
+      };
+    });
+
+    res.json(reporte);
+  } catch (error) {
+    console.error("❌ ERROR ASISTENTE COMPRA:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const postPedidoWhatsApp = async (req, res) => {
+  try {
+    const { proveedor_nombre, proveedor_tel, items } = req.body;
+
+    if (!items || items.length === 0)
+      return res.status(400).json({ message: "No hay productos en el pedido" });
+
+    // Armamos el cuerpo del mensaje con formato profesional
+    let cuerpoPedido = `*📦 NUEVO PEDIDO DE MERCADERÍA*\n`;
+    cuerpoPedido += `*Proveedor:* ${proveedor_nombre}\n`;
+    cuerpoPedido += `-------------------------------------------\n`;
+
+    items.forEach((it, index) => {
+      cuerpoPedido += `${index + 1}. ${it.nombre} -> *Cant: ${it.cantidad}*\n`;
+    });
+
+    cuerpoPedido += `-------------------------------------------\n`;
+    cuerpoPedido += `🙏 _Por favor confirmar recepción y fecha estimada de entrega._\n`;
+    cuerpoPedido += `_Enviado automáticamente desde Enterprise Retail BI_`;
+
+    // 🚀 ENVÍO DIRECTO USANDO TU FUNCIÓN sendWS 🚀
+    const enviado = await sendWS(proveedor_tel, cuerpoPedido);
+
+    if (enviado) {
+      await registrarLog(
+        req,
+        "WHATSAPP",
+        "COMPRAS",
+        `Pedido automático enviado a ${proveedor_nombre}`
+      );
+      return res.json({
+        success: true,
+        message: "Pedido enviado al proveedor.",
+      });
+    } else {
+      return res
+        .status(500)
+        .json({ success: false, message: "Error en el Bot de WhatsApp." });
+    }
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const countCompras = async (req, res) => {
   try {
     const [rows] = await db.execute(
@@ -898,6 +1028,8 @@ module.exports = {
   updateTmpQuantity,
   updateTmpPrice,
   getAuditoriaTraicion,
+  getSugerenciasCompra,
+  postPedidoWhatsApp,
   countCompras,
   getComprasSummary,
   getComprasMetrics,
