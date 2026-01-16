@@ -74,6 +74,33 @@ const updateEmpresa = async (req, res) => {
   }
 };
 
+const getComisiones = async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      "SELECT * FROM config_comisiones_pagos WHERE empresa_id = ?",
+      [req.params.id]
+    );
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+const updateComisiones = async (req, res) => {
+  try {
+    const { comisiones } = req.body; // Array de {id, comision_porcentaje}
+    for (const com of comisiones) {
+      await db.execute(
+        "UPDATE config_comisiones_pagos SET comision_porcentaje = ? WHERE id = ?",
+        [com.comision_porcentaje, com.id]
+      );
+    }
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
 const countEmpresas = async (req, res) => {
   try {
     const [rows] = await db.execute("SELECT COUNT(*) AS total FROM empresas");
@@ -83,4 +110,11 @@ const countEmpresas = async (req, res) => {
   }
 };
 
-module.exports = { getEmpresa, updateEmpresa, upload, countEmpresas };
+module.exports = {
+  getEmpresa,
+  updateEmpresa,
+  upload,
+  getComisiones,
+  updateComisiones,
+  countEmpresas,
+};
