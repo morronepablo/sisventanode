@@ -52,8 +52,14 @@ const getCompraById = async (req, res) => {
 
 const getTmpCompras = async (req, res) => {
   try {
-    const items = await Compra.getTmpItems(req.query.usuario_id);
-    res.json(items);
+    const query = `
+      SELECT t.id, t.producto_id, t.cantidad, t.precio_compra, t.precio_anterior, p.nombre, p.codigo 
+      FROM tmp_compras t 
+      JOIN productos p ON t.producto_id = p.id 
+      WHERE t.usuario_id = ?
+    `;
+    const [rows] = await db.execute(query, [req.query.usuario_id]);
+    res.json(rows);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -61,24 +67,55 @@ const getTmpCompras = async (req, res) => {
 
 const postTmpCompra = async (req, res) => {
   try {
-    // Al agregar al carrito, traemos el precio_compra actual del producto como base
+    const { producto_id, cantidad, usuario_id, proveedor_id } = req.body;
+
+    // 1. Obtener precio del maestro de productos
     const [prod] = await db.execute(
       "SELECT precio_compra FROM productos WHERE id = ?",
-      [req.body.producto_id]
+      [producto_id]
     );
-    const precio_base = prod[0] ? prod[0].precio_compra : 0;
+    const precio_maestro = prod[0] ? parseFloat(prod[0].precio_compra) : 0;
 
-    await db.execute(
-      "INSERT INTO tmp_compras (producto_id, cantidad, precio_compra, usuario_id, created_at, updated_at) VALUES (?, ?, ?, ?, NOW(), NOW())",
-      [
-        req.body.producto_id,
-        req.body.cantidad,
-        precio_base,
-        req.body.usuario_id,
-      ]
+    // 2. 🚀 LÓGICA BI MEJORADA:
+    // Intento A: Último precio con ESTE proveedor
+    const [priceSpecific] = await db.execute(
+      `SELECT dc.precio_compra FROM detalle_compras dc 
+       JOIN compras c ON dc.compra_id = c.id 
+       WHERE dc.producto_id = ? AND c.proveedor_id = ? 
+       ORDER BY c.fecha DESC, c.id DESC LIMIT 1`,
+      [producto_id, proveedor_id]
     );
+
+    let precio_anterior = 0;
+
+    if (priceSpecific.length > 0) {
+      precio_anterior = parseFloat(priceSpecific[0].precio_compra);
+    } else {
+      // Intento B: Si es proveedor nuevo, buscamos la última compra a CUALQUIER proveedor
+      const [priceGlobal] = await db.execute(
+        `SELECT dc.precio_compra FROM detalle_compras dc 
+         JOIN compras c ON dc.compra_id = c.id 
+         WHERE dc.producto_id = ? 
+         ORDER BY c.fecha DESC, c.id DESC LIMIT 1`,
+        [producto_id]
+      );
+
+      // Intento C: Si nunca se compró nada, usamos el precio del maestro
+      precio_anterior =
+        priceGlobal.length > 0
+          ? parseFloat(priceGlobal[0].precio_compra)
+          : precio_maestro;
+    }
+
+    // Insertamos en la temporal asegurando que no sea 0 si hay antecedentes
+    await db.execute(
+      "INSERT INTO tmp_compras (producto_id, cantidad, precio_compra, precio_anterior, usuario_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, NOW(), NOW())",
+      [producto_id, cantidad, precio_maestro, precio_anterior, usuario_id]
+    );
+
     res.json({ success: true });
   } catch (error) {
+    console.error("Error en postTmpCompra:", error);
     res.status(500).json({ message: error.message });
   }
 };
