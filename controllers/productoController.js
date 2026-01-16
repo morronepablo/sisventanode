@@ -927,56 +927,110 @@ const getProductosMuertos = async (req, res) => {
 
 const getSimulacionImpacto = async (req, res) => {
   try {
-    const { categoria_id, porcentaje_ajuste } = req.query;
+    const { categoria_id, porcentaje_ajuste, porcentaje_costo } = req.query;
     const empresa_id = req.user.empresa_id;
-    const ajuste = parseFloat(porcentaje_ajuste) / 100;
 
-    // 1. Analizamos ventas de los últimos 90 días para esa categoría
+    const factorCosto = 1 + parseFloat(porcentaje_costo || 0) / 100;
+    const factorVentaManual = 1 + parseFloat(porcentaje_ajuste) / 100;
+
+    // Buscamos los productos con su configuración de porcentaje y sus ventas (Directas + Combos)
     const query = `
       SELECT 
-        SUM(dv.cantidad * dv.precio_venta) as facturacion_total,
-        SUM(dv.cantidad * dv.precio_compra) as costo_total,
-        COUNT(DISTINCT v.id) as cantidad_operaciones
-      FROM detalle_ventas dv
-      JOIN ventas v ON dv.venta_id = v.id
-      JOIN productos p ON dv.producto_id = p.id
-      WHERE v.empresa_id = ? 
-        AND p.categoria_id = ? 
-        AND v.fecha >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)
+        p.id, p.precio_compra, p.precio_venta, p.aplicar_porcentaje, p.valor_porcentaje,
+        (
+          SELECT COALESCE(SUM(cantidad_sumada), 0) FROM (
+            SELECT dv1.producto_id, SUM(dv1.cantidad) as cantidad_sumada
+            FROM detalle_ventas dv1 JOIN ventas v1 ON dv1.venta_id = v1.id
+            WHERE v1.empresa_id = ? AND v1.fecha >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)
+            GROUP BY dv1.producto_id
+            UNION ALL
+            SELECT cp.producto_id, SUM(dv2.cantidad * cp.cantidad) as cantidad_sumada
+            FROM detalle_ventas dv2 JOIN ventas v2 ON dv2.venta_id = v2.id
+            JOIN combo_producto cp ON dv2.combo_id = cp.combo_id
+            WHERE v2.empresa_id = ? AND v2.fecha >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)
+            GROUP BY cp.producto_id
+          ) as consolidado WHERE consolidado.producto_id = p.id
+        ) as volumen_90_dias
+      FROM productos p
+      WHERE p.categoria_id = ? AND p.empresa_id = ?
     `;
 
-    const [stats] = await db.execute(query, [empresa_id, categoria_id]);
-    const s = stats[0];
+    const [productos] = await db.execute(query, [
+      empresa_id,
+      empresa_id,
+      categoria_id,
+      empresa_id,
+    ]);
 
-    // 2. Cálculos Promedio Mensuales Actuales
-    const facturacionMensual = parseFloat(s.facturacion_total || 0) / 3;
-    const costoMensual = parseFloat(s.costo_total || 0) / 3;
-    const utilidadMensualActual = facturacionMensual - costoMensual;
+    let utilidadActualTotal = 0;
+    let utilidadProyectadaTotal = 0;
 
-    // 3. Simulación de Impacto
-    // Proyectamos la nueva facturación con el aumento
-    const nuevaFacturacionMensual = facturacionMensual * (1 + ajuste);
-    const nuevaUtilidadMensual = nuevaFacturacionMensual - costoMensual;
+    productos.forEach((p) => {
+      const cantMensual = parseFloat(p.volumen_90_dias || 0) / 3;
+      const costoActual = parseFloat(p.precio_compra);
+      const ventaActual = parseFloat(p.precio_venta);
 
-    // 4. Factor de Elasticidad (Riesgo de pérdida de clientes)
-    // Heurística retail: Por cada 1% de aumento, riesgo de pérdida de 0.8% de volumen
-    const riesgoPerdidaClientes = Math.abs(parseFloat(porcentaje_ajuste) * 0.8);
+      // Utilidad Actual
+      utilidadActualTotal += (ventaActual - costoActual) * cantMensual;
+
+      // --- SIMULACIÓN CON TU LÓGICA REAL ---
+      const nuevoCosto = costoActual * factorCosto;
+      let nuevaVenta = 0;
+
+      if (p.aplicar_porcentaje) {
+        // Si tiene margen automático: Costo Nuevo + % de Ganancia
+        nuevaVenta = nuevoCosto * (1 + parseFloat(p.valor_porcentaje) / 100);
+      } else {
+        // Si es manual: Venta Anterior + Porcentaje de Ajuste
+        nuevaVenta = ventaActual * factorVentaManual;
+      }
+
+      utilidadProyectadaTotal += (nuevaVenta - nuevoCosto) * cantMensual;
+    });
+
+    const riesgo = Math.abs(parseFloat(porcentaje_ajuste) * 0.8);
 
     res.json({
-      actual: {
-        facturacion: facturacionMensual.toFixed(2),
-        utilidad: utilidadMensualActual.toFixed(2),
-        operaciones: Math.round(s.cantidad_operaciones / 3),
-      },
+      actual: { utilidad: utilidadActualTotal.toFixed(2) },
       proyectado: {
-        facturacion: nuevaFacturacionMensual.toFixed(2),
-        utilidad: nuevaUtilidadMensual.toFixed(2),
-        incremento_neto: (nuevaUtilidadMensual - utilidadMensualActual).toFixed(
-          2
-        ),
-        riesgo_cliente: riesgoPerdidaClientes.toFixed(1),
+        utilidad: utilidadProyectadaTotal.toFixed(2),
+        incremento_neto: (
+          utilidadProyectadaTotal - utilidadActualTotal
+        ).toFixed(2),
+        riesgo_cliente: riesgo.toFixed(1),
       },
     });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+const aplicarAumentoMasivo = async (req, res) => {
+  try {
+    const { categoria_id, porcentaje_ajuste } = req.body;
+    const empresa_id = req.user.empresa_id;
+
+    if (!categoria_id || !porcentaje_ajuste)
+      return res.status(400).json({ message: "Datos incompletos" });
+
+    const factor = 1 + parseFloat(porcentaje_ajuste) / 100;
+
+    const query = `
+      UPDATE productos 
+      SET precio_venta = precio_venta * ? 
+      WHERE categoria_id = ? AND empresa_id = ?
+    `;
+
+    await db.execute(query, [factor, categoria_id, empresa_id]);
+
+    await registrarLog(
+      req,
+      "EDITAR",
+      "PRODUCTOS",
+      `Aumento masivo de precios (${porcentaje_ajuste}%) en categoría ID: ${categoria_id}`
+    );
+
+    res.json({ success: true, message: "Precios actualizados correctamente" });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1287,6 +1341,7 @@ module.exports = {
   getAuditoriaMargenes,
   getProductosMuertos,
   getSimulacionImpacto,
+  aplicarAumentoMasivo,
   getAnaliticaPareto,
   getOraculoStock,
   getCementerioStock,
