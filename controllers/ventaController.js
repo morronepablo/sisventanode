@@ -13,7 +13,7 @@ const MY_CAJA = Number(process.env.CAJA_ID || 1);
 const getEmpresaPhone = async (empresa_id) => {
   const [rows] = await db.execute(
     "SELECT telefono FROM empresas WHERE id = ?",
-    [empresa_id]
+    [empresa_id],
   );
   if (rows.length > 0 && rows[0].telefono) {
     let phone = rows[0].telefono.replace(/\D/g, "");
@@ -87,7 +87,7 @@ const postTmpVenta = async (req, res) => {
     if (producto_id) {
       const [rows] = await db.execute(
         "SELECT id, nombre, stock FROM productos WHERE id = ? AND empresa_id = ?",
-        [producto_id, empresa_id]
+        [producto_id, empresa_id],
       );
       if (rows.length > 0) {
         item = rows[0];
@@ -96,7 +96,7 @@ const postTmpVenta = async (req, res) => {
     } else if (combo_id) {
       const [rows] = await db.execute(
         "SELECT id, nombre FROM combos WHERE id = ? AND empresa_id = ?",
-        [combo_id, empresa_id]
+        [combo_id, empresa_id],
       );
       if (rows.length > 0) {
         item = rows[0];
@@ -106,7 +106,7 @@ const postTmpVenta = async (req, res) => {
       const term = codigo.toString().trim();
       const [pRows] = await db.execute(
         "SELECT id, nombre, stock FROM productos WHERE (codigo = ? OR nombre LIKE ?) AND empresa_id = ? LIMIT 1",
-        [term, `%${term}%`, empresa_id]
+        [term, `%${term}%`, empresa_id],
       );
       if (pRows.length > 0) {
         item = pRows[0];
@@ -114,7 +114,7 @@ const postTmpVenta = async (req, res) => {
       } else {
         const [cRows] = await db.execute(
           "SELECT id, nombre FROM combos WHERE (codigo = ? OR nombre LIKE ?) AND empresa_id = ? LIMIT 1",
-          [term, `%${term}%`, empresa_id]
+          [term, `%${term}%`, empresa_id],
         );
         if (cRows.length > 0) {
           item = cRows[0];
@@ -135,11 +135,11 @@ const postTmpVenta = async (req, res) => {
     const columnaId = tipo === "producto" ? "producto_id" : "combo_id";
     await db.execute(
       `INSERT INTO tmp_ventas (cantidad, ${columnaId}, session_id, created_at, updated_at) VALUES (?, ?, ?, NOW(), NOW())`,
-      [cantidad, item.id, userId]
+      [cantidad, item.id, userId],
     );
 
     console.log(
-      `[VENTAS] Ítem agregado al temporal: ${item.nombre} (Cant: ${cantidad})`
+      `[VENTAS] Ítem agregado al temporal: ${item.nombre} (Cant: ${cantidad})`,
     );
     res.json({ success: true });
   } catch (error) {
@@ -163,7 +163,7 @@ const deleteTmpVenta = async (req, res) => {
       LEFT JOIN productos p ON t.producto_id = p.id
       LEFT JOIN combos c ON t.combo_id = c.id
       WHERE t.id = ?`,
-      [id]
+      [id],
     );
 
     if (rows.length > 0) {
@@ -188,7 +188,7 @@ const deleteTmpVenta = async (req, res) => {
           cajaId,
           `Borro ${cantidad} unid. de ${nombre}`,
           montoTotalBorrados,
-        ]
+        ],
       );
     }
 
@@ -205,7 +205,9 @@ const deleteTmpVenta = async (req, res) => {
 };
 
 const storeVenta = async (req, res) => {
-  console.log("--- INICIO REGISTRO DE VENTA CON BILLETERA VIRTUAL ---");
+  console.log(
+    "--- INICIO REGISTRO DE VENTA CON BILLETERA VIRTUAL Y MÉTRICAS DE TIEMPO ---",
+  );
   try {
     // 1. Extraemos los datos básicos
     const {
@@ -219,12 +221,37 @@ const storeVenta = async (req, res) => {
 
     const montoBilleteraUsado = parseFloat(pagos?.pago_billetera || 0);
     const empresa_id = req.user.empresa_id;
+    const usuario_id = req.user.id;
 
-    // 🚀 INICIALIZAMOS LA VARIABLE AQUÍ (Al principio para que sea global en la función)
+    // 🚀 1.1 LÓGICA BI: CAPTURAR TIEMPO DE INICIO (Antes de que se borre el temporal)
+    const [inicioRes] = await db.execute(
+      "SELECT MIN(created_at) as inicio FROM tmp_ventas WHERE session_id = ?",
+      [usuario_id],
+    );
+
+    let duracionSegundos = 0;
+    if (inicioRes[0].inicio) {
+      const tiempoInicio = new Date(inicioRes[0].inicio);
+      const tiempoFin = new Date();
+      duracionSegundos = Math.floor((tiempoFin - tiempoInicio) / 1000);
+    }
+
+    // 🚀 INICIALIZAMOS LA VARIABLE PARA EL MONITOR
     let nombreClienteParaWS = "Consumidor Final";
 
     // 2. Guardar la venta (Maneja Multicaja, Stock y Puntos en la DB)
-    const venta_id = await Venta.store(req.body, req.user.id, empresa_id);
+    const venta_id = await Venta.store(req.body, usuario_id, empresa_id);
+
+    // 🚀 2.1 LÓGICA BI: GUARDAR DURACIÓN EN LA VENTA REAL
+    if (duracionSegundos > 0) {
+      await db.execute("UPDATE ventas SET duracion_segundos = ? WHERE id = ?", [
+        duracionSegundos,
+        venta_id,
+      ]);
+      console.log(
+        `[BI] Venta T-${venta_id} procesada en ${duracionSegundos} segundos.`,
+      );
+    }
 
     // --- OBTENEMOS EL CANAL DE SOCKETS ---
     const io = req.app.get("socketio");
@@ -234,7 +261,7 @@ const storeVenta = async (req, res) => {
     if (montoBilleteraUsado > 0 && Number(cliente_id) !== 1) {
       const [cliente] = await db.execute(
         "SELECT saldo_billetera FROM clientes WHERE id = ?",
-        [cliente_id]
+        [cliente_id],
       );
 
       if (cliente[0].saldo_billetera < montoBilleteraUsado) {
@@ -242,7 +269,7 @@ const storeVenta = async (req, res) => {
       } else {
         await db.execute(
           "UPDATE clientes SET saldo_billetera = saldo_billetera - ? WHERE id = ?",
-          [montoBilleteraUsado, cliente_id]
+          [montoBilleteraUsado, cliente_id],
         );
 
         await db.execute(
@@ -253,7 +280,7 @@ const storeVenta = async (req, res) => {
             `Pago de Venta T-${venta_id}`,
             req.user.caja_id,
             req.user.id,
-          ]
+          ],
         );
       }
     }
@@ -266,7 +293,7 @@ const storeVenta = async (req, res) => {
     ) {
       await db.execute(
         "UPDATE clientes SET saldo_billetera = saldo_billetera + ? WHERE id = ?",
-        [vuelto_monto, cliente_id]
+        [vuelto_monto, cliente_id],
       );
 
       await db.execute(
@@ -277,7 +304,7 @@ const storeVenta = async (req, res) => {
           `Vuelto de Venta T-${venta_id}`,
           req.user.caja_id,
           req.user.id,
-        ]
+        ],
       );
     }
 
@@ -285,13 +312,11 @@ const storeVenta = async (req, res) => {
     if (cliente_id && Number(cliente_id) !== 1) {
       const [clienteRows] = await db.execute(
         "SELECT nombre_cliente, telefono, puntos FROM clientes WHERE id = ?",
-        [cliente_id]
+        [cliente_id],
       );
 
       if (clienteRows.length > 0) {
         const cliente = clienteRows[0];
-
-        // 🚀 ASIGNAMOS EL NOMBRE REAL DEL CLIENTE
         nombreClienteParaWS = cliente.nombre_cliente;
 
         if (cliente.telefono) {
@@ -304,7 +329,7 @@ const storeVenta = async (req, res) => {
 
           const mensajeTicket = `¡Hola *${cliente.nombre_cliente}*! 👋\n\nGracias por tu compra. Link ticket: ${linkTicket}`;
           await sendWS(cliente.telefono, mensajeTicket).catch((e) =>
-            console.error("Error WS:", e)
+            console.error("Error WS:", e),
           );
         }
       }
@@ -317,7 +342,7 @@ const storeVenta = async (req, res) => {
         if (item.producto_id) {
           const [prod] = await db.execute(
             "SELECT nombre, stock, stock_minimo FROM productos WHERE id = ?",
-            [item.producto_id]
+            [item.producto_id],
           );
           if (
             prod.length > 0 &&
@@ -325,7 +350,7 @@ const storeVenta = async (req, res) => {
           ) {
             const mensajeStock = `🚨 *ALERTA DE REPOSICIÓN* 🚨\n\nProducto: *${prod[0].nombre}*\nStock actual: ${prod[0].stock}\n\n_Caja: ${req.user.caja_id}_`;
             sendWS(telefonoEmpresa, mensajeStock).catch((e) =>
-              console.error("Error WS Stock:", e)
+              console.error("Error WS Stock:", e),
             );
           }
         }
@@ -337,15 +362,14 @@ const storeVenta = async (req, res) => {
       req,
       "CREAR",
       "VENTAS",
-      `Venta registrada con Billetera. Ticket: ${venta_id}. Cliente ID: ${cliente_id}`
+      `Venta registrada. Ticket: ${venta_id}. Tiempo: ${duracionSegundos}s`,
     );
 
-    // 🚀 8. EMISIÓN PARA MODO WALL STREET 🚀
+    // 8. EMISIÓN PARA MODO WALL STREET
     if (io) {
       io.emit("wall-street-new-sale", {
         monto: precio_total,
         cliente: nombreClienteParaWS,
-        // 🚀 CAMBIO AQUÍ: hour12: false fuerza el formato 24hs
         hora: new Date().toLocaleTimeString("es-AR", {
           hour: "2-digit",
           minute: "2-digit",
@@ -368,7 +392,7 @@ const generarReporte = async (req, res) => {
 
     const [empresaRows] = await db.execute(
       "SELECT * FROM empresas WHERE id = ?",
-      [empresa_id]
+      [empresa_id],
     );
     const empresa = empresaRows[0];
 
@@ -382,7 +406,7 @@ const generarReporte = async (req, res) => {
        FROM devoluciones d 
        LEFT JOIN clientes cl ON d.cliente_id = cl.id 
        WHERE d.empresa_id = ?`,
-      [empresa_id]
+      [empresa_id],
     );
 
     let logoBase64 = "";
@@ -404,15 +428,15 @@ const generarReporte = async (req, res) => {
         <tr>
             <td style="text-align: center;">${index + 1}</td>
             <td style="text-align: center;">${new Date(
-              v.fecha
+              v.fecha,
             ).toLocaleDateString("es-AR")}</td>
             <td style="text-align: center;">Venta T-${String(v.id).padStart(
               8,
-              "0"
+              "0",
             )}</td>
             <td>${v.cliente_nombre || "Consumidor Final"}</td>
             <td style="text-align: right;">$ ${parseFloat(
-              v.precio_total
+              v.precio_total,
             ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
         </tr>`;
     });
@@ -425,15 +449,15 @@ const generarReporte = async (req, res) => {
         <tr style="color: #d33;">
             <td style="text-align: center;">${index + 1}</td>
             <td style="text-align: center;">${new Date(
-              d.fecha
+              d.fecha,
             ).toLocaleDateString("es-AR")}</td>
             <td style="text-align: center;">Devol. D-${String(d.id).padStart(
               8,
-              "0"
+              "0",
             )}</td>
             <td>${d.nombre_cliente || "Consumidor Final"}</td>
             <td style="text-align: right;">- $ ${parseFloat(
-              d.precio_total
+              d.precio_total,
             ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
         </tr>`;
     });
@@ -476,8 +500,8 @@ const generarReporte = async (req, res) => {
                         <td style="width:70%">
                             <h1 style="margin:0">${empresa.nombre_empresa}</h1>
                             <p style="margin:5px 0">CUIT: ${empresa.cuit} | ${
-      empresa.correo
-    }</p>
+                              empresa.correo
+                            }</p>
                         </td>
                         <td style="text-align:right">
                             ${
@@ -510,24 +534,24 @@ const generarReporte = async (req, res) => {
             <div class="summary-box">
                 <div class="summary-line">Total Ventas (Bruto): <span style="float:right">$ ${totalVentas.toLocaleString(
                   "es-AR",
-                  { minimumFractionDigits: 2 }
+                  { minimumFractionDigits: 2 },
                 )}</span></div>
                 <div style="clear:both"></div>
                 <div class="summary-line" style="color:red">Total Devoluciones: <span style="float:right">- $ ${totalDevoluciones.toLocaleString(
                   "es-AR",
-                  { minimumFractionDigits: 2 }
+                  { minimumFractionDigits: 2 },
                 )}</span></div>
                 <div style="clear:both"></div>
                 <div class="summary-line neto">TOTAL NETO: <span style="float:right">$ ${totalNeto.toLocaleString(
                   "es-AR",
-                  { minimumFractionDigits: 2 }
+                  { minimumFractionDigits: 2 },
                 )}</span></div>
                 <div style="clear:both"></div>
             </div>
 
             <div id="pageFooter">
                 Reporte generado el ${new Date().toLocaleString(
-                  "es-AR"
+                  "es-AR",
                 )} - Sistema de Ventas
             </div>
         </body>
@@ -703,8 +727,8 @@ const generarInformeProductosPDF = async (req, res) => {
             <td style="text-align:center">${p.codigo}</td>
             <td>${p.nombre}</td>
             <td style="text-align:center">${parseFloat(p.cantidad)} ${
-        p.unidad || "Unid"
-      }</td>
+              p.unidad || "Unid"
+            }</td>
             <td style="text-align:right">$ ${fmt(p.costo)}</td>
             <td style="text-align:right">$ ${fmt(p.venta)}</td>
             <td style="text-align:right">$ ${fmt(p.ganancia)}</td>
@@ -716,8 +740,8 @@ const generarInformeProductosPDF = async (req, res) => {
       <body><h1 style="text-align:center;color:#1a73e8">Informe General de Ventas por Producto</h1><p style="text-align:center">Período: ${fInicio} - ${fFin}</p>
       <table><thead><tr><th>CÓDIGO</th><th>PRODUCTO</th><th>CANT.</th><th>COSTO</th><th>VENTA (NETA)</th><th>GANANCIA</th><th>TOTAL</th></tr></thead><tbody>${filas}
       <tr class="total"><td colspan="2">TOTALES</td><td style="text-align:center">${tCant}</td><td></td><td></td><td style="text-align:right">$ ${fmt(
-      tGan
-    )}</td><td style="text-align:right">$ ${fmt(tTot)}</td></tr>
+        tGan,
+      )}</td><td style="text-align:right">$ ${fmt(tTot)}</td></tr>
       </tbody></table></body></html>`;
 
     pdf
@@ -875,7 +899,7 @@ const generarInformeClientesPDF = async (req, res) => {
                       <td>TOTAL GENERAL</td>
                       <td style="text-align: right;">$ ${fmt(totalCosto)}</td>
                       <td style="text-align: right;">$ ${fmt(
-                        totalGanancia
+                        totalGanancia,
                       )}</td>
                       <td style="text-align: right;">$ ${fmt(totalGral)}</td>
                   </tr>
@@ -1068,7 +1092,7 @@ const generarInformeMetodosPagoPDF = async (req, res) => {
                       <td style="text-align: right;">$ ${fmt(tMP)}</td>
                       <td style="text-align: right;">$ ${fmt(tTra)}</td>
                       <td style="text-align: right; color: #1a73e8;">$ ${fmt(
-                        tGral
+                        tGral,
                       )}</td>
                   </tr>
               </tbody>
@@ -1285,7 +1309,7 @@ const generarInformeMovimientoStockPDF = async (req, res) => {
           <td style="text-align: left;">${p.nombre}</td>
           <td style="width: 120px;">${p.cantidad_vendida} ${p.unidad}</td>
           <td style="width: 80px;">${p.num_ventas}</td>
-      </tr>`
+      </tr>`,
       )
       .join("");
 
@@ -1296,7 +1320,7 @@ const generarInformeMovimientoStockPDF = async (req, res) => {
           <td style="width: 40px;">${i + 1}</td>
           <td style="text-align: left;">${p.nombre}</td>
           <td style="width: 80px;">0</td>
-      </tr>`
+      </tr>`,
       )
       .join("");
 
@@ -1375,7 +1399,7 @@ const getDeudaCliente = async (req, res) => {
         (SELECT IFNULL(SUM(importe), 0) FROM compras_cta_cte WHERE cliente_id = ? AND empresa_id = ? AND tipo = 'deuda') as total_deuda,
         (SELECT IFNULL(SUM(importe), 0) FROM compras_cta_cte WHERE cliente_id = ? AND empresa_id = ? AND tipo = 'pago') as total_pagos
     `,
-      [id, empresa_id, id, empresa_id]
+      [id, empresa_id, id, empresa_id],
     );
 
     const deuda_total =
@@ -1390,7 +1414,7 @@ const getDeudaCliente = async (req, res) => {
         WHERE cliente_id = ? AND empresa_id = ? AND tipo = 'deuda' 
         ORDER BY fecha ASC LIMIT 1
       `,
-        [id, empresa_id]
+        [id, empresa_id],
       );
 
       if (oldestDebt.length > 0) {
@@ -1424,7 +1448,7 @@ const getVentaById = async (req, res) => {
       FROM ventas v 
       LEFT JOIN clientes cl ON v.cliente_id = cl.id 
       WHERE v.id = ? AND v.empresa_id = ?`,
-      [id, empresa_id]
+      [id, empresa_id],
     );
 
     if (ventaRows.length === 0)
@@ -1446,7 +1470,7 @@ const getVentaById = async (req, res) => {
           JOIN productos p ON cp.producto_id = p.id 
           LEFT JOIN unidads u ON p.unidad_id = u.id 
           WHERE cp.combo_id = ?`,
-            [d.combo_id]
+            [d.combo_id],
           );
           componentes = compRows;
         }
@@ -1473,7 +1497,7 @@ const getVentaById = async (req, res) => {
           subtotal: parseFloat(d.cantidad) * precioUnitario,
           componentes,
         };
-      })
+      }),
     );
 
     res.json({ ...venta, detalles: detallesProcesados });
@@ -1501,7 +1525,7 @@ const getVentaTicket = async (req, res) => {
         FROM ventas v 
         INNER JOIN clientes cl ON v.cliente_id = cl.id 
         WHERE v.id = ?`,
-      [id]
+      [id],
     );
 
     if (ventaRows.length === 0)
@@ -1511,14 +1535,14 @@ const getVentaTicket = async (req, res) => {
     // 🚀 LÓGICA CLAVE: Buscar cuánto se pagó con Billetera en la tabla de movimientos
     const [pagoBilleteraRows] = await db.execute(
       "SELECT monto FROM movimientos_billetera WHERE cliente_id = ? AND tipo = 'consumo' AND descripcion LIKE ?",
-      [venta.cliente_id, `%T-${venta.id}%`]
+      [venta.cliente_id, `%T-${venta.id}%`],
     );
     const montoBilleteraUsado =
       pagoBilleteraRows.length > 0 ? parseFloat(pagoBilleteraRows[0].monto) : 0;
 
     // DEBUG para que vos veas en la terminal si los datos llegan:
     console.log(
-      `[TICKET] Venta ID: ${id} | Total: ${venta.precio_total} | Pago Billetera: ${montoBilleteraUsado}`
+      `[TICKET] Venta ID: ${id} | Total: ${venta.precio_total} | Pago Billetera: ${montoBilleteraUsado}`,
     );
 
     const [empresaRows] = await db.execute("SELECT * FROM empresas LIMIT 1");
@@ -1529,7 +1553,7 @@ const getVentaTicket = async (req, res) => {
       `SELECT SUM(CASE WHEN tipo = 'deuda' THEN importe ELSE 0 END) - 
               SUM(CASE WHEN tipo = 'pago' THEN importe ELSE 0 END) as saldo_total
        FROM compras_cta_cte WHERE cliente_id = ?`,
-      [venta.cliente_id]
+      [venta.cliente_id],
     );
     const deudaAcumulada = parseFloat(ctaCteRows[0].saldo_total) || 0;
 
@@ -1567,7 +1591,7 @@ const getVentaTicket = async (req, res) => {
                     <td style="width: 75%; text-align: left;">${nombre}</td>
                     <td style="width: 25%; text-align: right;">${subtotalItem.toLocaleString(
                       "es-AR",
-                      { minimumFractionDigits: 2 }
+                      { minimumFractionDigits: 2 },
                     )}</td>
                 </tr>
             </table>`;
@@ -1585,7 +1609,7 @@ const getVentaTicket = async (req, res) => {
             <div>PUNTOS GANADOS: ${puntosGanados}</div>
             <div>TOTAL PUNTOS: ${venta.puntos_actuales}</div>
             <div style="font-weight:bold">SALDO BILLETERA: ${formatMoney(
-              venta.saldo_actual_billetera
+              venta.saldo_actual_billetera,
             )}</div>
         </div>`
       : "";
@@ -1628,10 +1652,10 @@ const getVentaTicket = async (req, res) => {
                 <div>Cód. 083 - TIQUE</div>
                 <div>P.V. Nro. 00001 - Nro. T. ${String(venta.id).padStart(
                   8,
-                  "0"
+                  "0",
                 )}</div>
                 <div>Fecha ${new Date(venta.fecha).toLocaleDateString(
-                  "es-AR"
+                  "es-AR",
                 )} - Hora ${hora24}</div>
             </div>
             <div class="line"></div>
@@ -1639,10 +1663,10 @@ const getVentaTicket = async (req, res) => {
             <div class="total-section">
                 <div class="text-right">SUBTOTAL: ${subtotalSinDescuentos.toLocaleString(
                   "es-AR",
-                  { minimumFractionDigits: 2 }
+                  { minimumFractionDigits: 2 },
                 )}</div>
                 <div class="text-right" style="font-size: 11px;">TOTAL: ${parseFloat(
-                  venta.precio_total
+                  venta.precio_total,
                 ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</div>
             </div>
 
@@ -1653,7 +1677,7 @@ const getVentaTicket = async (req, res) => {
                 ${
                   parseFloat(venta.efectivo) > 0
                     ? `<div>Efectivo: ${parseFloat(
-                        venta.efectivo
+                        venta.efectivo,
                       ).toLocaleString("es-AR", {
                         minimumFractionDigits: 2,
                       })}</div>`
@@ -1664,7 +1688,7 @@ const getVentaTicket = async (req, res) => {
                 ${
                   montoBilleteraUsado > 0
                     ? `<div>Billetera: ${parseFloat(
-                        montoBilleteraUsado
+                        montoBilleteraUsado,
                       ).toLocaleString("es-AR", {
                         minimumFractionDigits: 2,
                       })}</div>`
@@ -1675,14 +1699,14 @@ const getVentaTicket = async (req, res) => {
                   parseFloat(venta.tarjeta) > 0
                     ? `<div>Tarjeta: ${parseFloat(venta.tarjeta).toLocaleString(
                         "es-AR",
-                        { minimumFractionDigits: 2 }
+                        { minimumFractionDigits: 2 },
                       )}</div>`
                     : ""
                 }
                 ${
                   parseFloat(venta.mercadopago) > 0
                     ? `<div>Mercado Pago: ${parseFloat(
-                        venta.mercadopago
+                        venta.mercadopago,
                       ).toLocaleString("es-AR", {
                         minimumFractionDigits: 2,
                       })}</div>`
@@ -1691,7 +1715,7 @@ const getVentaTicket = async (req, res) => {
                 ${
                   parseFloat(venta.transferencia) > 0
                     ? `<div>Transferencia: ${parseFloat(
-                        venta.transferencia
+                        venta.transferencia,
                       ).toLocaleString("es-AR", {
                         minimumFractionDigits: 2,
                       })}</div>`
@@ -1750,7 +1774,7 @@ const updateTmpVentaQuantity = async (req, res) => {
       JOIN productos p ON t.producto_id = p.id
       WHERE t.id = ?
     `,
-      [id]
+      [id],
     );
 
     if (rows.length > 0) {
@@ -1769,7 +1793,7 @@ const updateTmpVentaQuantity = async (req, res) => {
     // 3. Si pasó la validación, actualizamos
     await db.execute(
       "UPDATE tmp_ventas SET cantidad = ?, updated_at = NOW() WHERE id = ?",
-      [cantidad, id]
+      [cantidad, id],
     );
 
     res.json({ success: true });
@@ -1792,7 +1816,7 @@ const enviarTicketPorWhatsApp = async (req, res) => {
        FROM ventas v 
        INNER JOIN clientes c ON v.cliente_id = c.id 
        WHERE v.id = ? AND v.empresa_id = ?`,
-      [id, empresa_id]
+      [id, empresa_id],
     );
 
     if (rows.length === 0)
@@ -1822,7 +1846,7 @@ const enviarTicketPorWhatsApp = async (req, res) => {
       `Gracias por tu compra. Te adjuntamos el link para que puedas descargar tu comprobante electrónico:\n\n` +
       `📄 *Ticket:* T-${venta.id.toString().padStart(8, "0")}\n` +
       `💰 *Monto:* $${parseFloat(venta.precio_total).toLocaleString(
-        "es-AR"
+        "es-AR",
       )}\n\n` +
       `🔗 *Link:* ${linkTicket}\n\n` +
       `¡Esperamos verte pronto!`;
@@ -1849,12 +1873,12 @@ const getReporteRentabilidad = async (req, res) => {
     const [vRows] = await db.execute(
       `SELECT IFNULL(SUM(precio_total), 0) as total FROM ventas 
        WHERE empresa_id = ? AND DATE(fecha) BETWEEN ? AND ?`,
-      [empresa_id, desde, hasta]
+      [empresa_id, desde, hasta],
     );
     const [dRows] = await db.execute(
       `SELECT IFNULL(SUM(precio_total), 0) as total FROM devoluciones 
        WHERE empresa_id = ? AND DATE(fecha) BETWEEN ? AND ?`,
-      [empresa_id, desde, hasta]
+      [empresa_id, desde, hasta],
     );
 
     // 2. CMV NETO (Costo Mercadería Vendida - Costo de lo que se devolvió)
@@ -1863,7 +1887,7 @@ const getReporteRentabilidad = async (req, res) => {
        FROM detalle_ventas dv 
        JOIN ventas v ON dv.venta_id = v.id 
        WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ?`,
-      [empresa_id, desde, hasta]
+      [empresa_id, desde, hasta],
     );
     const [cdRows] = await db.execute(
       `SELECT IFNULL(SUM(dd.cantidad * p.precio_compra), 0) as total 
@@ -1871,14 +1895,14 @@ const getReporteRentabilidad = async (req, res) => {
        JOIN productos p ON dd.producto_id = p.id
        JOIN devoluciones d ON dd.devolucion_id = d.id
        WHERE d.empresa_id = ? AND DATE(d.fecha) BETWEEN ? AND ?`,
-      [empresa_id, desde, hasta]
+      [empresa_id, desde, hasta],
     );
 
     // 3. GASTOS TOTALES
     const [gRows] = await db.execute(
       `SELECT IFNULL(SUM(monto), 0) as total FROM gastos 
        WHERE empresa_id = ? AND DATE(fecha) BETWEEN ? AND ?`,
-      [empresa_id, desde, hasta]
+      [empresa_id, desde, hasta],
     );
 
     const totalVentasNetas =
@@ -1928,7 +1952,7 @@ const getReporteRentabilidad = async (req, res) => {
           GROUP BY p.id, p.nombre, u.nombre
       ) t
       GROUP BY t.producto_id, t.nombre, t.unidad`,
-      [empresa_id, desde, hasta, empresa_id, desde, hasta]
+      [empresa_id, desde, hasta, empresa_id, desde, hasta],
     );
 
     // 5. Traer todos los productos para que figuren aunque tengan 0 ventas
@@ -1936,7 +1960,7 @@ const getReporteRentabilidad = async (req, res) => {
       `SELECT p.id, p.nombre, IFNULL(u.nombre, 'Unid.') as unidad 
        FROM productos p LEFT JOIN unidads u ON p.unidad_id = u.id 
        WHERE p.empresa_id = ?`,
-      [empresa_id]
+      [empresa_id],
     );
 
     const rankingCompleto = todosLosProductos.map((p) => {
@@ -1984,11 +2008,11 @@ const getEstadoResultados = async (req, res) => {
     // 1. INGRESOS NETOS (Ventas - Devoluciones)
     const [vRows] = await db.execute(
       `SELECT IFNULL(SUM(precio_total),0) as total, IFNULL(SUM(tarjeta),0) as t, IFNULL(SUM(mercadopago),0) as mp FROM ventas WHERE empresa_id = ? AND DATE(fecha) BETWEEN ? AND ?`,
-      [empresa_id, desde, hasta]
+      [empresa_id, desde, hasta],
     );
     const [dRows] = await db.execute(
       `SELECT IFNULL(SUM(precio_total),0) as total FROM devoluciones WHERE empresa_id = ? AND DATE(fecha) BETWEEN ? AND ?`,
-      [empresa_id, desde, hasta]
+      [empresa_id, desde, hasta],
     );
 
     const ingresosBrutos = parseFloat(vRows[0].total);
@@ -1998,11 +2022,11 @@ const getEstadoResultados = async (req, res) => {
     // 2. COSTO DE MERCADERÍA VENDIDA (CMV)
     const [cRows] = await db.execute(
       `SELECT IFNULL(SUM(dv.cantidad * dv.precio_compra), 0) as total FROM detalle_ventas dv JOIN ventas v ON dv.venta_id = v.id WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ?`,
-      [empresa_id, desde, hasta]
+      [empresa_id, desde, hasta],
     );
     const [cdRows] = await db.execute(
       `SELECT IFNULL(SUM(dd.cantidad * p.precio_compra), 0) as total FROM detalle_devoluciones dd JOIN productos p ON dd.producto_id = p.id JOIN devoluciones d ON dd.devolucion_id = d.id WHERE d.empresa_id = ? AND DATE(d.fecha) BETWEEN ? AND ?`,
-      [empresa_id, desde, hasta]
+      [empresa_id, desde, hasta],
     );
 
     const cmv = parseFloat(cRows[0].total) - parseFloat(cdRows[0].total);
@@ -2011,7 +2035,7 @@ const getEstadoResultados = async (req, res) => {
     // 3. GASTOS OPERATIVOS (Gastos registrados)
     const [gRows] = await db.execute(
       `SELECT IFNULL(SUM(monto), 0) as total FROM gastos WHERE empresa_id = ? AND DATE(fecha) BETWEEN ? AND ?`,
-      [empresa_id, desde, hasta]
+      [empresa_id, desde, hasta],
     );
     const gastosOperativos = parseFloat(gRows[0].total);
 
@@ -2126,11 +2150,11 @@ const getRentabilidadReal = async (req, res) => {
     // 1. Obtener comisiones bancarias configuradas
     const [comisiones] = await db.execute(
       "SELECT metodo, comision_porcentaje FROM config_comisiones_pagos WHERE empresa_id = ?",
-      [empresa_id]
+      [empresa_id],
     );
     const dCom = {};
     comisiones.forEach(
-      (c) => (dCom[c.metodo] = parseFloat(c.comision_porcentaje) / 100)
+      (c) => (dCom[c.metodo] = parseFloat(c.comision_porcentaje) / 100),
     );
 
     // 2. Obtener VENTAS y COSTO DE MERCADERÍA del mes
@@ -2142,7 +2166,7 @@ const getRentabilidadReal = async (req, res) => {
       FROM ventas v
       WHERE v.empresa_id = ? AND MONTH(v.fecha) = ? AND YEAR(v.fecha) = ?
     `,
-      [empresa_id, currentMonth, currentYear]
+      [empresa_id, currentMonth, currentYear],
     );
 
     // 3. Obtener DEVOLUCIONES del mes
@@ -2152,7 +2176,7 @@ const getRentabilidadReal = async (req, res) => {
       FROM devoluciones 
       WHERE empresa_id = ? AND MONTH(fecha) = ? AND YEAR(fecha) = ?
     `,
-      [empresa_id, currentMonth, currentYear]
+      [empresa_id, currentMonth, currentYear],
     );
 
     // 4. Obtener GASTOS OPERATIVOS del mes
@@ -2162,7 +2186,7 @@ const getRentabilidadReal = async (req, res) => {
       FROM gastos 
       WHERE empresa_id = ? AND MONTH(fecha) = ? AND YEAR(fecha) = ?
     `,
-      [empresa_id, currentMonth, currentYear]
+      [empresa_id, currentMonth, currentYear],
     );
 
     const totalDevoluciones = parseFloat(devoluciones[0].total_dev || 0);
@@ -2253,6 +2277,60 @@ const getPodioVendedores = async (req, res) => {
   }
 };
 
+const getVelocidadCaja = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    const query = `
+      SELECT 
+        u.name as usuario_nombre,
+        COUNT(v.id) as total_tickets,
+        AVG(v.duracion_segundos) as promedio_segundos,
+        MIN(v.duracion_segundos) as ticket_record,
+        MAX(v.duracion_segundos) as ticket_lento
+      FROM ventas v
+      JOIN users u ON v.usuario_id = u.id
+      WHERE v.empresa_id = ? AND v.duracion_segundos > 0
+        AND v.fecha >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+      GROUP BY u.id
+      ORDER BY promedio_segundos ASC
+    `;
+
+    const [rows] = await db.execute(query, [empresa_id]);
+
+    const result = rows.map((r) => {
+      const prom = parseFloat(r.promedio_segundos);
+      let estado = "RÁPIDO";
+      let color = "text-success";
+      let semaforo = "bg-success";
+
+      if (prom > 90) {
+        // Más de 1:30 min es lento
+        estado = "LENTO";
+        color = "text-danger";
+        semaforo = "bg-danger";
+      } else if (prom > 45) {
+        // Entre 45s y 90s es aceptable
+        estado = "INTERMEDIO";
+        color = "text-warning";
+        semaforo = "bg-warning";
+      }
+
+      return {
+        ...r,
+        promedio: prom.toFixed(0),
+        estado,
+        color,
+        semaforo,
+      };
+    });
+
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const countVentas = async (req, res) => {
   try {
     const [rows] = await db.execute("SELECT COUNT(*) AS total FROM ventas");
@@ -2267,11 +2345,11 @@ const getVentasSummary = async (req, res) => {
   try {
     const year = new Date().getFullYear();
     const [totalRows] = await db.execute(
-      "SELECT COUNT(*) AS total FROM ventas"
+      "SELECT COUNT(*) AS total FROM ventas",
     );
     const [yearRows] = await db.execute(
       "SELECT COUNT(*) AS totalAnio FROM ventas WHERE YEAR(fecha) = ?",
-      [year]
+      [year],
     );
 
     res.json({
@@ -2295,7 +2373,7 @@ const getVentasDashboard = async (req, res) => {
       day: "numeric",
     };
     const todayStr = new Intl.DateTimeFormat("en-CA", options).format(
-      new Date()
+      new Date(),
     );
     const currentMonth = new Date().getMonth() + 1;
     const currentYear = new Date().getFullYear();
@@ -2307,7 +2385,7 @@ const getVentasDashboard = async (req, res) => {
         IFNULL(SUM(CASE WHEN MONTH(fecha) = ? AND YEAR(fecha) = ? THEN precio_total ELSE 0 END), 0) as mes,
         IFNULL(SUM(CASE WHEN YEAR(fecha) = ? THEN precio_total ELSE 0 END), 0) as anio
       FROM ventas WHERE empresa_id = ?`, // 👈 Quitamos filtro de caja_id
-      [todayStr, currentMonth, currentYear, currentYear, empresa_id]
+      [todayStr, currentMonth, currentYear, currentYear, empresa_id],
     );
 
     const [d] = await db.execute(
@@ -2316,7 +2394,7 @@ const getVentasDashboard = async (req, res) => {
         IFNULL(SUM(CASE WHEN MONTH(fecha) = ? AND YEAR(fecha) = ? THEN precio_total ELSE 0 END), 0) as mes,
         IFNULL(SUM(CASE WHEN YEAR(fecha) = ? THEN precio_total ELSE 0 END), 0) as anio
       FROM devoluciones WHERE empresa_id = ?`, // 👈 Quitamos filtro de caja_id
-      [todayStr, currentMonth, currentYear, currentYear, empresa_id]
+      [todayStr, currentMonth, currentYear, currentYear, empresa_id],
     );
 
     // 2. GANANCIA NETA REAL TOTAL (De TODAS las cajas)
@@ -2330,7 +2408,7 @@ const getVentasDashboard = async (req, res) => {
                 (SELECT IFNULL(SUM(dv.cantidad * dv.precio_compra), 0) FROM detalle_ventas dv WHERE dv.venta_id = v.id) as costo_total
          FROM ventas v
        ) t WHERE empresa_id = ?`, // 👈 Quitamos filtro de caja_id
-      [todayStr, currentMonth, currentYear, currentYear, empresa_id]
+      [todayStr, currentMonth, currentYear, currentYear, empresa_id],
     );
 
     // 3. GASTOS TOTALES (De TODAS las cajas)
@@ -2340,7 +2418,7 @@ const getVentasDashboard = async (req, res) => {
         IFNULL(SUM(CASE WHEN MONTH(fecha) = ? AND YEAR(fecha) = ? THEN monto ELSE 0 END), 0) as mes,
         IFNULL(SUM(CASE WHEN YEAR(fecha) = ? THEN monto ELSE 0 END), 0) as anio
       FROM gastos WHERE empresa_id = ?`, // 👈 Quitamos filtro de caja_id
-      [todayStr, currentMonth, currentYear, currentYear, empresa_id]
+      [todayStr, currentMonth, currentYear, currentYear, empresa_id],
     );
 
     // 4. CONTEOS GENERALES
@@ -2358,7 +2436,7 @@ const getVentasDashboard = async (req, res) => {
       `SELECT p.nombre, SUM(dv.cantidad) as veces_vendido 
        FROM detalle_ventas dv JOIN ventas v ON dv.venta_id = v.id JOIN productos p ON dv.producto_id = p.id 
        WHERE v.empresa_id = ? GROUP BY p.id ORDER BY veces_vendido DESC LIMIT 10`,
-      [empresa_id]
+      [empresa_id],
     );
 
     res.json({
@@ -2405,6 +2483,7 @@ module.exports = {
   getHeatmapVentas,
   getRentabilidadReal,
   getPodioVendedores,
+  getVelocidadCaja,
   countVentas,
   getVentasSummary,
   getVentasDashboard,
