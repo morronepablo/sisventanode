@@ -136,37 +136,47 @@ const getArqueoById = async (req, res) => {
 
     // 1. Obtener los datos básicos del Arqueo
     const [arqueoRows] = await db.execute(
-      `
-      SELECT a.*, u.name as usuario_nombre 
-      FROM arqueos a 
-      LEFT JOIN users u ON a.usuario_id = u.id 
-      WHERE a.id = ?`,
+      `SELECT a.*, u.name as usuario_nombre 
+       FROM arqueos a 
+       LEFT JOIN users u ON a.usuario_id = u.id 
+       WHERE a.id = ?`,
       [id]
     );
 
     if (arqueoRows.length === 0) {
       return res.status(404).json({ message: "Arqueo no encontrado" });
     }
-
     const arqueo = arqueoRows[0];
 
-    // 2. Obtener los Movimientos Manuales (Ingresos y Egresos)
+    // 2. 🚀 LÓGICA BI: Sumar lo que registró el sistema en Ventas para este Arqueo
+    const [totalesVentas] = await db.execute(
+      `SELECT 
+        IFNULL(SUM(tarjeta), 0) as total_tarjeta_sistema,
+        IFNULL(SUM(mercadopago), 0) as total_mp_sistema,
+        IFNULL(SUM(transferencia), 0) as total_transf_sistema,
+        IFNULL(SUM(efectivo), 0) as total_efectivo_sistema
+       FROM ventas WHERE arqueo_id = ?`,
+      [id]
+    );
+
+    // 3. Obtener los Movimientos Manuales (Ingresos y Egresos)
     const [movimientos] = await db.execute(
       "SELECT * FROM movimiento_cajas WHERE arqueo_id = ? ORDER BY created_at ASC",
       [id]
     );
 
-    // 3. Obtener los Retiros de Seguridad (Monitor en Vivo)
+    // 4. Obtener los Retiros de Seguridad
     const [retiros] = await db.execute(
       "SELECT * FROM retiros_caja WHERE arqueo_id = ? ORDER BY fecha ASC",
       [id]
     );
 
-    // 🚀 ENVIAMOS TODO EL PAQUETE DE DATOS AL FRONTEND 🚀
+    // 🚀 ENVIAMOS TODO EL PAQUETE AL FRONTEND (incluyendo totales_sistema)
     res.json({
       arqueo,
       movimientos,
       retiros,
+      totales_sistema: totalesVentas[0], // 👈 Esto es lo que le faltaba a tu código
     });
   } catch (error) {
     console.error("Error al obtener detalle de arqueo:", error);

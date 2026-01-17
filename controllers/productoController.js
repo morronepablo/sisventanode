@@ -1303,6 +1303,74 @@ const getCementerioStock = async (req, res) => {
   }
 };
 
+const getLucroCesante = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    const query = `
+      SELECT 
+        p.id, p.nombre, p.precio_venta, p.precio_compra,
+        c.nombre as categoria_nombre,
+        -- 1. Velocidad de venta (promedio diario últimos 30 días)
+        COALESCE((
+          SELECT SUM(dv.cantidad) / 30 
+          FROM detalle_ventas dv 
+          JOIN ventas v ON dv.venta_id = v.id 
+          WHERE dv.producto_id = p.id AND v.fecha >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+        ), 0) as velocidad_diaria,
+        -- 2. Fecha de la última vez que se vendió (para estimar cuándo se quedó sin stock)
+        (
+          SELECT MAX(v2.fecha) 
+          FROM detalle_ventas dv2 
+          JOIN ventas v2 ON dv2.venta_id = v2.id 
+          WHERE dv2.producto_id = p.id
+        ) as fecha_ultima_venta
+      FROM productos p
+      JOIN categorias c ON p.categoria_id = c.id
+      WHERE p.empresa_id = ? AND p.stock <= 0
+      HAVING velocidad_diaria > 0
+      ORDER BY (velocidad_diaria * p.precio_venta) DESC
+    `;
+
+    const [rows] = await db.execute(query, [empresa_id]);
+
+    const reporte = rows.map((p) => {
+      const vDiaria = parseFloat(p.velocidad_diaria);
+      const hoy = new Date();
+      const ultimaVenta = p.fecha_ultima_venta
+        ? new Date(p.fecha_ultima_venta)
+        : hoy;
+
+      // Calculamos cuántos días lleva en cero (mínimo 1 para el cálculo)
+      const diasEnCero = Math.max(
+        Math.floor((hoy - ultimaVenta) / (1000 * 60 * 60 * 24)),
+        1
+      );
+
+      const ventaPerdidaDiaria = vDiaria * parseFloat(p.precio_venta);
+      const lucroCesanteTotal = ventaPerdidaDiaria * diasEnCero;
+      const gananciaPerdidaTotal =
+        vDiaria * (p.precio_venta - p.precio_compra) * diasEnCero;
+
+      return {
+        id: p.id,
+        nombre: p.nombre,
+        categoria: p.categoria_nombre,
+        vDiaria: vDiaria.toFixed(2),
+        diasEnCero,
+        ventaPerdidaDiaria: ventaPerdidaDiaria.toFixed(2),
+        lucroCesanteTotal: lucroCesanteTotal.toFixed(2),
+        gananciaPerdidaTotal: gananciaPerdidaTotal.toFixed(2),
+      };
+    });
+
+    res.json(reporte);
+  } catch (error) {
+    console.error("ERROR LUCRO CESANTE:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const countProductos = async (req, res) => {
   try {
     const [rows] = await db.execute(
@@ -1345,6 +1413,7 @@ module.exports = {
   getAnaliticaPareto,
   getOraculoStock,
   getCementerioStock,
+  getLucroCesante,
   countProductos,
   countBajoStock,
   generarReporteStock,
