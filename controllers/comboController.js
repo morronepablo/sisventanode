@@ -7,10 +7,12 @@ const getCombos = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
 
-    // Consulta con subconsulta para contar cuántas veces se vendió este combo
+    // 🚀 MEJORA BI:
+    // 1. Usamos SUM(cantidad) para tener el total real de unidades vendidas del combo.
+    // 2. Renombramos a 'veces_vendido' para que el Consultador de Precios lo reconozca.
     const query = `
       SELECT c.*, 
-      (SELECT COUNT(*) FROM detalle_ventas WHERE combo_id = c.id) as ventas_count
+      (SELECT IFNULL(SUM(cantidad), 0) FROM detalle_ventas WHERE combo_id = c.id) as veces_vendido
       FROM combos c 
       WHERE c.empresa_id = ? 
       ORDER BY c.id DESC
@@ -26,15 +28,16 @@ const getCombos = async (req, res) => {
            JOIN productos p ON cp.producto_id = p.id
            LEFT JOIN unidads u ON p.unidad_id = u.id
            WHERE cp.combo_id = ?`,
-          [combo.id]
+          [combo.id],
         );
         return {
           ...combo,
           productos,
-          // Propiedad para el frontend
-          puede_eliminarse: combo.ventas_count === 0,
+          // Mantenemos la lógica de borrado que ya tenías
+          puede_eliminarse: parseFloat(combo.veces_vendido) === 0,
+          veces_vendido: parseFloat(combo.veces_vendido || 0),
         };
-      })
+      }),
     );
     res.json(combosConDetalle);
   } catch (error) {
@@ -50,7 +53,7 @@ const getComboById = async (req, res) => {
 
     const [comboRows] = await db.execute(
       "SELECT * FROM combos WHERE id = ? AND empresa_id = ?",
-      [id, empresa_id]
+      [id, empresa_id],
     );
 
     if (comboRows.length === 0)
@@ -64,7 +67,7 @@ const getComboById = async (req, res) => {
        JOIN productos p ON cp.producto_id = p.id
        LEFT JOIN unidads u ON p.unidad_id = u.id
        WHERE cp.combo_id = ?`,
-      [id]
+      [id],
     );
 
     res.json({ ...combo, productos });
@@ -84,7 +87,7 @@ const storeCombo = async (req, res) => {
 
     const [resCombo] = await connection.execute(
       "INSERT INTO combos (nombre, codigo, precio_venta, empresa_id, created_at, updated_at) VALUES (?, ?, ?, ?, NOW(), NOW())",
-      [nombre, codigo, precio_venta, empresa_id]
+      [nombre, codigo, precio_venta, empresa_id],
     );
 
     const combo_id = resCombo.insertId;
@@ -94,7 +97,7 @@ const storeCombo = async (req, res) => {
         if (prod.producto_id && prod.cantidad > 0) {
           await connection.execute(
             "INSERT INTO combo_producto (combo_id, producto_id, cantidad, created_at, updated_at) VALUES (?, ?, ?, NOW(), NOW())",
-            [combo_id, prod.producto_id, prod.cantidad]
+            [combo_id, prod.producto_id, prod.cantidad],
           );
         }
       }
@@ -111,7 +114,7 @@ const storeCombo = async (req, res) => {
       req,
       "CREAR",
       "COMBOS",
-      `Nuevo combo: ${nombre}. Código: ${codigo}. Precio: $${precio_venta}. Contiene ${productos.length} productos.`
+      `Nuevo combo: ${nombre}. Código: ${codigo}. Precio: $${precio_venta}. Contiene ${productos.length} productos.`,
     );
 
     res.json({
@@ -140,7 +143,7 @@ const updateCombo = async (req, res) => {
     // 2. OBTENER ESTADO ANTERIOR (Combo y sus productos)
     const [comboRows] = await connection.execute(
       "SELECT * FROM combos WHERE id = ?",
-      [id]
+      [id],
     );
     if (comboRows.length === 0)
       return res.status(404).json({ message: "No encontrado" });
@@ -148,7 +151,7 @@ const updateCombo = async (req, res) => {
 
     const [productosAnteriores] = await connection.execute(
       "SELECT producto_id, cantidad FROM combo_producto WHERE combo_id = ?",
-      [id]
+      [id],
     );
 
     // 3. CALCULAR DIFERENCIAS EN DATOS BÁSICOS
@@ -162,7 +165,7 @@ const updateCombo = async (req, res) => {
     // 4. ACTUALIZAR COMBO
     await connection.execute(
       "UPDATE combos SET nombre = ?, codigo = ?, precio_venta = ?, updated_at = NOW() WHERE id = ? AND empresa_id = ?",
-      [nombre, codigo, precio_venta, id, empresa_id]
+      [nombre, codigo, precio_venta, id, empresa_id],
     );
 
     // 5. ACTUALIZAR PRODUCTOS (Borrar y reinsertar)
@@ -175,7 +178,7 @@ const updateCombo = async (req, res) => {
         if (prod.producto_id && prod.cantidad > 0) {
           await connection.execute(
             "INSERT INTO combo_producto (combo_id, producto_id, cantidad, created_at, updated_at) VALUES (?, ?, ?, NOW(), NOW())",
-            [id, prod.producto_id, prod.cantidad]
+            [id, prod.producto_id, prod.cantidad],
           );
         }
       }
@@ -198,7 +201,7 @@ const updateCombo = async (req, res) => {
       req,
       "EDITAR",
       "COMBOS",
-      `Se actualizó el combo: ${comboAnterior.nombre}. Cambios: ${detalleCambios}${logProductos}`
+      `Se actualizó el combo: ${comboAnterior.nombre}. Cambios: ${detalleCambios}${logProductos}`,
     );
 
     res.json({ success: true });
@@ -219,7 +222,7 @@ const deleteCombo = async (req, res) => {
     // 1. Verificación de seguridad en el servidor: ¿Se ha vendido?
     const [check] = await db.execute(
       "SELECT COUNT(*) as total FROM detalle_ventas WHERE combo_id = ?",
-      [id]
+      [id],
     );
 
     if (check[0].total > 0) {
@@ -231,7 +234,7 @@ const deleteCombo = async (req, res) => {
 
     const [rows] = await db.execute(
       "SELECT nombre FROM combos WHERE id = ? AND empresa_id = ?",
-      [id, empresa_id]
+      [id, empresa_id],
     );
     const comboNombre = rows.length > 0 ? rows[0].nombre : "ID " + id;
 
@@ -250,7 +253,7 @@ const deleteCombo = async (req, res) => {
       req,
       "ELIMINAR",
       "COMBOS",
-      `Se eliminó el combo: ${comboNombre}`
+      `Se eliminó el combo: ${comboNombre}`,
     );
 
     res.json({ success: true, message: "Combo eliminado correctamente" });
@@ -266,7 +269,7 @@ const countCombos = async (req, res) => {
     const empresa_id = req.user.empresa_id;
     const [rows] = await db.execute(
       "SELECT COUNT(*) AS total FROM combos WHERE empresa_id = ?",
-      [empresa_id]
+      [empresa_id],
     );
     res.json({ total: rows[0].total });
   } catch (error) {

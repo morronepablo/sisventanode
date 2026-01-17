@@ -15,6 +15,7 @@ const {
   getProductosMuertos,
   getSimulacionImpacto,
   aplicarAumentoMasivo,
+  getAnaliticaBCG,
   getAnaliticaPareto,
   getOraculoStock,
   getCementerioStock,
@@ -48,6 +49,7 @@ router.get("/auditoria-margenes", getAuditoriaMargenes);
 router.get("/liquidador-inteligente", getProductosMuertos);
 router.get("/simulador-precios", getSimulacionImpacto);
 router.post("/aplicar-aumento-masivo", aplicarAumentoMasivo);
+router.get("/analitica-bcg", getAnaliticaBCG);
 router.get("/radar-pareto", getAnaliticaPareto);
 router.get("/bi/oraculo-stock", getOraculoStock);
 router.get("/bi/cementerio", getCementerioStock);

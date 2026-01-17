@@ -77,29 +77,59 @@ const getEmpresaPhone = async (empresa_id) => {
 const getAllProductos = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
+
+    // 🚀 CONSULTA NIVEL OLIMPO ACTUALIZADA 🚀
+    // 1. 'total_uso': Mantiene tu lógica original para saber si se puede eliminar.
+    // 2. 'veces_vendido': Suma (Ventas directas) + (Ventas donde el producto fue parte de un combo).
     const query = `
       SELECT 
         p.*, 
         c.nombre as categoria_nombre, 
         u.nombre as unidad_nombre,
+        -- Lógica original para el botón de borrar
         (
           (SELECT COUNT(*) FROM detalle_ventas WHERE producto_id = p.id) +
           (SELECT COUNT(*) FROM detalle_compras WHERE producto_id = p.id) +
           (SELECT COUNT(*) FROM ajustes WHERE producto_id = p.id) +
           (SELECT COUNT(*) FROM detalle_devoluciones WHERE producto_id = p.id) +
           (SELECT COUNT(*) FROM combo_producto WHERE producto_id = p.id)
-        ) as total_uso
+        ) as total_uso,
+        -- 📈 Lógica BI Sincronizada: Total unidades reales que salieron de stock
+        (
+          -- A: Unidades vendidas directamente (filtrado por empresa)
+          IFNULL((
+            SELECT SUM(dv.cantidad) 
+            FROM detalle_ventas dv 
+            JOIN ventas v ON dv.venta_id = v.id 
+            WHERE dv.producto_id = p.id AND v.empresa_id = ?
+          ), 0) +
+          -- B: Unidades vendidas "dentro" de combos (filtrado por empresa)
+          IFNULL((
+            SELECT SUM(dv2.cantidad * cp.cantidad) 
+            FROM detalle_ventas dv2 
+            JOIN ventas v2 ON dv2.venta_id = v2.id 
+            JOIN combo_producto cp ON dv2.combo_id = cp.combo_id 
+            WHERE cp.producto_id = p.id AND v2.empresa_id = ?
+          ), 0)
+        ) as veces_vendido
       FROM productos p
       LEFT JOIN categorias c ON p.categoria_id = c.id
       LEFT JOIN unidads u ON p.unidad_id = u.id
       WHERE p.empresa_id = ?
       ORDER BY p.nombre ASC
     `;
-    const [productos] = await db.execute(query, [empresa_id]);
+
+    // Pasamos empresa_id 3 veces para las subconsultas y el filtro principal
+    const [productos] = await db.execute(query, [
+      empresa_id,
+      empresa_id,
+      empresa_id,
+    ]);
 
     const result = productos.map((prod) => ({
       ...prod,
       puede_eliminarse: prod.total_uso === 0,
+      veces_vendido: parseFloat(prod.veces_vendido || 0),
     }));
 
     res.json(result);
@@ -677,28 +707,19 @@ const getPrediccionCompra = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
 
-    // 🚀 Consulta que suma ventas directas + ventas por combos para cada producto
     const query = `
       SELECT 
-          p.id,
-          p.codigo,
-          p.nombre,
-          p.stock as stock_actual,
-          p.stock_minimo,
-          p.precio_compra,
+          p.id, p.codigo, p.nombre, p.stock as stock_actual, p.stock_minimo,
+          p.precio_compra, p.precio_venta,
           IFNULL(u.nombre, 'Unid') as unidad_nombre,
           (
             SELECT IFNULL(SUM(cantidad_salida), 0)
             FROM (
-              -- Ventas directas
               SELECT dv.producto_id, dv.cantidad as cantidad_salida, v.fecha
               FROM detalle_ventas dv
               JOIN ventas v ON dv.venta_id = v.id
               WHERE v.empresa_id = ?
-              
               UNION ALL
-              
-              -- Ventas a través de combos (Jamon/Queso)
               SELECT cp.producto_id, (dv.cantidad * cp.cantidad) as cantidad_salida, v.fecha
               FROM detalle_ventas dv
               JOIN ventas v ON dv.venta_id = v.id
@@ -714,27 +735,49 @@ const getPrediccionCompra = async (req, res) => {
       ORDER BY ventas_30_dias DESC
     `;
 
-    // Pasamos empresa_id 3 veces (Subconsulta A, Subconsulta B y Lista principal)
     const [productos] = await db.execute(query, [
       empresa_id,
       empresa_id,
       empresa_id,
     ]);
 
+    // 1. Calculamos promedios para la Matriz BCG
+    const totalVentasMes = productos.reduce(
+      (acc, p) => acc + parseFloat(p.ventas_30_dias),
+      0,
+    );
+    const promedioVentas = totalVentasMes / productos.length;
+
     const reporte = productos.map((p) => {
       const vpd = parseFloat(p.ventas_30_dias) / 30;
+      const stockActual = parseFloat(p.stock_actual);
+      const precioCompra = parseFloat(p.precio_compra);
+      const precioVenta = parseFloat(p.precio_venta);
+
       const diasAutonomia =
-        vpd > 0
-          ? Math.floor(p.stock_actual / vpd)
-          : p.stock_actual > 0
-            ? 999
-            : 0;
+        vpd > 0 ? Math.floor(stockActual / vpd) : stockActual > 0 ? 999 : 0;
 
       // Sugerencia para cubrir 30 días
-      let sugerencia = vpd * 30 - p.stock_actual;
+      let sugerencia = vpd * 30 - stockActual;
       sugerencia = sugerencia > 0 ? Math.ceil(sugerencia) : 0;
 
-      const inversionEstimada = sugerencia * parseFloat(p.precio_compra);
+      const inversionEstimada = sugerencia * precioCompra;
+
+      // --- LÓGICA DE NEGOCIO AVANZADA ---
+      const margenUnitario = precioVenta - precioCompra;
+      const roiProyectado = sugerencia * margenUnitario; // Ganancia neta si vende lo que compra
+      const margenPorcentaje =
+        precioVenta > 0 ? (margenUnitario / precioVenta) * 100 : 0;
+
+      // --- CLASIFICACIÓN MATRIZ BCG ---
+      let clase = "";
+      const esAltaRotacion = parseFloat(p.ventas_30_dias) >= promedioVentas;
+      const esAltoMargen = margenPorcentaje >= 30; // Umbral del 30%, ajustable
+
+      if (esAltaRotacion && esAltoMargen) clase = "ESTRELLA";
+      else if (esAltaRotacion && !esAltoMargen) clase = "VACA LECHERA";
+      else if (!esAltaRotacion && esAltoMargen) clase = "INCÓGNITA";
+      else clase = "PERRO";
 
       let urgencia = "BAJA";
       if (diasAutonomia <= 7) urgencia = "CRÍTICA";
@@ -745,19 +788,23 @@ const getPrediccionCompra = async (req, res) => {
         codigo: p.codigo,
         nombre: p.nombre,
         unidad: p.unidad_nombre,
-        stock_actual: p.stock_actual,
+        stock_actual: stockActual,
         ventas_mes: parseFloat(p.ventas_30_dias).toFixed(2),
         vpd: parseFloat(vpd.toFixed(2)),
         dias_autonomia: diasAutonomia,
         sugerencia_compra: sugerencia,
         inversion_estimada: parseFloat(inversionEstimada.toFixed(2)),
         urgencia: p.ventas_30_dias > 0 ? urgencia : "STOCK ESTANCADO",
+        // Nuevos campos BI
+        clase_bcg: clase,
+        roi_proyectado: parseFloat(roiProyectado.toFixed(2)),
+        margen_percent: margenPorcentaje.toFixed(1),
       };
     });
 
     res.json(reporte);
   } catch (error) {
-    console.error("Error en Predicción de Compra:", error);
+    console.error(error);
     res.status(500).json({ message: "Error al calcular asistente de compras" });
   }
 };
@@ -1444,6 +1491,62 @@ const getEquityShield = async (req, res) => {
   }
 };
 
+const getAnaliticaBCG = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    const query = `
+      SELECT 
+        p.id, p.nombre, p.stock, p.precio_compra, p.precio_venta,
+        (SELECT IFNULL(SUM(dv.cantidad), 0) FROM detalle_ventas dv 
+         JOIN ventas v ON dv.venta_id = v.id 
+         WHERE dv.producto_id = p.id AND v.fecha >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) AND v.empresa_id = ?) as ventas_30d
+      FROM productos p
+      WHERE p.empresa_id = ? AND p.precio_venta > 0
+    `;
+
+    const [productos] = await db.execute(query, [empresa_id, empresa_id]);
+
+    // Calculamos los promedios del negocio para situar el eje de la matriz
+    const totalVentas = productos.reduce(
+      (acc, p) => acc + parseFloat(p.ventas_30d),
+      0,
+    );
+    const promedioVentas = totalVentas / productos.length;
+
+    const reporte = productos.map((p) => {
+      const margen =
+        ((p.precio_venta - p.precio_compra) / p.precio_venta) * 100;
+      const rotacion = parseFloat(p.ventas_30d);
+
+      let categoria = "";
+      if (rotacion >= promedioVentas && margen >= 30) categoria = "ESTRELLA";
+      else if (rotacion >= promedioVentas && margen < 30)
+        categoria = "VACA LECHERA";
+      else if (rotacion < promedioVentas && margen >= 30)
+        categoria = "INCÓGNITA";
+      else categoria = "PERRO";
+
+      return {
+        id: p.id,
+        nombre: p.nombre,
+        rotacion: rotacion.toFixed(2),
+        margen: margen.toFixed(2),
+        categoria,
+        valor_stock: (p.stock * p.precio_compra).toFixed(2),
+      };
+    });
+
+    res.json({
+      productos: reporte,
+      eje_x_promedio: promedioVentas.toFixed(2),
+      eje_y_objetivo: 30, // 30% de margen como estándar
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const countProductos = async (req, res) => {
   try {
     const [rows] = await db.execute(
@@ -1488,6 +1591,7 @@ module.exports = {
   getCementerioStock,
   getLucroCesante,
   getEquityShield,
+  getAnaliticaBCG,
   countProductos,
   countBajoStock,
   generarReporteStock,
