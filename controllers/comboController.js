@@ -264,6 +264,59 @@ const deleteCombo = async (req, res) => {
   console.log("--- FIN DELETE COMBO ---");
 };
 
+const getAnaliticaCombos = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    const query = `
+      SELECT 
+        c.id, c.nombre, c.codigo, c.precio_venta,
+        -- 1. Ventas Totales (30 días)
+        (SELECT IFNULL(SUM(dv.cantidad), 0) FROM detalle_ventas dv 
+         JOIN ventas v ON dv.venta_id = v.id 
+         WHERE dv.combo_id = c.id AND v.fecha >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) AND v.empresa_id = ?) as unidades_vendidas,
+        -- 2. Costo de Reposición Total (Suma de componentes)
+        (SELECT SUM(cp.cantidad * p.precio_compra) 
+         FROM combo_producto cp 
+         JOIN productos p ON cp.producto_id = p.id 
+         WHERE cp.combo_id = c.id) as costo_reposicion_total,
+        -- 3. Capacidad de Armado (Stock limitante)
+        (SELECT MIN(FLOOR(p.stock / cp.cantidad)) 
+         FROM combo_producto cp 
+         JOIN productos p ON cp.producto_id = p.id 
+         WHERE cp.combo_id = c.id) as combos_disponibles
+      FROM combos c
+      WHERE c.empresa_id = ?
+      ORDER BY unidades_vendidas DESC
+    `;
+
+    const [rows] = await db.execute(query, [empresa_id, empresa_id]);
+
+    const reporte = rows.map((r) => {
+      const pVenta = parseFloat(r.precio_venta);
+      const cRepo = parseFloat(r.costo_reposicion_total);
+      const margenNeto = pVenta - cRepo;
+      const margenPorcentual = (margenNeto / pVenta) * 100;
+
+      return {
+        ...r,
+        margen_neto: margenNeto.toFixed(2),
+        margen_porcentual: margenPorcentual.toFixed(1),
+        status:
+          margenPorcentual < 15
+            ? "CRÍTICO"
+            : margenPorcentual < 25
+              ? "RIESGO"
+              : "SALUDABLE",
+      };
+    });
+
+    res.json(reporte);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const countCombos = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
@@ -284,5 +337,6 @@ module.exports = {
   storeCombo,
   updateCombo,
   deleteCombo,
+  getAnaliticaCombos,
   countCombos,
 };
