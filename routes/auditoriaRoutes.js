@@ -10,5 +10,10 @@ router.get(
   authMiddleware,
   auditoriaController.getReporteIntegridad
 );
+router.get(
+  "/integridad/detalle/:usuario_id",
+  authMiddleware,
+  auditoriaController.getDetalleBorrados
+);
 
 module.exports = router;

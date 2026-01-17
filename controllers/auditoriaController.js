@@ -93,8 +93,10 @@ const getReporteIntegridad = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
 
+    // 🚀 MEJORA: Agregamos u.id para poder identificar al usuario en el frontend
     const query = `
       SELECT 
+        u.id as usuario_id,
         u.name as usuario,
         COUNT(CASE WHEN a.tipo_evento = 'ITEM_BORRADO' THEN 1 END) as borrados,
         IFNULL(SUM(CASE WHEN a.tipo_evento = 'ITEM_BORRADO' THEN a.monto_afectado END), 0) as monto_borrados,
@@ -103,13 +105,12 @@ const getReporteIntegridad = async (req, res) => {
       FROM users u
       LEFT JOIN auditoria_seguridad a ON u.id = a.usuario_id
       WHERE u.empresa_id = ?
-      GROUP BY u.id
+      GROUP BY u.id, u.name
     `;
 
     const [stats] = await db.execute(query, [empresa_id]);
 
     const reporte = stats.map((s) => {
-      // Calculamos nivel de riesgo (Heurística simple)
       let riesgo = "BAJO";
       let color = "success";
       let puntos =
@@ -132,4 +133,35 @@ const getReporteIntegridad = async (req, res) => {
   }
 };
 
-module.exports = { getAnomalias, getReporteIntegridad };
+// 🚀 NUEVA FUNCIÓN: Obtiene el "Relato del Hecho" de los borrados
+const getDetalleBorrados = async (req, res) => {
+  try {
+    const { usuario_id } = req.params;
+    const empresa_id = req.user.empresa_id;
+
+    // 🚀 CONSULTA CORREGIDA 🚀
+    // Seleccionamos las columnas una por una para evitar conflictos de nombres
+    const query = `
+      SELECT 
+        a.detalle, 
+        a.monto_afectado, 
+        a.created_at, 
+        u.name as usuario_nombre
+      FROM auditoria_seguridad a
+      INNER JOIN users u ON a.usuario_id = u.id
+      WHERE a.usuario_id = ? 
+        AND u.empresa_id = ? 
+        AND a.tipo_evento = 'ITEM_BORRADO'
+      ORDER BY a.id DESC -- Usamos el ID para ordenar si created_at diera problemas
+      LIMIT 50
+    `;
+
+    const [rows] = await db.execute(query, [usuario_id, empresa_id]);
+    res.json(rows);
+  } catch (error) {
+    console.error("❌ ERROR DETALLE BORRADOS:", error.message);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+module.exports = { getAnomalias, getReporteIntegridad, getDetalleBorrados };
