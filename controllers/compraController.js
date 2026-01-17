@@ -53,7 +53,7 @@ const getCompraById = async (req, res) => {
 const getTmpCompras = async (req, res) => {
   try {
     const query = `
-      SELECT t.id, t.producto_id, t.cantidad, t.precio_compra, t.precio_anterior, p.nombre, p.codigo 
+      SELECT t.*, p.nombre, p.codigo 
       FROM tmp_compras t 
       JOIN productos p ON t.producto_id = p.id 
       WHERE t.usuario_id = ?
@@ -69,15 +69,14 @@ const postTmpCompra = async (req, res) => {
   try {
     const { producto_id, cantidad, usuario_id, proveedor_id } = req.body;
 
-    // 1. Obtener precio del maestro de productos
+    // 1. Obtener precio del maestro
     const [prod] = await db.execute(
       "SELECT precio_compra FROM productos WHERE id = ?",
       [producto_id]
     );
     const precio_maestro = prod[0] ? parseFloat(prod[0].precio_compra) : 0;
 
-    // 2. 🚀 LÓGICA BI MEJORADA:
-    // Intento A: Último precio con ESTE proveedor
+    // 2. 🚩 ALERTA DE TRAICIÓN: Último precio con ESTE proveedor
     const [priceSpecific] = await db.execute(
       `SELECT dc.precio_compra FROM detalle_compras dc 
        JOIN compras c ON dc.compra_id = c.id 
@@ -85,32 +84,42 @@ const postTmpCompra = async (req, res) => {
        ORDER BY c.fecha DESC, c.id DESC LIMIT 1`,
       [producto_id, proveedor_id]
     );
+    const precio_anterior =
+      priceSpecific.length > 0
+        ? parseFloat(priceSpecific[0].precio_compra)
+        : precio_maestro;
 
-    let precio_anterior = 0;
+    // 3. 🤝 EL NEGOCIADOR: Buscar el MEJOR PRECIO (mínimo) de los últimos 90 días entre TODOS los proveedores
+    const [bestPriceRows] = await db.execute(
+      `SELECT dc.precio_compra, prov.empresa as proveedor_nombre
+       FROM detalle_compras dc 
+       JOIN compras c ON dc.compra_id = c.id 
+       JOIN proveedors prov ON c.proveedor_id = prov.id
+       WHERE dc.producto_id = ? AND c.empresa_id = ? 
+         AND c.fecha >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)
+       ORDER BY dc.precio_compra ASC LIMIT 1`,
+      [producto_id, req.user.empresa_id]
+    );
 
-    if (priceSpecific.length > 0) {
-      precio_anterior = parseFloat(priceSpecific[0].precio_compra);
-    } else {
-      // Intento B: Si es proveedor nuevo, buscamos la última compra a CUALQUIER proveedor
-      const [priceGlobal] = await db.execute(
-        `SELECT dc.precio_compra FROM detalle_compras dc 
-         JOIN compras c ON dc.compra_id = c.id 
-         WHERE dc.producto_id = ? 
-         ORDER BY c.fecha DESC, c.id DESC LIMIT 1`,
-        [producto_id]
-      );
+    const mejor_precio =
+      bestPriceRows.length > 0 ? parseFloat(bestPriceRows[0].precio_compra) : 0;
+    const mejor_proveedor =
+      bestPriceRows.length > 0 ? bestPriceRows[0].proveedor_nombre : null;
 
-      // Intento C: Si nunca se compró nada, usamos el precio del maestro
-      precio_anterior =
-        priceGlobal.length > 0
-          ? parseFloat(priceGlobal[0].precio_compra)
-          : precio_maestro;
-    }
-
-    // Insertamos en la temporal asegurando que no sea 0 si hay antecedentes
+    // Insertamos incluyendo los datos para el Negociador
     await db.execute(
-      "INSERT INTO tmp_compras (producto_id, cantidad, precio_compra, precio_anterior, usuario_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, NOW(), NOW())",
-      [producto_id, cantidad, precio_maestro, precio_anterior, usuario_id]
+      `INSERT INTO tmp_compras 
+       (producto_id, cantidad, precio_compra, precio_anterior, mejor_precio, mejor_proveedor, usuario_id, created_at, updated_at) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+      [
+        producto_id,
+        cantidad,
+        precio_maestro,
+        precio_anterior,
+        mejor_precio,
+        mejor_proveedor,
+        usuario_id,
+      ]
     );
 
     res.json({ success: true });
