@@ -19,6 +19,7 @@ const {
   getOraculoStock,
   getCementerioStock,
   getLucroCesante,
+  getEquityShield,
   countProductos,
   countBajoStock,
   generarReporteStock,
@@ -51,6 +52,7 @@ router.get("/radar-pareto", getAnaliticaPareto);
 router.get("/bi/oraculo-stock", getOraculoStock);
 router.get("/bi/cementerio", getCementerioStock);
 router.get("/bi/lucro-cesante", getLucroCesante);
+router.get("/bi/equity-shield", getEquityShield);
 
 router.get("/", getAllProductos);
 router.get("/bajo-stock", getProductosBajoStock);

@@ -10,6 +10,7 @@ const { registrarLog } = require("../utils/logger");
 const { calcularDiferencias } = require("../utils/differences");
 const { sendWS } = require("../utils/whatsapp");
 const { cloudinary, storage } = require("../config/cloudinary"); // Configuración de Cloudinary
+const axios = require("axios");
 
 // --- CONFIGURACIÓN DE SUBIDA (MULTER) ---
 
@@ -59,7 +60,7 @@ const printer = new pdfMake({
 const getEmpresaPhone = async (empresa_id) => {
   const [rows] = await db.execute(
     "SELECT telefono FROM empresas WHERE id = ?",
-    [empresa_id]
+    [empresa_id],
   );
   if (rows.length > 0 && rows[0].telefono) {
     let phone = rows[0].telefono.replace(/\D/g, "");
@@ -170,7 +171,7 @@ const createProducto = async (req, res) => {
       req,
       "CREAR",
       "PRODUCTOS",
-      `Se registró el producto: ${nombre} (Código: ${codigo}) con imagen en Cloudinary.`
+      `Se registró el producto: ${nombre} (Código: ${codigo}) con imagen en Cloudinary.`,
     );
     res.status(201).json({ message: "Producto creado exitosamente", id });
   } catch (error) {
@@ -194,12 +195,12 @@ const updateProducto = async (req, res) => {
     const ventaNueva = parseFloat(
       nuevosDatos.precio_venta !== undefined
         ? nuevosDatos.precio_venta
-        : productoAnterior.precio_venta
+        : productoAnterior.precio_venta,
     );
     const costoNuevo = parseFloat(
       nuevosDatos.precio_compra !== undefined
         ? nuevosDatos.precio_compra
-        : productoAnterior.precio_compra
+        : productoAnterior.precio_compra,
     );
 
     const ventaAnterior = parseFloat(productoAnterior.precio_venta || 0);
@@ -211,7 +212,7 @@ const updateProducto = async (req, res) => {
         `INSERT INTO historial_precios 
          (producto_id, precio_anterior, precio_nuevo, costo_anterior, costo_nuevo, fecha_cambio) 
          VALUES (?, ?, ?, ?, ?, NOW())`,
-        [id, ventaAnterior, ventaNueva, costoAnterior, costoNuevo]
+        [id, ventaAnterior, ventaNueva, costoAnterior, costoNuevo],
       );
     }
 
@@ -256,7 +257,7 @@ const updateProducto = async (req, res) => {
       req,
       "EDITAR",
       "PRODUCTOS",
-      `Actualización de producto ID ${id}. Cambios: ${detalleCambios}`
+      `Actualización de producto ID ${id}. Cambios: ${detalleCambios}`,
     );
 
     res.json({ success: true, message: "Producto actualizado correctamente" });
@@ -280,7 +281,7 @@ const aplicarCorreccionGuardian = async (req, res) => {
       FROM productos p 
       JOIN categorias c ON p.categoria_id = c.id 
       WHERE p.id = ?`,
-      [id]
+      [id],
     );
 
     const producto = rows[0];
@@ -301,7 +302,7 @@ const aplicarCorreccionGuardian = async (req, res) => {
            valor_porcentaje = ?, 
            updated_at = NOW() 
        WHERE id = ?`,
-      [nuevaVenta.toFixed(2), porcentaje.toFixed(2), id]
+      [nuevaVenta.toFixed(2), porcentaje.toFixed(2), id],
     );
 
     // 4. HISTORIAL DE PRECIOS (Regla de oro: 2 decimales)
@@ -309,7 +310,7 @@ const aplicarCorreccionGuardian = async (req, res) => {
       `INSERT INTO historial_precios 
        (producto_id, precio_anterior, precio_nuevo, costo_anterior, costo_nuevo, fecha_cambio) 
        VALUES (?, ?, ?, ?, ?, NOW())`,
-      [id, producto.venta_vieja, nuevaVenta.toFixed(2), costo, costo]
+      [id, producto.venta_vieja, nuevaVenta.toFixed(2), costo, costo],
     );
 
     // 5. LOGS Y SOCKETS (Manteniendo tu estructura original)
@@ -321,7 +322,7 @@ const aplicarCorreccionGuardian = async (req, res) => {
       "PRODUCTOS",
       `Guardian BI: Actualizó ${
         producto.nombre
-      }. Margen: ${porcentaje}% | Nueva Venta: $${nuevaVenta.toFixed(2)}`
+      }. Margen: ${porcentaje}% | Nueva Venta: $${nuevaVenta.toFixed(2)}`,
     );
 
     res.json({
@@ -348,7 +349,7 @@ const deleteProducto = async (req, res) => {
         (SELECT COUNT(*) FROM ajustes WHERE producto_id = ?) +
         (SELECT COUNT(*) FROM combo_producto WHERE producto_id = ?)
       ) as uso`,
-      [id, id, id, id]
+      [id, id, id, id],
     );
 
     if (check[0].uso > 0) {
@@ -367,7 +368,7 @@ const deleteProducto = async (req, res) => {
       req,
       "ELIMINAR",
       "PRODUCTOS",
-      `Se eliminó el producto: ${nombreProd}`
+      `Se eliminó el producto: ${nombreProd}`,
     );
     res.json({ success: true, message: "Producto eliminado" });
   } catch (error) {
@@ -422,7 +423,7 @@ const importarProductos = async (req, res) => {
           req,
           "IMPORTAR",
           "PRODUCTOS",
-          `Importación masiva: ${addedCount} productos añadidos.`
+          `Importación masiva: ${addedCount} productos añadidos.`,
         );
         fs.unlinkSync(req.file.path); // Borrar temporal
         res.json({
@@ -461,12 +462,12 @@ const updatePreciosMasivo = async (req, res) => {
         `INSERT INTO historial_precios 
          (producto_id, precio_anterior, precio_nuevo, costo_anterior, costo_nuevo, fecha_cambio) 
          VALUES (?, ?, ?, ?, ?, NOW())`,
-        [p.id, ventaAnterior, nuevoPrecioVenta, costoAnterior, nuevoCosto]
+        [p.id, ventaAnterior, nuevoPrecioVenta, costoAnterior, nuevoCosto],
       );
 
       await connection.execute(
         "UPDATE productos SET precio_compra = ?, precio_venta = ?, updated_at = NOW() WHERE id = ?",
-        [nuevoCosto, nuevoPrecioVenta, p.id]
+        [nuevoCosto, nuevoPrecioVenta, p.id],
       );
     }
     await connection.commit();
@@ -492,12 +493,12 @@ const generarReporteStock = async (req, res) => {
       SELECT p.*, u.nombre as unidad_nombre FROM productos p
       LEFT JOIN unidads u ON p.unidad_id = u.id
       WHERE p.empresa_id = ? ORDER BY p.nombre`,
-      [empresa_id]
+      [empresa_id],
     );
 
     const [empresaRows] = await db.execute(
       "SELECT * FROM empresas WHERE id = ?",
-      [empresa_id]
+      [empresa_id],
     );
     const empresa = empresaRows[0];
 
@@ -565,7 +566,7 @@ const generarEtiquetas = async (req, res) => {
       textxalign: "center",
     });
     const barcodeBase64 = `data:image/png;base64,${barcodeBuffer.toString(
-      "base64"
+      "base64",
     )}`;
 
     const etiquetas = [];
@@ -580,7 +581,7 @@ const generarEtiquetas = async (req, res) => {
           },
           {
             text: `$ ${parseFloat(producto.precio_venta).toLocaleString(
-              "es-AR"
+              "es-AR",
             )}`,
             fontSize: 12,
             bold: true,
@@ -623,7 +624,7 @@ const getHistorialPrecios = async (req, res) => {
     const [rows] = await db.execute(
       `SELECT precio_nuevo as precio, costo_nuevo as costo, DATE_FORMAT(fecha_cambio, '%d/%m/%y') as fecha 
        FROM historial_precios WHERE producto_id = ? ORDER BY fecha_cambio ASC`,
-      [id]
+      [id],
     );
     res.json(rows);
   } catch (error) {
@@ -644,7 +645,7 @@ const getReposicionReport = async (req, res) => {
        LEFT JOIN unidads u ON p.unidad_id = u.id
        WHERE p.empresa_id = ? AND p.stock <= p.stock_minimo
        ORDER BY (p.stock / p.stock_minimo) ASC`, // Los más urgentes primero
-      [empresa_id]
+      [empresa_id],
     );
 
     // Calculamos totales de inversión necesaria
@@ -726,8 +727,8 @@ const getPrediccionCompra = async (req, res) => {
         vpd > 0
           ? Math.floor(p.stock_actual / vpd)
           : p.stock_actual > 0
-          ? 999
-          : 0;
+            ? 999
+            : 0;
 
       // Sugerencia para cubrir 30 días
       let sugerencia = vpd * 30 - p.stock_actual;
@@ -908,7 +909,7 @@ const getProductosMuertos = async (req, res) => {
         dias_estancado: p.fecha_ultima_venta
           ? Math.floor(
               (new Date() - new Date(p.fecha_ultima_venta)) /
-                (1000 * 60 * 60 * 24)
+                (1000 * 60 * 60 * 24),
             )
           : p.dias_desde_creacion,
         sugerencia: sugerencia,
@@ -1027,7 +1028,7 @@ const aplicarAumentoMasivo = async (req, res) => {
       req,
       "EDITAR",
       "PRODUCTOS",
-      `Aumento masivo de precios (${porcentaje_ajuste}%) en categoría ID: ${categoria_id}`
+      `Aumento masivo de precios (${porcentaje_ajuste}%) en categoría ID: ${categoria_id}`,
     );
 
     res.json({ success: true, message: "Precios actualizados correctamente" });
@@ -1088,7 +1089,7 @@ const getAnaliticaPareto = async (req, res) => {
 
     const facturacionTotalGlobal = productos.reduce(
       (acc, curr) => acc + parseFloat(curr.facturacion_acumulada),
-      0
+      0,
     );
 
     let acumulado = 0;
@@ -1199,7 +1200,7 @@ const getOraculoStock = async (req, res) => {
 
       let fechaQuiebre = new Date();
       fechaQuiebre.setDate(
-        fechaQuiebre.getDate() + (diasRestantes === 999 ? 0 : diasRestantes)
+        fechaQuiebre.getDate() + (diasRestantes === 999 ? 0 : diasRestantes),
       );
 
       return {
@@ -1213,14 +1214,14 @@ const getOraculoStock = async (req, res) => {
           diasRestantes === 0
             ? "¡HOY!"
             : diasRestantes < 999
-            ? fechaQuiebre.toISOString().split("T")[0]
-            : "N/A",
+              ? fechaQuiebre.toISOString().split("T")[0]
+              : "N/A",
         nivelRiesgo:
           diasRestantes <= 2
             ? "CRÍTICO"
             : diasRestantes <= 7
-            ? "PRECAUCIÓN"
-            : "SEGURO",
+              ? "PRECAUCIÓN"
+              : "SEGURO",
       };
     });
 
@@ -1344,7 +1345,7 @@ const getLucroCesante = async (req, res) => {
       // Calculamos cuántos días lleva en cero (mínimo 1 para el cálculo)
       const diasEnCero = Math.max(
         Math.floor((hoy - ultimaVenta) / (1000 * 60 * 60 * 24)),
-        1
+        1,
       );
 
       const ventaPerdidaDiaria = vDiaria * parseFloat(p.precio_venta);
@@ -1371,11 +1372,83 @@ const getLucroCesante = async (req, res) => {
   }
 };
 
+const getEquityShield = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    // 1. OBTENER VALORIZACIÓN ACTUAL DEL STOCK (ARS)
+    const [invRes] = await db.execute(
+      `SELECT SUM(stock * precio_compra) as total_ars FROM productos WHERE empresa_id = ? AND stock > 0`,
+      [empresa_id],
+    );
+    const totalARS = parseFloat(invRes[0].total_ars || 0);
+
+    // 2. OBTENER COTIZACIÓN DEL DÓLAR (Usamos DolarApi.com - Muy confiable en Arg)
+    const dRes = await axios.get("https://dolarapi.com/v1/dolares/bolsa"); // Dólar MEP
+    const cotizacionUSD = parseFloat(dRes.data.venta);
+
+    const totalUSD = totalARS / cotizacionUSD;
+
+    // 3. OBTENER VALORIZACIÓN DE AYER (Para comparar)
+    const [ayerRes] = await db.execute(
+      `SELECT valor_usd_total FROM historial_patrimonio 
+       WHERE empresa_id = ? AND fecha < CURDATE() 
+       ORDER BY fecha DESC LIMIT 1`,
+      [empresa_id],
+    );
+    const valorUSDAyer =
+      ayerRes.length > 0 ? parseFloat(ayerRes[0].valor_usd_total) : totalUSD;
+
+    // 4. GUARDAR LA FOTO DE HOY (Upsert)
+    await db.execute(
+      `INSERT INTO historial_patrimonio (empresa_id, fecha, valor_ars_total, cotizacion_usd, valor_usd_total)
+       VALUES (?, CURDATE(), ?, ?, ?)
+       ON DUPLICATE KEY UPDATE valor_ars_total = ?, cotizacion_usd = ?, valor_usd_total = ?`,
+      [
+        empresa_id,
+        totalARS,
+        cotizacionUSD,
+        totalUSD,
+        totalARS,
+        cotizacionUSD,
+        totalUSD,
+      ],
+    );
+
+    // 5. OBTENER HISTÓRICO DE LOS ÚLTIMOS 15 DÍAS PARA EL GRÁFICO
+    const [historico] = await db.execute(
+      `SELECT DATE_FORMAT(fecha, '%d/%m') as etiqueta, valor_usd_total 
+       FROM historial_patrimonio WHERE empresa_id = ? 
+       ORDER BY fecha ASC LIMIT 15`,
+      [empresa_id],
+    );
+
+    res.json({
+      actual: {
+        totalARS,
+        totalUSD,
+        cotizacionUSD,
+        diferenciaUSD: (totalUSD - valorUSDAyer).toFixed(2),
+        porcentajeVariacion: (
+          ((totalUSD - valorUSDAyer) / valorUSDAyer) *
+          100
+        ).toFixed(2),
+      },
+      historico,
+    });
+  } catch (error) {
+    console.error("ERROR EQUITY SHIELD:", error);
+    res
+      .status(500)
+      .json({ message: "Error al calcular valorización de activos" });
+  }
+};
+
 const countProductos = async (req, res) => {
   try {
     const [rows] = await db.execute(
       "SELECT COUNT(*) AS total FROM productos WHERE empresa_id = ?",
-      [req.user.empresa_id]
+      [req.user.empresa_id],
     );
     res.json({ total: rows[0].total });
   } catch (error) {
@@ -1387,7 +1460,7 @@ const countBajoStock = async (req, res) => {
   try {
     const [rows] = await db.execute(
       "SELECT COUNT(*) AS total FROM productos WHERE stock <= stock_minimo AND empresa_id = ?",
-      [req.user.empresa_id]
+      [req.user.empresa_id],
     );
     res.json({ total: rows[0].total });
   } catch (error) {
@@ -1414,6 +1487,7 @@ module.exports = {
   getOraculoStock,
   getCementerioStock,
   getLucroCesante,
+  getEquityShield,
   countProductos,
   countBajoStock,
   generarReporteStock,
