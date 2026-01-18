@@ -1,5 +1,6 @@
 // controllers/dashboardController.js
 const db = require("../config/db");
+const axios = require("axios");
 
 const getFullChartData = async (req, res) => {
   try {
@@ -33,7 +34,7 @@ const getFullChartData = async (req, res) => {
    WHERE v.empresa_id = ? AND YEAR(v.fecha) = ? -- 👈 Eliminamos filtro de caja_id
    GROUP BY mes, categoria
    ORDER BY mes ASC`,
-      [empresa_id, currentYear]
+      [empresa_id, currentYear],
     );
 
     // 2. 📈 COMPARATIVA DIARIA (Mes Actual vs Mes Anterior - Global y Neto)
@@ -72,7 +73,7 @@ const getFullChartData = async (req, res) => {
         empresa_id,
         prevMonth,
         prevMonthYear,
-      ]
+      ],
     );
 
     // 3. ⚖️ BALANCE MENSUAL ANUAL (Sincronizado al 100% con Informes)
@@ -109,7 +110,7 @@ const getFullChartData = async (req, res) => {
         currentYear, // Ganancia Ventas
         empresa_id,
         currentYear, // Ganancia Devoluciones
-      ]
+      ],
     );
 
     // 4. 🏷️ VENTAS POR CATEGORÍA (Visión Global del Mes - Prorrateado con Promos)
@@ -129,7 +130,7 @@ const getFullChartData = async (req, res) => {
      AND MONTH(v.fecha) = ? 
      AND YEAR(v.fecha) = ? -- 👈 Eliminamos filtro de caja_id
    GROUP BY c.id`,
-      [empresa_id, selectedMonth, currentYear]
+      [empresa_id, selectedMonth, currentYear],
     );
 
     // 5. 💸 ESTRUCTURA DE GASTOS (Visión Global del Mes)
@@ -144,7 +145,7 @@ const getFullChartData = async (req, res) => {
      AND YEAR(g.fecha) = ? -- 👈 Eliminamos filtro de caja_id
    GROUP BY cg.id 
    ORDER BY total DESC`,
-      [empresa_id, selectedMonth, currentYear]
+      [empresa_id, selectedMonth, currentYear],
     );
 
     // 6. ⚔️ GUERRA DE CAJAS (Neto: Ventas - Devoluciones) ⚔️
@@ -165,7 +166,7 @@ const getFullChartData = async (req, res) => {
         selectedMonth,
         currentYear,
         empresa_id,
-      ]
+      ],
     );
 
     // 7. 🕒 VENTAS POR HORA (Visión Global de Flujo de Clientes - Neto)
@@ -193,7 +194,7 @@ const getFullChartData = async (req, res) => {
         empresa_id,
         selectedMonth,
         currentYear,
-      ]
+      ],
     );
 
     // 8. ⚔️ GUERRA DE USUARIOS (Venta Neta por Persona) ⚔️
@@ -217,13 +218,13 @@ const getFullChartData = async (req, res) => {
         selectedMonth,
         currentYear,
         empresa_id,
-      ]
+      ],
     );
 
     // 9. Lista de Categorías para el gráfico de barras apiladas
     const [cats] = await db.execute(
       "SELECT nombre FROM categorias WHERE empresa_id = ?",
-      [empresa_id]
+      [empresa_id],
     );
 
     // 10. ⏱️ RANKING DE EFICIENCIA (Cajero Pro)
@@ -242,7 +243,7 @@ const getFullChartData = async (req, res) => {
    WHERE v.empresa_id = ? AND MONTH(v.fecha) = ? AND YEAR(v.fecha) = ?
    GROUP BY v.usuario_id
    ORDER BY facturacion DESC`,
-      [empresa_id, selectedMonth, currentYear]
+      [empresa_id, selectedMonth, currentYear],
     );
 
     res.json({
@@ -271,7 +272,7 @@ const getPrediccionBI = async (req, res) => {
     const ultimoDiaMes = new Date(
       hoy.getFullYear(),
       hoy.getMonth() + 1,
-      0
+      0,
     ).getDate();
     const diaActual = hoy.getDate();
     const diasRestantes = ultimoDiaMes - diaActual;
@@ -291,7 +292,7 @@ const getPrediccionBI = async (req, res) => {
         empresa_id, // Devoluciones
         empresa_id, // CMV (Costo mercadería)
         empresa_id, // Gastos
-      ]
+      ],
     );
 
     const promedioDiario = historico[0].utilidad_30_dias / 30;
@@ -310,7 +311,7 @@ const getPrediccionBI = async (req, res) => {
         empresa_id, // Devoluciones mes
         empresa_id, // CMV mes
         empresa_id, // Gastos mes
-      ]
+      ],
     );
 
     const acumuladoMes = parseFloat(actual[0].acumulado_mes) || 0;
@@ -394,7 +395,7 @@ const getPuntoEquilibrio = async (req, res) => {
     // 1. Obtener la Meta de Gastos Fijos de la empresa
     const [empresa] = await db.execute(
       "SELECT meta_gastos_fijos FROM empresas WHERE id = ?",
-      [empresa_id]
+      [empresa_id],
     );
     const meta = parseFloat(empresa[0].meta_gastos_fijos || 0);
 
@@ -408,7 +409,7 @@ const getPuntoEquilibrio = async (req, res) => {
         (SELECT IFNULL(SUM(dv.cantidad * dv.precio_compra), 0) FROM detalle_ventas dv JOIN ventas v ON dv.venta_id = v.id WHERE v.empresa_id = ? AND MONTH(v.fecha) = MONTH(CURDATE()) AND YEAR(v.fecha) = YEAR(CURDATE())) -
         (SELECT IFNULL(SUM(monto),0) FROM gastos WHERE empresa_id = ? AND MONTH(fecha) = MONTH(CURDATE()) AND YEAR(fecha) = YEAR(CURDATE()))
       ) as neta`,
-      [empresa_id, empresa_id, empresa_id, empresa_id]
+      [empresa_id, empresa_id, empresa_id, empresa_id],
     );
 
     const utilidadNeta = parseFloat(utilidad[0].neta || 0);
@@ -428,9 +429,141 @@ const getPuntoEquilibrio = async (req, res) => {
   }
 };
 
+const getGodModeStats = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    // 📈 1. Ventas de HOY
+    const [ventasHoy] = await db.execute(
+      `SELECT HOUR(created_at) as hora, SUM(precio_total) as total 
+       FROM ventas 
+       WHERE empresa_id = ? AND DATE(created_at) = CURDATE() 
+       GROUP BY hora ORDER BY hora ASC`,
+      [empresa_id],
+    );
+
+    // 📈 2. Ventas de AYER
+    const [ventasAyer] = await db.execute(
+      `SELECT HOUR(created_at) as hora, SUM(precio_total) as total 
+       FROM ventas 
+       WHERE empresa_id = ? AND DATE(created_at) = DATE_SUB(CURDATE(), INTERVAL 1 DAY) 
+       GROUP BY hora ORDER BY hora ASC`,
+      [empresa_id],
+    );
+
+    // 💰 3. Anatomía Financiera (Mes Actual)
+    const [profit] = await db.execute(
+      `SELECT 
+        IFNULL(SUM(v.precio_total), 0) as ingresos_brutos,
+        IFNULL(SUM(dv.cantidad * p.precio_compra), 0) as costo_mercaderia
+      FROM detalle_ventas dv
+      JOIN ventas v ON dv.venta_id = v.id
+      JOIN productos p ON dv.producto_id = p.id
+      WHERE v.empresa_id = ? 
+        AND MONTH(v.created_at) = MONTH(CURDATE()) 
+        AND YEAR(v.created_at) = YEAR(CURDATE())`,
+      [empresa_id],
+    );
+
+    // 🏆 4. Top 5 Categorías
+    const [categorias] = await db.execute(
+      `SELECT c.nombre, SUM(dv.cantidad * dv.precio_venta) as total
+      FROM detalle_ventas dv
+      JOIN productos p ON dv.producto_id = p.id
+      JOIN categorias c ON p.categoria_id = c.id
+      JOIN ventas v ON dv.venta_id = v.id
+      WHERE v.empresa_id = ? AND MONTH(v.created_at) = MONTH(CURDATE())
+      GROUP BY c.id ORDER BY total DESC LIMIT 5`,
+      [empresa_id],
+    );
+
+    // 📈 5. INFLACIÓN REAL DEL LOCAL
+    const [inflacion] = await db.execute(
+      `SELECT IFNULL(AVG((costo_nuevo - costo_anterior) / costo_anterior) * 100, 0) as variacion
+      FROM historial_precios hp
+      JOIN productos p ON hp.producto_id = p.id
+      WHERE p.empresa_id = ? AND hp.fecha_cambio >= DATE_SUB(NOW(), INTERVAL 30 DAY)`,
+      [empresa_id],
+    );
+
+    // 📦 6. ALERTAS Y PATRIMONIO ARS
+    const [alertas] = await db.execute(
+      `SELECT 
+        (SELECT COUNT(*) FROM productos WHERE empresa_id = ? AND stock <= stock_minimo) as bajo_stock,
+        (SELECT COUNT(*) FROM ventas WHERE empresa_id = ? AND DATE(created_at) = CURDATE()) as tickets_hoy,
+        (SELECT IFNULL(SUM(stock * precio_compra), 0) FROM productos WHERE empresa_id = ?) as patrimonio_ars`,
+      [empresa_id, empresa_id, empresa_id],
+    );
+
+    // 🏆 7. PRODUCTO MÁS VENDIDO DEL DÍA
+    const [topProducto] = await db.execute(
+      `SELECT p.nombre FROM detalle_ventas dv
+      JOIN ventas v ON dv.venta_id = v.id
+      JOIN productos p ON dv.producto_id = p.id
+      WHERE v.empresa_id = ? AND DATE(v.created_at) = CURDATE()
+      GROUP BY p.id ORDER BY SUM(dv.cantidad) DESC LIMIT 1`,
+      [empresa_id],
+    );
+
+    // 💵 8. FETCH DOLAR MEP REAL (Con Headers de identificación y Timeout)
+    let cotizacionFinal = 1469;
+    try {
+      const response = await axios.get(
+        "https://dolarapi.com/v1/dolares/bolsa",
+        {
+          timeout: 5000,
+          headers: { "User-Agent": "MorroneBI-Agent/1.0" },
+        },
+      );
+
+      if (response.data && response.data.venta) {
+        cotizacionFinal = parseFloat(response.data.venta);
+        console.log(`✅ [Oracle Eye] Dólar actualizado: ${cotizacionFinal}`);
+      }
+    } catch (e) {
+      console.error("❌ ERROR API DÓLAR:", e.message);
+    }
+
+    const patrimonioARS = parseFloat(alertas[0].patrimonio_ars || 0);
+
+    // 💸 9. GASTOS REALES DEL MES (Fijos + Variables del Cirujano)
+    const [gastosRes] = await db.execute(
+      `
+      SELECT IFNULL(SUM(monto), 0) as total_mensual 
+      FROM gastos 
+      WHERE empresa_id = ? 
+        AND MONTH(fecha) = MONTH(CURDATE()) 
+        AND YEAR(fecha) = YEAR(CURDATE())
+    `,
+      [empresa_id],
+    );
+
+    const gastosReales = parseFloat(gastosRes[0].total_mensual);
+
+    res.json({
+      hoy: ventasHoy,
+      ayer: ventasAyer,
+      profit: profit[0],
+      gastos_mes: gastosReales,
+      categorias,
+      inflacion_real: parseFloat(inflacion[0].variacion).toFixed(2),
+      stock_critico: alertas[0].bajo_stock,
+      tickets_hoy: alertas[0].tickets_hoy,
+      dolar_mep: cotizacionFinal.toFixed(2),
+      // ✅ CORREGIDO: Usamos cotizacionFinal para el cálculo del Equity Shield
+      patrimonio_usd: (patrimonioARS / cotizacionFinal).toFixed(2),
+      top_hoy: topProducto[0]?.nombre || "Sin ventas hoy",
+    });
+  } catch (error) {
+    console.error("❌ ERROR MONITOR BI:", error.message);
+    res.status(500).json({ message: "Error en el motor de BI" });
+  }
+};
+
 module.exports = {
   getFullChartData,
   getPrediccionBI,
   getTermometroCategorias,
   getPuntoEquilibrio,
+  getGodModeStats,
 };

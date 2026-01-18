@@ -6,6 +6,7 @@ const {
   getPrediccionBI,
   getTermometroCategorias,
   getPuntoEquilibrio,
+  getGodModeStats,
 } = require("../controllers/dashboardController");
 const authMiddleware = require("../middlewares/authMiddleware");
 
@@ -17,5 +18,6 @@ router.get("/charts", getFullChartData);
 router.get("/prediction", getPrediccionBI);
 router.get("/termometro-categorias", getTermometroCategorias);
 router.get("/punto-equilibrio", getPuntoEquilibrio);
+router.get("/god-mode", getGodModeStats);
 
 module.exports = router;
