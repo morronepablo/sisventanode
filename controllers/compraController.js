@@ -37,7 +37,7 @@ const getCompraById = async (req, res) => {
        FROM compras c 
        LEFT JOIN proveedors p ON c.proveedor_id = p.id 
        WHERE c.id = ? AND c.empresa_id = ?`,
-      [id, empresa_id]
+      [id, empresa_id],
     );
 
     if (rows.length === 0)
@@ -72,7 +72,7 @@ const postTmpCompra = async (req, res) => {
     // 1. Obtener precio del maestro
     const [prod] = await db.execute(
       "SELECT precio_compra FROM productos WHERE id = ?",
-      [producto_id]
+      [producto_id],
     );
     const precio_maestro = prod[0] ? parseFloat(prod[0].precio_compra) : 0;
 
@@ -82,7 +82,7 @@ const postTmpCompra = async (req, res) => {
        JOIN compras c ON dc.compra_id = c.id 
        WHERE dc.producto_id = ? AND c.proveedor_id = ? 
        ORDER BY c.fecha DESC, c.id DESC LIMIT 1`,
-      [producto_id, proveedor_id]
+      [producto_id, proveedor_id],
     );
     const precio_anterior =
       priceSpecific.length > 0
@@ -98,7 +98,7 @@ const postTmpCompra = async (req, res) => {
        WHERE dc.producto_id = ? AND c.empresa_id = ? 
          AND c.fecha >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)
        ORDER BY dc.precio_compra ASC LIMIT 1`,
-      [producto_id, req.user.empresa_id]
+      [producto_id, req.user.empresa_id],
     );
 
     const mejor_precio =
@@ -119,7 +119,7 @@ const postTmpCompra = async (req, res) => {
         mejor_precio,
         mejor_proveedor,
         usuario_id,
-      ]
+      ],
     );
 
     res.json({ success: true });
@@ -156,13 +156,13 @@ const storeCompra = async (req, res) => {
     // Usamos 'connection' para asegurar que estamos dentro de la transacción
     const [items] = await connection.execute(
       "SELECT * FROM tmp_compras WHERE usuario_id = ?",
-      [usuario_id]
+      [usuario_id],
     );
 
     for (const item of items) {
       const [prod] = await connection.execute(
         "SELECT precio_compra, valor_porcentaje, nombre FROM productos WHERE id = ?",
-        [item.producto_id]
+        [item.producto_id],
       );
 
       const costoNuevo = parseFloat(item.precio_compra);
@@ -176,7 +176,7 @@ const storeCompra = async (req, res) => {
 
         await connection.execute(
           "UPDATE productos SET precio_compra = ?, precio_venta = ?, updated_at = NOW() WHERE id = ?",
-          [costoNuevo, nuevoPrecioVenta.toFixed(2), item.producto_id]
+          [costoNuevo, nuevoPrecioVenta.toFixed(2), item.producto_id],
         );
 
         // Guardamos el cambio en el historial para los gráficos de inflación
@@ -188,7 +188,7 @@ const storeCompra = async (req, res) => {
             nuevoPrecioVenta.toFixed(2), // Precio de venta nuevo
             costoAnterior, // Costo anterior
             costoNuevo, // Costo nuevo
-          ]
+          ],
         );
       }
     }
@@ -206,7 +206,7 @@ const storeCompra = async (req, res) => {
       req,
       "CREAR",
       "COMPRAS",
-      `Compra registrada $${precio_total}. Recalculo de precios ejecutado.`
+      `Compra registrada $${precio_total}. Recalculo de precios ejecutado.`,
     );
 
     res.json({ success: true });
@@ -229,7 +229,7 @@ const deleteCompra = async (req, res) => {
     // Obtenemos info básica antes de borrar para el log
     const [compraInfo] = await db.execute(
       "SELECT precio_total, comprobante FROM compras WHERE id = ?",
-      [id]
+      [id],
     );
 
     await Compra.delete(id);
@@ -242,7 +242,7 @@ const deleteCompra = async (req, res) => {
       "COMPRAS",
       `Se eliminó la compra ID: ${id}. Monto: $${
         compraInfo[0]?.precio_total || "?"
-      }`
+      }`,
     );
 
     res.json({ message: "Eliminada" });
@@ -268,7 +268,7 @@ const updatePrecioCompra = async (req, res) => {
       req,
       "EDITAR",
       "PRODUCTOS_PRECIO",
-      `Actualización de precio de costo desde Compras. Producto ID: ${producto_id} a $${precio_compra}`
+      `Actualización de precio de costo desde Compras. Producto ID: ${producto_id} a $${precio_compra}`,
     );
 
     res.json({ success: true });
@@ -284,7 +284,7 @@ const generarReporte = async (req, res) => {
     const empresa_id = req.user.empresa_id;
     const [empresaRows] = await db.execute(
       "SELECT * FROM empresas WHERE id = ?",
-      [empresa_id]
+      [empresa_id],
     );
     const empresa = empresaRows[0];
     const compras = await Compra.getAll(empresa_id);
@@ -316,7 +316,7 @@ const generarReporte = async (req, res) => {
         c.proveedor_nombre || "N/A"
       }</td><td style="text-align: right;">$ ${precioTotal.toLocaleString(
         "es-AR",
-        { minimumFractionDigits: 2 }
+        { minimumFractionDigits: 2 },
       )}</td></tr>`;
     });
 
@@ -328,7 +328,7 @@ const generarReporte = async (req, res) => {
       logoBase64 ? `<img src="${logoBase64}" style="width: 80px;">` : ""
     }</td></tr></table></div><div class="content"><table class="table"><thead><tr><th>Nro</th><th>Fecha</th><th>Comprobante</th><th>Proveedor</th><th>Total</th></tr></thead><tbody>${tablaFilas}</tbody></table><div class="total-box">TOTAL COMPRADO: $ ${totalGeneral.toLocaleString(
       "es-AR",
-      { minimumFractionDigits: 2 }
+      { minimumFractionDigits: 2 },
     )}</div></div></body></html>`;
 
     const options = { format: "A4", orientation: "portrait", border: "10mm" };
@@ -378,7 +378,7 @@ const generarInformeProductosPDF = async (req, res) => {
     // 1. Obtener datos de la empresa para el encabezado
     const [empresaRows] = await db.execute(
       "SELECT * FROM empresas WHERE id = ?",
-      [empresa_id]
+      [empresa_id],
     );
     const empresa = empresaRows[0];
 
@@ -424,10 +424,10 @@ const generarInformeProductosPDF = async (req, res) => {
             <td style="text-align: center;">${p.cantidad}</td>
             <td style="text-align: center;">${p.unidad || "Unid."}</td>
             <td style="text-align: right;">$ ${parseFloat(
-              p.costo
+              p.costo,
             ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
             <td style="text-align: right;">$ ${parseFloat(
-              p.total
+              p.total,
             ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
         </tr>`;
     });
@@ -494,7 +494,7 @@ const generarInformeProductosPDF = async (req, res) => {
 
         <div id="pageFooter">
             Reporte generado el ${new Date().toLocaleString(
-              "es-AR"
+              "es-AR",
             )} - Sistema de Ventas
         </div>
     </body>
@@ -554,7 +554,7 @@ const generarInformeProveedoresPDF = async (req, res) => {
 
     const [empresaRows] = await db.execute(
       "SELECT * FROM empresas WHERE id = ?",
-      [empresa_id]
+      [empresa_id],
     );
     const empresa = empresaRows[0];
 
@@ -566,7 +566,7 @@ const generarInformeProveedoresPDF = async (req, res) => {
       WHERE c.empresa_id = ? AND c.fecha BETWEEN ? AND ? 
       GROUP BY p.id, p.empresa, p.marca 
       ORDER BY total DESC`,
-      [empresa_id, fecha_inicio, fecha_fin]
+      [empresa_id, fecha_inicio, fecha_fin],
     );
 
     let filas = "";
@@ -580,7 +580,7 @@ const generarInformeProveedoresPDF = async (req, res) => {
           <td style="text-align:center">${d.cant_compras}</td>
           <td style="text-align:right">$ ${parseFloat(d.total).toLocaleString(
             "es-AR",
-            { minimumFractionDigits: 2 }
+            { minimumFractionDigits: 2 },
           )}</td>
         </tr>`;
     });
@@ -617,7 +617,7 @@ const generarInformeProveedoresPDF = async (req, res) => {
         </table>
         <div class="total">TOTAL GENERAL: $ ${totalGral.toLocaleString(
           "es-AR",
-          { minimumFractionDigits: 2 }
+          { minimumFractionDigits: 2 },
         )}</div>
       </body>
       </html>`;
@@ -664,7 +664,7 @@ const generarInformeNoPagadasPDF = async (req, res) => {
     const empresa_id = req.user.empresa_id;
     const [empresaRows] = await db.execute(
       "SELECT * FROM empresas WHERE id = ?",
-      [empresa_id]
+      [empresa_id],
     );
     const empresa = empresaRows[0];
 
@@ -675,7 +675,7 @@ const generarInformeNoPagadasPDF = async (req, res) => {
       JOIN proveedors p ON c.proveedor_id = p.id
       WHERE c.empresa_id = ? AND c.deuda > 0 
       ORDER BY c.fecha DESC`,
-      [empresa_id]
+      [empresa_id],
     );
 
     let filas = "";
@@ -689,10 +689,10 @@ const generarInformeNoPagadasPDF = async (req, res) => {
           <td>${d.comprobante}</td>
           <td>${d.proveedor}</td>
           <td style="text-align:right">$ ${parseFloat(
-            d.precio_total
+            d.precio_total,
           ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
           <td style="text-align:right; color:red; font-weight:bold">$ ${parseFloat(
-            d.deuda
+            d.deuda,
           ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
         </tr>`;
     });
@@ -729,7 +729,7 @@ const generarInformeNoPagadasPDF = async (req, res) => {
         </table>
         <div class="total">DEUDA TOTAL PENDIENTE: $ ${totalDeudaGral.toLocaleString(
           "es-AR",
-          { minimumFractionDigits: 2 }
+          { minimumFractionDigits: 2 },
         )}</div>
       </body>
       </html>`;
@@ -758,7 +758,7 @@ const updateTmpQuantity = async (req, res) => {
 
     await db.execute(
       "UPDATE tmp_compras SET cantidad = ?, updated_at = NOW() WHERE id = ?",
-      [cantidad, id]
+      [cantidad, id],
     );
 
     res.json({ success: true });
@@ -775,7 +775,7 @@ const updateTmpPrice = async (req, res) => {
 
     await db.execute(
       "UPDATE tmp_compras SET precio_compra = ?, updated_at = NOW() WHERE id = ?",
-      [precio_compra, id]
+      [precio_compra, id],
     );
 
     res.json({ success: true });
@@ -798,7 +798,7 @@ const getAuditoriaTraicion = async (req, res) => {
       WHERE p.empresa_id = ? AND hp.fecha_cambio >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
       AND hp.costo_anterior > 0
     `,
-      [empresa_id]
+      [empresa_id],
     );
 
     const avgInflation = parseFloat(inflacionLocal[0].promedio || 0);
@@ -956,7 +956,7 @@ const postPedidoWhatsApp = async (req, res) => {
         req,
         "WHATSAPP",
         "COMPRAS",
-        `Pedido automático enviado a ${proveedor_nombre}`
+        `Pedido automático enviado a ${proveedor_nombre}`,
       );
       return res.json({
         success: true,
@@ -972,11 +972,139 @@ const postPedidoWhatsApp = async (req, res) => {
   }
 };
 
+const getAuditoriaProductos = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    // CONSULTA NIVEL DIOS: Trae el detalle, el proveedor y compara con el precio anterior del mismo item
+    const query = `
+      SELECT 
+        dc.id,
+        p.nombre as producto_nombre,
+        p.codigo as producto_codigo,
+        prov.empresa as proveedor_nombre,
+        dc.cantidad,
+        dc.precio_compra as precio_pagado,
+        (dc.cantidad * dc.precio_compra) as inversion_total,
+        c.fecha as fecha_compra,
+        p.precio_venta as precio_venta_actual,
+        -- Buscamos el precio de la compra anterior para calcular la inflación del ítem
+        (SELECT dc2.precio_compra FROM detalle_compras dc2 
+         JOIN compras c2 ON dc2.compra_id = c2.id 
+         WHERE dc2.producto_id = p.id AND c2.fecha < c.fecha 
+         ORDER BY c2.fecha DESC LIMIT 1) as precio_anterior
+      FROM detalle_compras dc
+      JOIN compras c ON dc.compra_id = c.id
+      JOIN productos p ON dc.producto_id = p.id
+      JOIN proveedors prov ON c.proveedor_id = prov.id
+      WHERE c.empresa_id = ?
+      ORDER BY c.fecha DESC
+    `;
+
+    const [rows] = await db.execute(query, [empresa_id]);
+
+    const result = rows.map((r) => {
+      const pPagado = parseFloat(r.precio_pagado);
+      const pAnterior = parseFloat(r.precio_anterior || pPagado);
+      const variacion = ((pPagado - pAnterior) / pAnterior) * 100;
+
+      const pVenta = parseFloat(r.precio_venta_actual);
+      const margen = ((pVenta - pPagado) / pVenta) * 100;
+
+      return {
+        ...r,
+        variacion_pct: variacion.toFixed(1),
+        margen_proyectado: margen.toFixed(1),
+      };
+    });
+
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+const getMatrizArbitraje = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    // QUERY MAESTRA: Obtiene el último precio de compra de cada producto por cada proveedor
+    const query = `
+      WITH UltimasCompras AS (
+        SELECT 
+          dc.producto_id,
+          c.proveedor_id,
+          prov.empresa as proveedor_nombre,
+          dc.precio_compra,
+          c.fecha,
+          ROW_NUMBER() OVER (PARTITION BY dc.producto_id, c.proveedor_id ORDER BY c.fecha DESC) as rn
+        FROM detalle_compras dc
+        JOIN compras c ON dc.compra_id = c.id
+        JOIN proveedors prov ON c.proveedor_id = prov.id
+        WHERE c.empresa_id = ?
+      )
+      SELECT 
+        p.id as producto_id,
+        p.nombre as producto_nombre,
+        p.stock as stock_actual,
+        uc.proveedor_nombre,
+        uc.precio_compra as costo_proveedor,
+        uc.fecha as fecha_ultima_compra
+      FROM UltimasCompras uc
+      JOIN productos p ON uc.producto_id = p.id
+      WHERE uc.rn = 1
+      ORDER BY p.nombre ASC, uc.precio_compra ASC
+    `;
+
+    const [rows] = await db.execute(query, [empresa_id]);
+
+    // Agrupamos por producto en el servidor para facilitar el renderizado
+    const matriz = rows.reduce((acc, row) => {
+      if (!acc[row.producto_id]) {
+        acc[row.producto_id] = {
+          nombre: row.producto_nombre,
+          stock: row.stock_actual,
+          comparativa: [],
+        };
+      }
+      acc[row.producto_id].comparativa.push({
+        proveedor: row.proveedor_nombre,
+        costo: parseFloat(row.costo_proveedor),
+        fecha: row.fecha_ultima_compra,
+      });
+      return acc;
+    }, {});
+
+    // Calculamos el ahorro potencial (Arbitraje)
+    const resultadoFinal = Object.values(matriz).map((p) => {
+      const costos = p.comparativa.map((c) => c.costo);
+      const minCosto = Math.min(...costos);
+      const maxCosto = Math.max(...costos);
+      const brecha = ((maxCosto - minCosto) / minCosto) * 100;
+
+      // Ahorro potencial: Si comprara todo el stock al precio más bajo vs el más alto
+      const ahorroStock = (maxCosto - minCosto) * p.stock;
+
+      return {
+        ...p,
+        minCosto,
+        maxCosto,
+        brecha: brecha.toFixed(1),
+        ahorro_potencial: ahorroStock.toFixed(2),
+      };
+    });
+
+    res.json(resultadoFinal);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const countCompras = async (req, res) => {
   try {
     const [rows] = await db.execute(
       "SELECT COUNT(*) AS total FROM compras WHERE empresa_id = ?",
-      [req.user.empresa_id]
+      [req.user.empresa_id],
     );
     res.json({ total: rows[0].total });
   } catch (error) {
@@ -990,11 +1118,11 @@ const getComprasSummary = async (req, res) => {
     const year = new Date().getFullYear();
     const [totalRows] = await db.execute(
       "SELECT COUNT(*) AS total FROM compras WHERE empresa_id = ?",
-      [empresa_id]
+      [empresa_id],
     );
     const [yearRows] = await db.execute(
       "SELECT COUNT(*) AS totalAnio FROM compras WHERE YEAR(fecha) = ? AND empresa_id = ?",
-      [year, empresa_id]
+      [year, empresa_id],
     );
     res.json({
       total: totalRows[0].total || 0,
@@ -1041,7 +1169,7 @@ const getComprasMetrics = async (req, res) => {
     ]);
     const [inv] = await db.execute(
       `SELECT SUM(IFNULL(stock, 0) * IFNULL(precio_compra, 0)) as total_valorizado FROM productos WHERE empresa_id = ?`,
-      [empresa_id]
+      [empresa_id],
     );
 
     res.json({
@@ -1076,6 +1204,8 @@ module.exports = {
   getAuditoriaTraicion,
   getSugerenciasCompra,
   postPedidoWhatsApp,
+  getAuditoriaProductos,
+  getMatrizArbitraje,
   countCompras,
   getComprasSummary,
   getComprasMetrics,

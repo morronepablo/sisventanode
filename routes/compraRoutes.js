@@ -20,7 +20,9 @@ const {
   updateTmpPrice,
   getAuditoriaTraicion,
   getSugerenciasCompra,
+  getAuditoriaProductos,
   postPedidoWhatsApp,
+  getMatrizArbitraje,
   countCompras,
   getComprasSummary,
   getComprasMetrics,
@@ -49,6 +51,8 @@ router.get("/informes/no-pagadas", getInformeNoPagadas);
 router.get("/informes/no-pagadas-pdf", generarInformeNoPagadasPDF);
 router.get("/auditoria-traicion", getAuditoriaTraicion);
 router.get("/bi/asistente-compra", getSugerenciasCompra);
+router.get("/bi/auditoria-productos", getAuditoriaProductos);
+router.get("/bi/matriz-arbitraje", getMatrizArbitraje);
 
 // --- RUTAS DEL CARRITO TEMPORAL (Rutas Fijas) ---
 router.get("/tmp", getTmpCompras);
