@@ -6,6 +6,7 @@ const path = require("path");
 const fs = require("fs");
 const { registrarLog } = require("../utils/logger"); // 👈 1. Importamos el logger
 const { calcularDiferencias } = require("../utils/differences"); // 👈 1. Importar la utilidad
+const axios = require("axios");
 
 const getListadoProveedores = async (req, res) => {
   try {
@@ -23,12 +24,12 @@ const getListadoProveedores = async (req, res) => {
       // 2. CONTAR TODAS LAS COMPRAS (Incluso las pagadas) para decidir si se puede borrar
       const [countRows] = await db.execute(
         "SELECT COUNT(*) as total FROM compras WHERE proveedor_id = ?",
-        [p.id]
+        [p.id],
       );
 
       const deudaTotal = facturas.reduce(
         (acc, f) => acc + (f.saldo_pendiente || 0),
-        0
+        0,
       );
 
       result.push({
@@ -80,7 +81,7 @@ const createProveedor = async (req, res) => {
       "PROVEEDORES",
       `Se registró al proveedor: ${req.body.empresa}. Marca: ${
         req.body.marca || "N/A"
-      }. Contacto: ${req.body.contacto}`
+      }. Contacto: ${req.body.contacto}`,
     );
 
     res.status(201).json({ message: "Proveedor registrado con éxito", id });
@@ -126,7 +127,7 @@ const updateProveedor = async (req, res) => {
       req,
       "EDITAR",
       "PROVEEDORES",
-      `Se actualizaron los datos del proveedor: ${proveedorAnterior.empresa}. Cambios: ${detalleCambios}`
+      `Se actualizaron los datos del proveedor: ${proveedorAnterior.empresa}. Cambios: ${detalleCambios}`,
     );
 
     res.json({ message: "Proveedor actualizado con éxito" });
@@ -165,7 +166,7 @@ const postRegistrarPago = async (req, res) => {
     // 1. Buscar si hay arqueo abierto EN ESTA CAJA ESPECÍFICA
     const [arqueoRows] = await db.execute(
       "SELECT id FROM arqueos WHERE empresa_id = ? AND caja_id = ? AND (fecha_cierre IS NULL OR fecha_cierre = '' OR estado = 'Abierto') LIMIT 1",
-      [empresa_id, MY_CAJA]
+      [empresa_id, MY_CAJA],
     );
     const arqueo_id = arqueoRows.length > 0 ? arqueoRows[0].id : null;
 
@@ -181,7 +182,7 @@ const postRegistrarPago = async (req, res) => {
     // 3. CALCULAR EL TOTAL REAL para el log
     const montoRealPagado = distribucion.reduce(
       (acc, item) => acc + parseFloat(item.monto || 0),
-      0
+      0,
     );
 
     // EMITIR EVENTO EN TIEMPO REAL PARA EL DASHBOARD
@@ -194,19 +195,19 @@ const postRegistrarPago = async (req, res) => {
       "PAGO",
       "PROVEEDORES",
       `Se registró un pago de $${montoRealPagado.toLocaleString(
-        "es-AR"
-      )} al proveedor ID: ${proveedor_id} vía ${metodo_pago} desde Caja ${MY_CAJA}`
+        "es-AR",
+      )} al proveedor ID: ${proveedor_id} vía ${metodo_pago} desde Caja ${MY_CAJA}`,
     );
 
     console.log(
-      `[PROVEEDORES] Pago de $${montoRealPagado} registrado en Caja ${MY_CAJA} para proveedor ${proveedor_id}`
+      `[PROVEEDORES] Pago de $${montoRealPagado} registrado en Caja ${MY_CAJA} para proveedor ${proveedor_id}`,
     );
 
     res.json({ success: true, message: "Pagos registrados correctamente" });
   } catch (error) {
     console.error(
       "[PROVEEDORES ERROR] Fallo al registrar pago:",
-      error.message
+      error.message,
     );
     res.status(500).json({ message: error.message });
   }
@@ -248,7 +249,7 @@ const deleteProveedor = async (req, res) => {
     // 1. Validación de seguridad en el servidor (Check de compras)
     const [check] = await db.execute(
       "SELECT COUNT(*) as total FROM compras WHERE proveedor_id = ?",
-      [id]
+      [id],
     );
 
     if (check[0].total > 0) {
@@ -279,7 +280,7 @@ const deleteProveedor = async (req, res) => {
       req,
       "ELIMINAR",
       "PROVEEDORES",
-      `Se eliminó al proveedor: ${nombreProv}`
+      `Se eliminó al proveedor: ${nombreProv}`,
     );
 
     console.log(`[PROVEEDORES] Proveedor ${nombreProv} eliminado.`);
@@ -336,7 +337,7 @@ const generarReporteCuentasPorPagarPDF = async (req, res) => {
       filas += `<tr><td>${i + 1}</td><td>${d.empresa}</td><td>${
         d.marca || "-"
       }</td><td style="text-align:right; color:#d33; font-weight:bold">$ ${parseFloat(
-        d.saldo
+        d.saldo,
       ).toLocaleString("es-AR")}</td></tr>`;
     });
 
@@ -346,7 +347,7 @@ const generarReporteCuentasPorPagarPDF = async (req, res) => {
     }</h1><h3>Informe de Cuentas por Pagar (Deudas a Proveedores)</h3></div>
     <table><thead><tr><th>#</th><th>Proveedor</th><th>Marca</th><th>Saldo a Pagar</th></tr></thead><tbody>${filas}</tbody></table>
     <h2 style="text-align:right; margin-top:30px;">TOTAL COMPROMISOS: $ ${totalDeuda.toLocaleString(
-      "es-AR"
+      "es-AR",
     )}</h2>
     </body></html>`;
 
@@ -458,8 +459,8 @@ const getRadarInflacion = async (req, res) => {
         r.inflacion_promedio > 15
           ? "CRÍTICO"
           : r.inflacion_promedio > 8
-          ? "ALERTA"
-          : "ESTABLE",
+            ? "ALERTA"
+            : "ESTABLE",
     }));
 
     res.json(result);
@@ -566,7 +567,7 @@ const getMatrizDependencia = async (req, res) => {
 
     const utilidadTotal = rows.reduce(
       (acc, curr) => acc + parseFloat(curr.utilidad_generada),
-      0
+      0,
     );
 
     const result = rows.map((r) => {
@@ -603,12 +604,89 @@ const getMatrizDependencia = async (req, res) => {
   }
 };
 
+const getAgingDeudaProveedores = async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+
+    // 💵 1. Obtener Dólar con Timeout y Fallback (Sincronizado con Oracle Eye)
+    let cotizacionFinal = 1476.1;
+    try {
+      const response = await axios.get(
+        "https://dolarapi.com/v1/dolares/bolsa",
+        { timeout: 3000 },
+      );
+      if (response.data && response.data.venta) {
+        cotizacionFinal = parseFloat(response.data.venta);
+      }
+    } catch (e) {
+      console.error("⚠️ Usando fallback de dólar en Aging");
+    }
+
+    // 🔍 2. Query Robusto: Filtramos por saldo matemático, no por banderas
+    // Asegurate que la tabla 'pago_compras' existe y tiene 'compra_id' y 'monto'
+    const query = `
+      SELECT 
+        p.id as proveedor_id,
+        p.empresa as proveedor_nombre,
+        p.contacto,
+        c.id as factura_id,
+        c.fecha as fecha_factura,
+        c.precio_total as monto_original,
+        -- Calculamos saldo: Total de factura menos lo pagado
+        (c.precio_total - IFNULL((SELECT SUM(monto) FROM pago_compras WHERE compra_id = c.id), 0)) as saldo_pendiente,
+        DATEDIFF(CURDATE(), c.fecha) as dias_deuda
+      FROM compras c
+      JOIN proveedors p ON c.proveedor_id = p.id
+      WHERE c.empresa_id = ?
+      HAVING saldo_pendiente > 1 -- Evita ruidos de centavos
+      ORDER BY dias_deuda DESC
+    `;
+
+    const [rows] = await db.execute(query, [empresa_id]);
+
+    // 📊 3. Mapeo y Clasificación BI
+    const reporte = rows.map((r) => {
+      let tramo = "0-7 días";
+      let color = "success";
+
+      if (r.dias_deuda > 30) {
+        tramo = "+30 días";
+        color = "danger";
+      } else if (r.dias_deuda > 15) {
+        tramo = "16-30 días";
+        color = "warning";
+      } else if (r.dias_deuda > 7) {
+        tramo = "8-15 días";
+        color = "info";
+      }
+
+      return {
+        ...r,
+        tramo,
+        color_tramo: color,
+        valor_usd_actual: (
+          parseFloat(r.saldo_pendiente) / cotizacionFinal
+        ).toFixed(2),
+      };
+    });
+
+    res.json(reporte);
+  } catch (error) {
+    // 🕵️‍♂️ Esto imprimirá el error exacto en tu terminal (Node.js)
+    console.error("❌ ERROR CRÍTICO EN AGING DEUDA:", error.message);
+    res.status(500).json({
+      message: "Error interno en el cálculo de deuda",
+      error: error.message,
+    });
+  }
+};
+
 const countProveedores = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
     const [rows] = await db.execute(
       "SELECT COUNT(*) AS total FROM proveedors WHERE empresa_id = ?",
-      [empresa_id]
+      [empresa_id],
     );
     res.json({ total: rows[0].total });
   } catch (error) {
@@ -626,7 +704,7 @@ const getProveedoresSummary = async (req, res) => {
         (SELECT COUNT(*) FROM proveedors WHERE empresa_id = ?) AS total,
         IFNULL((SELECT SUM(deuda) FROM compras WHERE empresa_id = ?), 0) AS totalDeuda 
     `,
-      [empresa_id, empresa_id]
+      [empresa_id, empresa_id],
     );
 
     res.json({
@@ -654,6 +732,7 @@ module.exports = {
   getRadarInflacion,
   getSemaforoCumplimiento,
   getMatrizDependencia,
+  getAgingDeudaProveedores,
   countProveedores,
   getProveedoresSummary,
 };
