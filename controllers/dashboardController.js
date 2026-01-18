@@ -540,11 +540,68 @@ const getGodModeStats = async (req, res) => {
 
     const gastosReales = parseFloat(gastosRes[0].total_mensual);
 
+    // 📦 10. RENDIMIENTO POR CAJA (Hoy)
+    const [cajasRes] = await db.execute(
+      `
+      SELECT 
+        v.caja_id, 
+        SUM(v.precio_total) as monto, 
+        COUNT(*) as tickets 
+      FROM ventas v
+      WHERE v.empresa_id = ? AND DATE(v.created_at) = CURDATE()
+      GROUP BY v.caja_id 
+      ORDER BY monto DESC
+    `,
+      [empresa_id],
+    );
+
+    // 💳 11. MIX DE PAGOS REAL (SOLO HOY)
+    const [pagosHoy] = await db.execute(
+      `
+      SELECT 
+        IFNULL(SUM(efectivo), 0) as EFECTIVO,
+        IFNULL(SUM(tarjeta), 0) as TARJETA,
+        IFNULL(SUM(mercadopago), 0) as MERCADOPAGO,
+        IFNULL(SUM(transferencia), 0) as TRANSFERENCIA
+      FROM ventas 
+      WHERE empresa_id = ? 
+        AND DATE(created_at) = CURDATE()`,
+      [empresa_id],
+    );
+
+    // Formateamos para el gráfico
+    const r = pagosHoy[0];
+    const pagosMix = [
+      { label: "Efectivo", value: parseFloat(r.EFECTIVO) },
+      { label: "Tarjeta", value: parseFloat(r.TARJETA) },
+      { label: "Mercado Pago", value: parseFloat(r.MERCADOPAGO) },
+      { label: "Transferencia", value: parseFloat(r.TRANSFERENCIA) },
+    ].filter((item) => item.value > 0); // Solo los que tienen movimientos hoy
+
+    // 📅 12. RENDIMIENTO SEMANAL (Español)
+    const [semanal] = await db.execute(
+      `
+      SELECT 
+        CASE DAYOFWEEK(created_at)
+          WHEN 1 THEN 'Dom' WHEN 2 THEN 'Lun' WHEN 3 THEN 'Mar' 
+          WHEN 4 THEN 'Mie' WHEN 5 THEN 'Jue' WHEN 6 THEN 'Vie' WHEN 7 THEN 'Sab'
+        END as dia,
+        SUM(precio_total) as total,
+        MAX(created_at) as fecha_orden
+      FROM ventas 
+      WHERE empresa_id = ? AND created_at >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+      GROUP BY dia ORDER BY fecha_orden ASC`,
+      [empresa_id],
+    );
+
     res.json({
       hoy: ventasHoy,
       ayer: ventasAyer,
       profit: profit[0],
       gastos_mes: gastosReales,
+      cajas: cajasRes,
+      pagosMix,
+      semanal,
       categorias,
       inflacion_real: parseFloat(inflacion[0].variacion).toFixed(2),
       stock_critico: alertas[0].bajo_stock,
