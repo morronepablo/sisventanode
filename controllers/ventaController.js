@@ -219,6 +219,14 @@ const storeVenta = async (req, res) => {
       pagos,
     } = req.body;
 
+    // 👇 AGREGA ESTE LOG PARA VER LOS VALORES REALES
+    console.log("🔍 Datos recibidos:", {
+      cliente_id,
+      cargar_vuelto_billetera,
+      vuelto_monto: parseFloat(vuelto_monto),
+      pagos,
+    });
+
     const montoBilleteraUsado = parseFloat(pagos?.pago_billetera || 0);
     const empresa_id = req.user.empresa_id;
     const usuario_id = req.user.id;
@@ -291,6 +299,9 @@ const storeVenta = async (req, res) => {
       vuelto_monto > 0 &&
       Number(cliente_id) !== 1
     ) {
+      console.log(
+        `✅ Cargando $${vuelto_monto} a billetera del cliente ${cliente_id}`,
+      );
       await db.execute(
         "UPDATE clientes SET saldo_billetera = saldo_billetera + ? WHERE id = ?",
         [vuelto_monto, cliente_id],
