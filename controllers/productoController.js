@@ -741,7 +741,6 @@ const getPrediccionCompra = async (req, res) => {
       empresa_id,
     ]);
 
-    // 1. Calculamos promedios para la Matriz BCG
     const totalVentasMes = productos.reduce(
       (acc, p) => acc + parseFloat(p.ventas_30_dias),
       0,
@@ -751,37 +750,49 @@ const getPrediccionCompra = async (req, res) => {
     const reporte = productos.map((p) => {
       const vpd = parseFloat(p.ventas_30_dias) / 30;
       const stockActual = parseFloat(p.stock_actual);
+      const stockMinimo = parseFloat(p.stock_minimo);
       const precioCompra = parseFloat(p.precio_compra);
       const precioVenta = parseFloat(p.precio_venta);
 
-      const diasAutonomia =
-        vpd > 0 ? Math.floor(stockActual / vpd) : stockActual > 0 ? 999 : 0;
+      // 🚀 UNIFICACIÓN CON EL ORÁCULO:
+      // Calculamos autonomía basada en el Stock Mínimo (Margen de Seguridad)
+      let diasAutonomia = 0;
+      if (stockActual <= stockMinimo) {
+        diasAutonomia = 0;
+      } else if (vpd > 0) {
+        // Días que faltan para tocar el stock mínimo
+        diasAutonomia = Math.floor((stockActual - stockMinimo) / vpd);
+      } else {
+        diasAutonomia = 999;
+      }
 
-      // Sugerencia para cubrir 30 días
-      let sugerencia = vpd * 30 - stockActual;
+      // 📦 SUGERENCIA DE COMPRA INTELIGENTE:
+      // Queremos comprar para cubrir 30 días de venta Y recuperar el stock mínimo
+      // Fórmula: (Ventas proyectadas 30 días + Stock Mínimo) - Stock Actual
+      let sugerencia = vpd * 30 + stockMinimo - stockActual;
       sugerencia = sugerencia > 0 ? Math.ceil(sugerencia) : 0;
 
       const inversionEstimada = sugerencia * precioCompra;
 
-      // --- LÓGICA DE NEGOCIO AVANZADA ---
+      // --- LÓGICA BCG (Mantenemos tu inteligencia de mix) ---
       const margenUnitario = precioVenta - precioCompra;
-      const roiProyectado = sugerencia * margenUnitario; // Ganancia neta si vende lo que compra
+      const roiProyectado = sugerencia * margenUnitario;
       const margenPorcentaje =
         precioVenta > 0 ? (margenUnitario / precioVenta) * 100 : 0;
 
-      // --- CLASIFICACIÓN MATRIZ BCG ---
       let clase = "";
       const esAltaRotacion = parseFloat(p.ventas_30_dias) >= promedioVentas;
-      const esAltoMargen = margenPorcentaje >= 30; // Umbral del 30%, ajustable
+      const esAltoMargen = margenPorcentaje >= 30;
 
       if (esAltaRotacion && esAltoMargen) clase = "ESTRELLA";
       else if (esAltaRotacion && !esAltoMargen) clase = "VACA LECHERA";
       else if (!esAltaRotacion && esAltoMargen) clase = "INCÓGNITA";
       else clase = "PERRO";
 
+      // ⚠️ URGENCIA SINCRONIZADA CON EL ORÁCULO
       let urgencia = "BAJA";
-      if (diasAutonomia <= 7) urgencia = "CRÍTICA";
-      else if (diasAutonomia <= 15) urgencia = "MEDIA";
+      if (stockActual <= stockMinimo) urgencia = "CRÍTICA";
+      else if (diasAutonomia <= 7) urgencia = "MEDIA";
 
       return {
         id: p.id,
@@ -791,11 +802,10 @@ const getPrediccionCompra = async (req, res) => {
         stock_actual: stockActual,
         ventas_mes: parseFloat(p.ventas_30_dias).toFixed(2),
         vpd: parseFloat(vpd.toFixed(2)),
-        dias_autonomia: diasAutonomia,
+        dias_autonomia: diasAutonomia, // <--- Sincronizado
         sugerencia_compra: sugerencia,
         inversion_estimada: parseFloat(inversionEstimada.toFixed(2)),
         urgencia: p.ventas_30_dias > 0 ? urgencia : "STOCK ESTANCADO",
-        // Nuevos campos BI
         clase_bcg: clase,
         roi_proyectado: parseFloat(roiProyectado.toFixed(2)),
         margen_percent: margenPorcentaje.toFixed(1),
