@@ -26,6 +26,7 @@ const {
   getSegmentacionClientes,
   getClienteScoring,
   cargarSaldoBilletera,
+  cargarPuntos,
   getCelebracionesHoy,
   postCelebracionWhatsApp,
 } = require("../controllers/clienteController");
@@ -67,5 +68,6 @@ router.get("/:id/compras", getComprasCliente); // 👈 2. RUTA DE COMPRAS (LA AN
 router.get("/:id/historial", getHistorialCliente); // 👈 3. RUTA DE HISTORIAL (LA NUEVA)
 router.get("/:id/estado-cuenta-pdf", generarEstadoCuentaPDF);
 router.post("/:id/billetera/cargar", cargarSaldoBilletera);
+router.post("/:id/puntos/cargar", cargarPuntos);
 
 module.exports = router;
