@@ -1441,7 +1441,15 @@ const getEquityShield = async (req, res) => {
     const totalARS = parseFloat(invRes[0].total_ars || 0);
 
     // 2. OBTENER COTIZACIÓN DEL DÓLAR (Usamos DolarApi.com - Muy confiable en Arg)
-    const dRes = await axios.get("https://dolarapi.com/v1/dolares/bolsa"); // Dólar MEP
+    const https = require('https'); // 👈 Agregamos esto
+    const url = "https://dolarapi.com/v1/dolares/bolsa"; // 👈 Sin espacios!
+    
+    const dRes = await axios.get(url, {
+      httpsAgent: new https.Agent({
+        rejectUnauthorized: false // 👈 Ignora certificados autofirmados SOLO para esta llamada
+      }),
+      timeout: 5000 // 👈 Opcional: timeout para evitar colgarse
+    });
     const cotizacionUSD = parseFloat(dRes.data.venta);
 
     const totalUSD = totalARS / cotizacionUSD;
