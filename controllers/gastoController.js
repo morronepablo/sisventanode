@@ -352,44 +352,60 @@ const getPuntoEquilibrio = async (req, res) => {
       .toISOString()
       .split("T")[0];
 
-    // 1. SUMAR GASTOS TOTALES
+    // 1. SUMAR GASTOS TOTALES (Se mantiene igual)
     const [gastosRes] = await db.execute(
       "SELECT SUM(monto) as total FROM gastos WHERE empresa_id = ? AND (fecha BETWEEN ? AND ?)",
       [empresa_id, inicioMes, finMes],
     );
     const gastosTotales = parseFloat(gastosRes[0].total || 0);
 
-    // 2. CALCULAR MARGEN REAL (Usando tus columnas: precio_venta y precio_compra)
-    const queryMargen = `
+    // 2. OBTENER VENTAS BRUTAS Y SU COSTO
+    const queryVentas = `
       SELECT 
-        SUM(dv.cantidad * dv.precio_venta) as ventas_totales,
-        SUM(dv.cantidad * dv.precio_compra) as costo_total_mercaderia
-      FROM detalle_ventas dv
-      JOIN ventas v ON dv.venta_id = v.id
+        IFNULL(SUM(v.precio_total), 0) as bruto,
+        IFNULL(SUM((SELECT SUM(dv.cantidad * p.precio_compra) FROM detalle_ventas dv JOIN productos p ON dv.producto_id = p.id WHERE dv.venta_id = v.id)), 0) as costo
+      FROM ventas v
       WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
     `;
 
-    const [margenRes] = await db.execute(queryMargen, [
+    // 3. 🚀 OBTENER DEVOLUCIONES Y SU COSTO (Para descontar del margen) 🚀
+    const queryDevoluciones = `
+      SELECT 
+        IFNULL(SUM(d.precio_total), 0) as bruto,
+        IFNULL(SUM((SELECT SUM(dd.cantidad * p.precio_compra) FROM detalle_devoluciones dd JOIN productos p ON dd.producto_id = p.id WHERE dd.devolucion_id = d.id)), 0) as costo
+      FROM devoluciones d
+      WHERE d.empresa_id = ? AND d.fecha BETWEEN ? AND ?
+    `;
+
+    const [vRes] = await db.execute(queryVentas, [
+      empresa_id,
+      inicioMes,
+      finMes,
+    ]);
+    const [dRes] = await db.execute(queryDevoluciones, [
       empresa_id,
       inicioMes,
       finMes,
     ]);
 
-    const ventasActuales = parseFloat(margenRes[0].ventas_totales || 0);
-    const costoMercaderia = parseFloat(
-      margenRes[0].costo_total_mercaderia || 0,
-    );
+    // --- CÁLCULOS NETOS BI ---
+
+    // Ventas Netas = Ventas Brutas - Devoluciones
+    const ventasNetas = parseFloat(vRes[0].bruto) - parseFloat(dRes[0].bruto);
+
+    // Costo Neto = Costo de lo vendido - Costo de lo que volvió por devolución
+    const costoNeto = parseFloat(vRes[0].costo) - parseFloat(dRes[0].costo);
 
     let margenPromedio = 0;
-    if (ventasActuales > 0) {
-      // Margen = (Ventas Totales - Costo Total de lo vendido) / Ventas Totales
-      margenPromedio = (ventasActuales - costoMercaderia) / ventasActuales;
+    if (ventasNetas > 0) {
+      // Margen Real = (Ventas Netas - Costo Neto) / Ventas Netas
+      margenPromedio = (ventasNetas - costoNeto) / ventasNetas;
     } else {
-      // Si no hay ventas todavía, usamos un 30% estimado para la proyección
+      // Fallback: Si no hay ventas, usamos el 30% como proyección estándar
       margenPromedio = 0.3;
     }
 
-    // 3. PUNTO DE EQUILIBRIO (Venta necesaria para cubrir gastos)
+    // 4. PUNTO DE EQUILIBRIO REAL (Gasto / Margen Neto)
     const puntoEquilibrio =
       margenPromedio > 0 ? gastosTotales / margenPromedio : 0;
 
@@ -398,15 +414,16 @@ const getPuntoEquilibrio = async (req, res) => {
       gastosTotales,
       margenPromedio: (margenPromedio * 100).toFixed(2),
       puntoEquilibrio,
-      ventasActuales,
-      faltante: Math.max(puntoEquilibrio - ventasActuales, 0),
+      ventasActuales: ventasNetas, // 🚀 Ahora enviamos el valor NETO al frontend
+      faltante: Math.max(puntoEquilibrio - ventasNetas, 0),
       porcentajeAlcanzado:
         puntoEquilibrio > 0
-          ? ((ventasActuales / puntoEquilibrio) * 100).toFixed(1)
+          ? ((ventasNetas / puntoEquilibrio) * 100).toFixed(1)
           : 0,
+      objetivoCumplido: ventasNetas >= puntoEquilibrio && puntoEquilibrio > 0,
     });
   } catch (error) {
-    console.error("❌ ERROR EN PUNTO DE EQUILIBRIO:", error);
+    console.error("❌ ERROR EN PUNTO DE EQUILIBRIO:", error.message);
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -511,33 +528,43 @@ const getSaludFinanciera = async (req, res) => {
       .toISOString()
       .split("T")[0];
 
-    // 1. INGRESOS: Suma de Ventas Reales (precio_total)
+    // 1. VENTAS BRUTAS DEL MES
     const [ventasRes] = await db.execute(
-      "SELECT SUM(precio_total) as total FROM ventas WHERE empresa_id = ? AND (fecha BETWEEN ? AND ?)",
+      "SELECT IFNULL(SUM(precio_total), 0) as total FROM ventas WHERE empresa_id = ? AND (fecha BETWEEN ? AND ?)",
       [empresa_id, inicioMes, finMes],
     );
-    const ingresos = parseFloat(ventasRes[0].total || 0);
+    const ventasBrutas = parseFloat(ventasRes[0].total || 0);
 
-    // 2. EGRESOS OPERATIVOS: Suma de Gastos (monto)
+    // 2. 🚀 DEVOLUCIONES (El dinero que salió de la caja) 🚀
+    const [devolucionesRes] = await db.execute(
+      "SELECT IFNULL(SUM(precio_total), 0) as total FROM devoluciones WHERE empresa_id = ? AND (fecha BETWEEN ? AND ?)",
+      [empresa_id, inicioMes, finMes],
+    );
+    const totalDevoluciones = parseFloat(devolucionesRes[0].total || 0);
+
+    // --- CÁLCULO DE INGRESOS NETOS (Ventas Reales - Devoluciones) ---
+    const ingresosNetosReal = ventasBrutas - totalDevoluciones;
+
+    // 3. EGRESOS OPERATIVOS: Suma de Gastos (monto)
     const [gastosRes] = await db.execute(
-      "SELECT SUM(monto) as total FROM gastos WHERE empresa_id = ? AND (fecha BETWEEN ? AND ?)",
+      "SELECT IFNULL(SUM(monto), 0) as total FROM gastos WHERE empresa_id = ? AND (fecha BETWEEN ? AND ?)",
       [empresa_id, inicioMes, finMes],
     );
     const egresosGastos = parseFloat(gastosRes[0].total || 0);
 
-    // 3. EGRESOS INVERSIÓN: Suma de Compras (precio_total) 👈 CORREGIDO AQUÍ
+    // 4. EGRESOS INVERSIÓN: Suma de Compras (precio_total)
     const [comprasRes] = await db.execute(
-      "SELECT SUM(precio_total) as total FROM compras WHERE empresa_id = ? AND (fecha BETWEEN ? AND ?)",
+      "SELECT IFNULL(SUM(precio_total), 0) as total FROM compras WHERE empresa_id = ? AND (fecha BETWEEN ? AND ?)",
       [empresa_id, inicioMes, finMes],
     );
     const egresosCompras = parseFloat(comprasRes[0].total || 0);
 
     const totalEgresos = egresosGastos + egresosCompras;
-    const balanceNeto = ingresos - totalEgresos;
+    const balanceNeto = ingresosNetosReal - totalEgresos;
 
     res.json({
       success: true,
-      ingresos,
+      ingresos: ingresosNetosReal, // 🚀 Ahora es el Ingreso Neto de Bolsillo
       egresos: {
         totales: totalEgresos,
         operativos: egresosGastos,
