@@ -7,7 +7,7 @@ const getCategoriasGastos = async (req, res) => {
   try {
     const [rows] = await db.execute(
       "SELECT * FROM categorias_gastos WHERE empresa_id = ?",
-      [req.user.empresa_id]
+      [req.user.empresa_id],
     );
     res.json(rows);
   } catch (error) {
@@ -49,7 +49,7 @@ const storeGasto = async (req, res) => {
     // 1. Buscar si hay un arqueo abierto EN ESTA CAJA ESPECÍFICA
     const [arqueo] = await connection.execute(
       "SELECT id FROM arqueos WHERE empresa_id = ? AND caja_id = ? AND (fecha_cierre IS NULL OR fecha_cierre = '' OR estado = 'Abierto') LIMIT 1",
-      [empresa_id, MY_CAJA]
+      [empresa_id, MY_CAJA],
     );
     const arqueo_id = arqueo.length > 0 ? arqueo[0].id : null;
 
@@ -67,11 +67,11 @@ const storeGasto = async (req, res) => {
         empresa_id,
         arqueo_id,
         MY_CAJA, // 👈 Se guarda la caja que origina el gasto
-      ]
+      ],
     );
     const gasto_id = result.insertId;
     console.log(
-      `[GASTOS] Gasto insertado con ID: ${gasto_id} en Caja ${MY_CAJA}`
+      `[GASTOS] Gasto insertado con ID: ${gasto_id} en Caja ${MY_CAJA}`,
     );
 
     // 3. Si el pago fue en EFECTIVO y hay caja abierta, registrar el Egreso en movimiento_cajas
@@ -79,10 +79,10 @@ const storeGasto = async (req, res) => {
       await connection.execute(
         `INSERT INTO movimiento_cajas (tipo, monto, descripcion, arqueo_id, caja_id, created_at, updated_at) 
          VALUES ('Egreso', ?, ?, ?, ?, NOW(), NOW())`,
-        [monto, `Gasto: ${descripcion}`, arqueo_id, MY_CAJA]
+        [monto, `Gasto: ${descripcion}`, arqueo_id, MY_CAJA],
       );
       console.log(
-        `[GASTOS] Egreso de caja registrado para Arqueo ID: ${arqueo_id} (Caja ${MY_CAJA})`
+        `[GASTOS] Egreso de caja registrado para Arqueo ID: ${arqueo_id} (Caja ${MY_CAJA})`,
       );
     }
 
@@ -98,7 +98,7 @@ const storeGasto = async (req, res) => {
       req,
       "CREAR",
       "GASTOS",
-      `Se registró un gasto por $${monto} (${metodo_pago}) en Caja ${MY_CAJA}. Descripción: ${descripcion}`
+      `Se registró un gasto por $${monto} (${metodo_pago}) en Caja ${MY_CAJA}. Descripción: ${descripcion}`,
     );
 
     res.json({ success: true, message: "Gasto registrado correctamente" });
@@ -151,7 +151,7 @@ const deleteGasto = async (req, res) => {
     // 1. Obtener datos del gasto antes de borrar para saber si afectó la caja
     const [rows] = await connection.execute(
       "SELECT * FROM gastos WHERE id = ? AND empresa_id = ?",
-      [id, empresa_id]
+      [id, empresa_id],
     );
 
     if (rows.length === 0) {
@@ -170,10 +170,10 @@ const deleteGasto = async (req, res) => {
           gasto.caja_id,
           gasto.monto,
           `%Gasto: ${gasto.descripcion}%`,
-        ]
+        ],
       );
       console.log(
-        `[GASTOS] Movimiento de caja eliminado para sincronizar arqueo de la Caja ${gasto.caja_id}`
+        `[GASTOS] Movimiento de caja eliminado para sincronizar arqueo de la Caja ${gasto.caja_id}`,
       );
     }
 
@@ -191,7 +191,7 @@ const deleteGasto = async (req, res) => {
       req,
       "ELIMINAR",
       "GASTOS",
-      `Se eliminó gasto de $${gasto.monto} de la Caja ${gasto.caja_id}. Motivo: ${gasto.descripcion}. Se sincronizó con caja.`
+      `Se eliminó gasto de $${gasto.monto} de la Caja ${gasto.caja_id}. Motivo: ${gasto.descripcion}. Se sincronizó con caja.`,
     );
 
     res.json({
@@ -211,6 +211,8 @@ const getInformeCirujano = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
     const hoy = new Date();
+
+    // Usamos el primer y último día del mes actual
     const inicioMes = new Date(hoy.getFullYear(), hoy.getMonth(), 1)
       .toISOString()
       .split("T")[0];
@@ -218,7 +220,7 @@ const getInformeCirujano = async (req, res) => {
       .toISOString()
       .split("T")[0];
 
-    // Consulta con DESGLOSE por categoría
+    // 1. Consulta de Gastos con desglose por categoría
     const queryGastos = `
       SELECT 
         cg.nombre as categoria,
@@ -230,18 +232,31 @@ const getInformeCirujano = async (req, res) => {
       GROUP BY cg.id
     `;
 
-    const queryVentas = `SELECT SUM(precio_total) as total_ventas FROM ventas WHERE empresa_id = ? AND fecha BETWEEN ? AND ?`;
+    // 2. 🚀 CÁLCULO DE VENTAS NETAS (Ventas - Devoluciones) 🚀
+    const queryVentasNetas = `
+      SELECT (
+        (SELECT IFNULL(SUM(precio_total), 0) FROM ventas WHERE empresa_id = ? AND fecha BETWEEN ? AND ?) -
+        (SELECT IFNULL(SUM(precio_total), 0) FROM devoluciones WHERE empresa_id = ? AND fecha BETWEEN ? AND ?)
+      ) as total_ventas_netas
+    `;
 
     const [gastosRows] = await db.execute(queryGastos, [
       empresa_id,
       inicioMes,
       finMes,
     ]);
-    const [[ventasRes]] = await db.execute(queryVentas, [
+
+    // Ejecutamos el cálculo de ventas netas pasando los parámetros para ambas subconsultas
+    const [ventasRes] = await db.execute(queryVentasNetas, [
       empresa_id,
       inicioMes,
-      finMes,
+      finMes, // Para ventas
+      empresa_id,
+      inicioMes,
+      finMes, // Para devoluciones
     ]);
+
+    const ventasNetasTotales = parseFloat(ventasRes[0].total_ventas_netas || 0);
 
     // Separar los datos para el frontend
     const fijos_lista = gastosRows.filter((g) => g.tipo === "fijo");
@@ -249,18 +264,18 @@ const getInformeCirujano = async (req, res) => {
 
     const totalFijos = fijos_lista.reduce(
       (acc, curr) => acc + parseFloat(curr.total_categoria),
-      0
+      0,
     );
     const totalVariables = variables_lista.reduce(
       (acc, curr) => acc + parseFloat(curr.total_categoria),
-      0
+      0,
     );
 
     res.json({
       totales: {
         fijos: totalFijos,
         variables: totalVariables,
-        ventas_totales: parseFloat(ventasRes.total_ventas || 0),
+        ventas_totales: ventasNetasTotales, // 🚀 Ahora refleja la realidad del bolsillo
       },
       desglose: {
         fijos: fijos_lista,
@@ -268,6 +283,7 @@ const getInformeCirujano = async (req, res) => {
       },
     });
   } catch (error) {
+    console.error("ERROR CIRUJANO:", error.message);
     res.status(500).json({ message: error.message });
   }
 };
@@ -277,7 +293,7 @@ const storeCategoriaGasto = async (req, res) => {
     const { nombre, tipo } = req.body;
     const [result] = await db.execute(
       "INSERT INTO categorias_gastos (nombre, tipo, empresa_id) VALUES (?, ?, ?)",
-      [nombre, tipo, req.user.empresa_id]
+      [nombre, tipo, req.user.empresa_id],
     );
     res.json({ success: true, id: result.insertId });
   } catch (error) {
@@ -290,7 +306,7 @@ const getCategoriaGastoById = async (req, res) => {
   try {
     const [rows] = await db.execute(
       "SELECT * FROM categorias_gastos WHERE id = ?",
-      [req.params.id]
+      [req.params.id],
     );
     res.json(rows[0]);
   } catch (error) {
@@ -304,7 +320,7 @@ const updateCategoriaGasto = async (req, res) => {
     const { nombre, tipo } = req.body;
     await db.execute(
       "UPDATE categorias_gastos SET nombre = ?, tipo = ? WHERE id = ?",
-      [nombre, tipo, req.params.id]
+      [nombre, tipo, req.params.id],
     );
     res.json({ success: true });
   } catch (error) {
@@ -339,7 +355,7 @@ const getPuntoEquilibrio = async (req, res) => {
     // 1. SUMAR GASTOS TOTALES
     const [gastosRes] = await db.execute(
       "SELECT SUM(monto) as total FROM gastos WHERE empresa_id = ? AND (fecha BETWEEN ? AND ?)",
-      [empresa_id, inicioMes, finMes]
+      [empresa_id, inicioMes, finMes],
     );
     const gastosTotales = parseFloat(gastosRes[0].total || 0);
 
@@ -361,7 +377,7 @@ const getPuntoEquilibrio = async (req, res) => {
 
     const ventasActuales = parseFloat(margenRes[0].ventas_totales || 0);
     const costoMercaderia = parseFloat(
-      margenRes[0].costo_total_mercaderia || 0
+      margenRes[0].costo_total_mercaderia || 0,
     );
 
     let margenPromedio = 0;
@@ -498,21 +514,21 @@ const getSaludFinanciera = async (req, res) => {
     // 1. INGRESOS: Suma de Ventas Reales (precio_total)
     const [ventasRes] = await db.execute(
       "SELECT SUM(precio_total) as total FROM ventas WHERE empresa_id = ? AND (fecha BETWEEN ? AND ?)",
-      [empresa_id, inicioMes, finMes]
+      [empresa_id, inicioMes, finMes],
     );
     const ingresos = parseFloat(ventasRes[0].total || 0);
 
     // 2. EGRESOS OPERATIVOS: Suma de Gastos (monto)
     const [gastosRes] = await db.execute(
       "SELECT SUM(monto) as total FROM gastos WHERE empresa_id = ? AND (fecha BETWEEN ? AND ?)",
-      [empresa_id, inicioMes, finMes]
+      [empresa_id, inicioMes, finMes],
     );
     const egresosGastos = parseFloat(gastosRes[0].total || 0);
 
     // 3. EGRESOS INVERSIÓN: Suma de Compras (precio_total) 👈 CORREGIDO AQUÍ
     const [comprasRes] = await db.execute(
       "SELECT SUM(precio_total) as total FROM compras WHERE empresa_id = ? AND (fecha BETWEEN ? AND ?)",
-      [empresa_id, inicioMes, finMes]
+      [empresa_id, inicioMes, finMes],
     );
     const egresosCompras = parseFloat(comprasRes[0].total || 0);
 
@@ -548,7 +564,7 @@ const getOraculoFinanciero = async (req, res) => {
         (SELECT COALESCE(SUM(precio_total),0) FROM compras WHERE empresa_id = ? AND MONTH(fecha) = MONTH(CURDATE())) -
         (SELECT COALESCE(SUM(monto),0) FROM gastos WHERE empresa_id = ? AND MONTH(fecha) = MONTH(CURDATE())) as saldo_caja
     `,
-      [empresa_id, empresa_id, empresa_id]
+      [empresa_id, empresa_id, empresa_id],
     );
 
     let saldoCajaActual = parseFloat(balanceRes[0].saldo_caja || 0);
@@ -566,7 +582,7 @@ const getOraculoFinanciero = async (req, res) => {
           HAVING saldo > 0
         ) as subquery
       `,
-      [empresa_id]
+      [empresa_id],
     );
 
     const totalCobrar = parseFloat(cobrarRes[0].total || 0);
@@ -577,7 +593,7 @@ const getOraculoFinanciero = async (req, res) => {
       `
       SELECT SUM(deuda) as total FROM compras WHERE empresa_id = ?
     `,
-      [empresa_id]
+      [empresa_id],
     );
     const totalPagar = parseFloat(pagarRes[0].total || 0);
 
@@ -588,7 +604,7 @@ const getOraculoFinanciero = async (req, res) => {
       FROM ventas 
       WHERE empresa_id = ? AND fecha >= DATE_SUB(CURDATE(), INTERVAL 15 DAY)
     `,
-      [empresa_id]
+      [empresa_id],
     );
     const ventaDiariaPromedio = parseFloat(promedioRes[0].promedio || 0);
 
