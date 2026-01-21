@@ -792,7 +792,7 @@ const getAuditoriaTraicion = async (req, res) => {
     // 1. Calculamos la Inflación Promedio del Local (últimos 30 días)
     const [inflacionLocal] = await db.execute(
       `
-      SELECT AVG((costo_nuevo - costo_anterior) / costo_anterior * 100) as promedio
+      SELECT IFNULL(AVG((costo_nuevo - costo_anterior) / costo_anterior * 100), 0) as promedio
       FROM historial_precios hp
       JOIN productos p ON hp.producto_id = p.id
       WHERE p.empresa_id = ? AND hp.fecha_cambio >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
@@ -803,43 +803,54 @@ const getAuditoriaTraicion = async (req, res) => {
 
     const avgInflation = parseFloat(inflacionLocal[0].promedio || 0);
 
-    // 2. Buscamos productos cuyo último aumento supere el promedio
-    // CORRECCIÓN: Tabla 'proveedors' y columna 'empresa'
+    // 2. Query de Auditoría Real: Compara factura vs factura anterior
     const query = `
-      SELECT 
-        p.nombre, 
-        pr.empresa as proveedor,
-        hp.costo_anterior,
-        hp.costo_nuevo,
-        hp.fecha_cambio,
-        ((hp.costo_nuevo - hp.costo_anterior) / hp.costo_anterior * 100) as aumento_producto
-      FROM historial_precios hp
-      JOIN productos p ON hp.producto_id = p.id
-      -- Buscamos el proveedor a través de la última compra registrada
-      JOIN proveedors pr ON pr.id = (
-          SELECT c.proveedor_id FROM detalle_compras dc 
-          JOIN compras c ON dc.compra_id = c.id 
-          WHERE dc.producto_id = p.id ORDER BY c.fecha DESC LIMIT 1
-      )
-      WHERE p.empresa_id = ? 
-        AND hp.fecha_cambio >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
-      HAVING aumento_producto > (? + 5)
-      ORDER BY aumento_producto DESC
+      SELECT * FROM (
+        SELECT 
+          p.nombre,
+          pr.empresa as proveedor,
+          dc.precio_compra as costo_nuevo,
+          -- Buscamos el precio de la compra anterior del MISMO producto
+          LAG(dc.precio_compra) OVER (PARTITION BY dc.producto_id ORDER BY c.fecha ASC, dc.id ASC) as costo_anterior,
+          c.fecha as fecha_cambio,
+          c.comprobante
+        FROM detalle_compras dc
+        JOIN compras c ON dc.compra_id = c.id
+        JOIN productos p ON dc.producto_id = p.id
+        JOIN proveedors pr ON c.proveedor_id = pr.id
+        WHERE p.empresa_id = ?
+      ) as historial_real
+      WHERE costo_anterior IS NOT NULL 
+        AND fecha_cambio >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+        -- Calculamos el aumento de esta compra específica
+        AND ((costo_nuevo - costo_anterior) / costo_anterior * 100) > (? + 5)
+      ORDER BY fecha_cambio DESC
     `;
 
     const [anomalias] = await db.execute(query, [empresa_id, avgInflation]);
 
+    const reporte = anomalias.map((a) => {
+      const aumento =
+        ((a.costo_nuevo - a.costo_anterior) / a.costo_anterior) * 100;
+      return {
+        nombre: a.nombre,
+        proveedor: a.proveedor,
+        costo_anterior: parseFloat(a.costo_anterior).toFixed(2),
+        costo_nuevo: parseFloat(a.costo_nuevo).toFixed(2),
+        aumento_producto: aumento.toFixed(2),
+        brecha: (aumento - avgInflation).toFixed(2),
+        fecha: a.fecha_cambio,
+        comprobante: a.comprobante,
+      };
+    });
+
     res.json({
       promedio_tienda: avgInflation.toFixed(2),
-      anomalias: anomalias.map((a) => ({
-        ...a,
-        aumento_producto: parseFloat(a.aumento_producto).toFixed(2),
-        brecha: (a.aumento_producto - avgInflation).toFixed(2),
-      })),
+      anomalias: reporte,
     });
   } catch (error) {
     console.error("ERROR TRAICION:", error.message);
-    res.status(500).json({ error: "Error al auditar aumentos de proveedores" });
+    res.status(500).json({ error: "Error al auditar aumentos reales" });
   }
 };
 
