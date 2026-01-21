@@ -987,7 +987,7 @@ const getAuditoriaProductos = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
 
-    // CONSULTA NIVEL DIOS: Trae el detalle, el proveedor y compara con el precio anterior del mismo item
+    // CAMBIO CLAVE: Comparamos dc2.id < dc.id para capturar la secuencia real
     const query = `
       SELECT 
         dc.id,
@@ -999,28 +999,34 @@ const getAuditoriaProductos = async (req, res) => {
         (dc.cantidad * dc.precio_compra) as inversion_total,
         c.fecha as fecha_compra,
         p.precio_venta as precio_venta_actual,
-        -- Buscamos el precio de la compra anterior para calcular la inflación del ítem
-        (SELECT dc2.precio_compra FROM detalle_compras dc2 
-         JOIN compras c2 ON dc2.compra_id = c2.id 
-         WHERE dc2.producto_id = p.id AND c2.fecha < c.fecha 
-         ORDER BY c2.fecha DESC LIMIT 1) as precio_anterior
+        -- Buscamos el registro anterior EXACTO por ID
+        (SELECT dc2.precio_compra 
+         FROM detalle_compras dc2 
+         WHERE dc2.producto_id = p.id AND dc2.id < dc.id 
+         ORDER BY dc2.id DESC LIMIT 1) as precio_anterior
       FROM detalle_compras dc
       JOIN compras c ON dc.compra_id = c.id
       JOIN productos p ON dc.producto_id = p.id
       JOIN proveedors prov ON c.proveedor_id = prov.id
       WHERE c.empresa_id = ?
-      ORDER BY c.fecha DESC
+      ORDER BY c.fecha DESC, dc.id DESC -- Ordenamos por carga para ver lo más reciente arriba
     `;
 
     const [rows] = await db.execute(query, [empresa_id]);
 
     const result = rows.map((r) => {
       const pPagado = parseFloat(r.precio_pagado);
-      const pAnterior = parseFloat(r.precio_anterior || pPagado);
-      const variacion = ((pPagado - pAnterior) / pAnterior) * 100;
+      // Si no hay precio anterior, la variación es 0.
+      // Si hay, calculamos la inflación real del ítem.
+      const pAnterior = r.precio_anterior
+        ? parseFloat(r.precio_anterior)
+        : pPagado;
+      const variacion =
+        pAnterior === 0 ? 0 : ((pPagado - pAnterior) / pAnterior) * 100;
 
       const pVenta = parseFloat(r.precio_venta_actual);
-      const margen = ((pVenta - pPagado) / pVenta) * 100;
+      // Margen proyectado sobre costo de esta compra específica
+      const margen = pVenta === 0 ? 0 : ((pVenta - pPagado) / pVenta) * 100;
 
       return {
         ...r,
