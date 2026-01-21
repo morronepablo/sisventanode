@@ -31,7 +31,7 @@ const getFullChartData = async (req, res) => {
    JOIN ventas v ON dv.venta_id = v.id
    JOIN productos p ON dv.producto_id = p.id
    JOIN categorias c ON p.categoria_id = c.id
-   WHERE v.empresa_id = ? AND YEAR(v.fecha) = ? -- 👈 Eliminamos filtro de caja_id
+   WHERE v.empresa_id = ? AND YEAR(v.fecha) = ?
    GROUP BY mes, categoria
    ORDER BY mes ASC`,
       [empresa_id, currentYear],
@@ -40,13 +40,10 @@ const getFullChartData = async (req, res) => {
     // 2. 📈 COMPARATIVA DIARIA (Mes Actual vs Mes Anterior - Global y Neto)
     const [comparativaDiaria] = await db.execute(
       `SELECT d.dia,
-    -- Cálculo NETO para el Mes Actual (Ventas - Devoluciones de toda la empresa)
     (
       IFNULL((SELECT SUM(precio_total) FROM ventas WHERE empresa_id = ? AND DAY(fecha) = d.dia AND MONTH(fecha) = ? AND YEAR(fecha) = ?), 0) -
       IFNULL((SELECT SUM(precio_total) FROM devoluciones WHERE empresa_id = ? AND DAY(fecha) = d.dia AND MONTH(fecha) = ? AND YEAR(fecha) = ?), 0)
     ) as actual,
-    
-    -- Cálculo NETO para el Mes Anterior (Ventas - Devoluciones de toda la empresa)
     (
       IFNULL((SELECT SUM(precio_total) FROM ventas WHERE empresa_id = ? AND DAY(fecha) = d.dia AND MONTH(fecha) = ? AND YEAR(fecha) = ?), 0) -
       IFNULL((SELECT SUM(precio_total) FROM devoluciones WHERE empresa_id = ? AND DAY(fecha) = d.dia AND MONTH(fecha) = ? AND YEAR(fecha) = ?), 0)
@@ -59,14 +56,12 @@ const getFullChartData = async (req, res) => {
     UNION SELECT 25 UNION SELECT 26 UNION SELECT 27 UNION SELECT 28 UNION SELECT 29 UNION SELECT 30 UNION SELECT 31
   ) d`,
       [
-        // Parámetros para 'actual'
         empresa_id,
         selectedMonth,
         currentYear,
         empresa_id,
         selectedMonth,
         currentYear,
-        // Parámetros para 'anterior'
         empresa_id,
         prevMonth,
         prevMonthYear,
@@ -79,15 +74,10 @@ const getFullChartData = async (req, res) => {
     // 3. ⚖️ BALANCE MENSUAL ANUAL (Sincronizado al 100% con Informes)
     const [balanceMensual] = await db.execute(
       `SELECT m.mes,
-    -- Ventas Netas (Ventas - Devoluciones)
     ( (SELECT IFNULL(SUM(precio_total),0) FROM ventas WHERE empresa_id = ? AND MONTH(fecha) = m.mes AND YEAR(fecha) = ?) - 
       (SELECT IFNULL(SUM(precio_total),0) FROM devoluciones WHERE empresa_id = ? AND MONTH(fecha) = m.mes AND YEAR(fecha) = ?) ) as v_total,
-    
     (SELECT IFNULL(SUM(precio_total),0) FROM compras WHERE empresa_id = ? AND MONTH(fecha) = m.mes AND YEAR(fecha) = ?) as c_total,
-    
     (SELECT IFNULL(SUM(monto),0) FROM gastos WHERE empresa_id = ? AND MONTH(fecha) = m.mes AND YEAR(fecha) = ?) as g_total,
-    
-    -- GANANCIA BRUTA REAL: (Ventas - Costo Ventas) - (Devoluciones - Costo Devoluciones)
     (
       IFNULL((SELECT SUM(v2.precio_total - (SELECT SUM(dv.cantidad * dv.precio_compra) FROM detalle_ventas dv WHERE dv.venta_id = v2.id)) 
        FROM ventas v2 WHERE v2.empresa_id = ? AND MONTH(v2.fecha) = m.mes AND YEAR(v2.fecha) = ?), 0)
@@ -95,21 +85,20 @@ const getFullChartData = async (req, res) => {
       IFNULL((SELECT SUM(d2.precio_total - (SELECT SUM(dd.cantidad * p.precio_compra) FROM detalle_devoluciones dd JOIN productos p ON dd.producto_id = p.id WHERE dd.devolucion_id = d2.id)) 
        FROM devoluciones d2 WHERE d2.empresa_id = ? AND MONTH(d2.fecha) = m.mes AND YEAR(d2.fecha) = ?), 0)
     ) as ganancia_bruta
-
   FROM (SELECT 1 as mes UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7 UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11 UNION SELECT 12) m`,
       [
         empresa_id,
         currentYear,
         empresa_id,
-        currentYear, // v_total
+        currentYear,
         empresa_id,
-        currentYear, // c_total
+        currentYear,
         empresa_id,
-        currentYear, // g_total
+        currentYear,
         empresa_id,
-        currentYear, // Ganancia Ventas
+        currentYear,
         empresa_id,
-        currentYear, // Ganancia Devoluciones
+        currentYear,
       ],
     );
 
@@ -117,47 +106,50 @@ const getFullChartData = async (req, res) => {
     const [catVentas] = await db.execute(
       `SELECT 
       c.nombre, 
-      -- Fórmula de Prorrateo: asegura que si hubo un 3x2, el total sea el real cobrado
-      SUM( 
-        (v.precio_total / (SELECT SUM(dv2.cantidad * dv2.precio_venta) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id)) * 
-        (dv.cantidad * dv.precio_venta) 
-      ) as total
+      SUM( (v.precio_total / (SELECT SUM(dv2.cantidad * dv2.precio_venta) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id)) * (dv.cantidad * dv.precio_venta) ) as total
    FROM detalle_ventas dv 
    JOIN ventas v ON dv.venta_id = v.id
    JOIN productos p ON dv.producto_id = p.id 
    JOIN categorias c ON p.categoria_id = c.id
-   WHERE v.empresa_id = ? 
-     AND MONTH(v.fecha) = ? 
-     AND YEAR(v.fecha) = ? -- 👈 Eliminamos filtro de caja_id
+   WHERE v.empresa_id = ? AND MONTH(v.fecha) = ? AND YEAR(v.fecha) = ?
    GROUP BY c.id`,
       [empresa_id, selectedMonth, currentYear],
     );
 
     // 5. 💸 ESTRUCTURA DE GASTOS (Visión Global del Mes)
     const [catGastos] = await db.execute(
-      `SELECT 
-      cg.nombre, 
-      SUM(g.monto) as total
+      `SELECT cg.nombre, SUM(g.monto) as total
    FROM gastos g 
    JOIN categorias_gastos cg ON g.categoria_gasto_id = cg.id
-   WHERE g.empresa_id = ? 
-     AND MONTH(g.fecha) = ? 
-     AND YEAR(g.fecha) = ? -- 👈 Eliminamos filtro de caja_id
+   WHERE g.empresa_id = ? AND MONTH(g.fecha) = ? AND YEAR(g.fecha) = ?
    GROUP BY cg.id 
    ORDER BY total DESC`,
       [empresa_id, selectedMonth, currentYear],
     );
 
-    // 6. ⚔️ GUERRA DE CAJAS (Neto: Ventas - Devoluciones) ⚔️
-    // Esta consulta imita tu lógica: busca cada caja y le resta sus devoluciones
-    const [ventasPorCaja] = await db.execute(
+    // =========================================================================
+    // ⚔️ REFACTOR: UNIFICACIÓN DE GUERRA DE CAJAS Y USUARIOS (SECCIONES 6 Y 8) ⚔️
+    // =========================================================================
+
+    // Obtenemos un solo set de datos con LEFT JOIN para no perder ninguna transacción
+    const [universoTransacciones] = await db.execute(
       `SELECT 
-          caja_id,
-          (
-            IFNULL((SELECT SUM(precio_total) FROM ventas WHERE caja_id = v.caja_id AND empresa_id = ? AND MONTH(fecha) = ? AND YEAR(fecha) = ?), 0) -
-            IFNULL((SELECT SUM(precio_total) FROM devoluciones WHERE caja_id = v.caja_id AND empresa_id = ? AND MONTH(fecha) = ? AND YEAR(fecha) = ?), 0)
-          ) as total
-       FROM (SELECT DISTINCT caja_id FROM ventas WHERE empresa_id = ?) v`,
+          v.caja_id, 
+          u.name as usuario_nombre,
+          v.precio_total as monto
+       FROM ventas v
+       LEFT JOIN users u ON v.usuario_id = u.id
+       WHERE v.empresa_id = ? AND MONTH(v.fecha) = ? AND YEAR(v.fecha) = ?
+       
+       UNION ALL
+       
+       SELECT 
+          d.caja_id, 
+          u.name as usuario_nombre,
+          d.precio_total * -1 as monto
+       FROM devoluciones d
+       LEFT JOIN users u ON d.usuario_id = u.id
+       WHERE d.empresa_id = ? AND MONTH(d.fecha) = ? AND YEAR(d.fecha) = ?`,
       [
         empresa_id,
         selectedMonth,
@@ -165,25 +157,48 @@ const getFullChartData = async (req, res) => {
         empresa_id,
         selectedMonth,
         currentYear,
-        empresa_id,
       ],
     );
+
+    const cajasMap = {};
+    const usuariosMap = {};
+
+    universoTransacciones.forEach((t) => {
+      const monto = parseFloat(t.monto || 0);
+
+      // Procesar Cajas (Si no tiene caja_id, lo agrupamos en 'Sin Caja' para detectar errores de carga)
+      const cLabel = t.caja_id ? `Caja ${t.caja_id}` : "Admin/S-C";
+      cajasMap[cLabel] = (cajasMap[cLabel] || 0) + monto;
+
+      // Procesar Usuarios (Si el nombre es null por usuario eliminado, usamos un fallback)
+      const uLabel = t.usuario_nombre || "Usuario Desconocido";
+      usuariosMap[uLabel] = (usuariosMap[uLabel] || 0) + monto;
+    });
+
+    // Formateamos para mantener compatibilidad total con el Frontend
+    const ventasPorCaja = Object.entries(cajasMap)
+      .map(([label, total]) => ({
+        caja_id: label.replace("Caja ", ""),
+        total: total,
+      }))
+      .sort((a, b) => a.caja_id - b.caja_id);
+
+    const ventasPorUsuario = Object.entries(usuariosMap)
+      .map(([usuario, total]) => ({
+        usuario: usuario,
+        total: total,
+      }))
+      .sort((a, b) => b.total - a.total);
+
+    // =========================================================================
 
     // 7. 🕒 VENTAS POR HORA (Visión Global de Flujo de Clientes - Neto)
     const [ventasPorHora] = await db.execute(
       `SELECT HOUR(created_at) as hora, SUM(total) as total
    FROM (
-       -- Ventas de todas las cajas
-       SELECT created_at, precio_total as total 
-       FROM ventas 
-       WHERE empresa_id = ? AND MONTH(fecha) = ? AND YEAR(fecha) = ?
-       
+       SELECT created_at, precio_total as total FROM ventas WHERE empresa_id = ? AND MONTH(fecha) = ? AND YEAR(fecha) = ?
        UNION ALL
-       
-       -- Devoluciones de todas las cajas (restan flujo)
-       SELECT created_at, precio_total * -1 as total 
-       FROM devoluciones 
-       WHERE empresa_id = ? AND MONTH(fecha) = ? AND YEAR(fecha) = ?
+       SELECT created_at, precio_total * -1 as total FROM devoluciones WHERE empresa_id = ? AND MONTH(fecha) = ? AND YEAR(fecha) = ?
    ) t 
    GROUP BY hora 
    ORDER BY hora ASC`,
@@ -197,46 +212,19 @@ const getFullChartData = async (req, res) => {
       ],
     );
 
-    // 8. ⚔️ GUERRA DE USUARIOS (Venta Neta por Persona) ⚔️
-    // Usamos la tabla 'users' y columna 'name' como en tu DB
-    const [ventasPorUsuario] = await db.execute(
-      `SELECT 
-          u.name as usuario,
-          (
-            IFNULL((SELECT SUM(precio_total) FROM ventas WHERE usuario_id = u.id AND empresa_id = ? AND MONTH(fecha) = ? AND YEAR(fecha) = ?), 0) -
-            IFNULL((SELECT SUM(precio_total) FROM devoluciones WHERE usuario_id = u.id AND empresa_id = ? AND MONTH(fecha) = ? AND YEAR(fecha) = ?), 0)
-          ) as total
-       FROM users u 
-       WHERE u.empresa_id = ?
-       HAVING total > 0
-       ORDER BY total DESC`,
-      [
-        empresa_id,
-        selectedMonth,
-        currentYear,
-        empresa_id,
-        selectedMonth,
-        currentYear,
-        empresa_id,
-      ],
-    );
-
-    // 9. Lista de Categorías para el gráfico de barras apiladas
+    // 9. Lista de Categorías
     const [cats] = await db.execute(
       "SELECT nombre FROM categorias WHERE empresa_id = ?",
       [empresa_id],
     );
 
-    // 10. ⏱️ RANKING DE EFICIENCIA (Cajero Pro)
-    // Calculamos el tiempo entre la primera y la última venta de cada día para promediar la "jornada activa"
+    // 10. ⏱️ RANKING DE EFICIENCIA
     const [rankingEficiencia] = await db.execute(
       `SELECT 
     u.name as usuario,
     SUM(v.precio_total) as facturacion,
     COUNT(v.id) as total_tickets,
-    -- Sumamos todos los items vendidos (directos + componentes de combos)
     SUM((SELECT SUM(cantidad) FROM detalle_ventas WHERE venta_id = v.id)) as total_items,
-    -- Calculamos la densidad: Items por ticket
     AVG((SELECT SUM(cantidad) FROM detalle_ventas WHERE venta_id = v.id)) as items_por_ticket
    FROM ventas v
    JOIN users u ON v.usuario_id = u.id
@@ -254,7 +242,7 @@ const getFullChartData = async (req, res) => {
       catGastos,
       ventasPorCaja,
       ventasPorHora,
-      ventasPorUsuario, // 👈 Enviamos los datos al Frontend
+      ventasPorUsuario,
       rankingEficiencia,
       categoriasLista: cats.map((c) => c.nombre),
     });
