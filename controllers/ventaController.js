@@ -2158,7 +2158,7 @@ const getRentabilidadReal = async (req, res) => {
     const currentMonth = new Date().getMonth() + 1;
     const currentYear = new Date().getFullYear();
 
-    // 1. Obtener comisiones bancarias configuradas
+    // 1. Obtener comisiones bancarias
     const [comisiones] = await db.execute(
       "SELECT metodo, comision_porcentaje FROM config_comisiones_pagos WHERE empresa_id = ?",
       [empresa_id],
@@ -2168,72 +2168,74 @@ const getRentabilidadReal = async (req, res) => {
       (c) => (dCom[c.metodo] = parseFloat(c.comision_porcentaje) / 100),
     );
 
-    // 2. Obtener VENTAS y COSTO DE MERCADERÍA del mes
+    // 2. Obtener VENTAS y su COSTO
     const [ventas] = await db.execute(
-      `
-      SELECT 
+      `SELECT 
         v.id, v.precio_total, v.tarjeta, v.mercadopago, v.transferencia,
-        (SELECT IFNULL(SUM(dv.cantidad * dv.precio_compra), 0) FROM detalle_ventas dv WHERE dv.venta_id = v.id) as costo_vta
+        (SELECT IFNULL(SUM(dv.cantidad * p.precio_compra), 0) FROM detalle_ventas dv JOIN productos p ON dv.producto_id = p.id WHERE dv.venta_id = v.id) as costo_vta
       FROM ventas v
-      WHERE v.empresa_id = ? AND MONTH(v.fecha) = ? AND YEAR(v.fecha) = ?
-    `,
+      WHERE v.empresa_id = ? AND MONTH(v.fecha) = ? AND YEAR(v.fecha) = ?`,
       [empresa_id, currentMonth, currentYear],
     );
 
-    // 3. Obtener DEVOLUCIONES del mes
+    // 3. 🚀 Obtener DEVOLUCIONES y su COSTO (Clave para la sincronía) 🚀
     const [devoluciones] = await db.execute(
-      `
-      SELECT IFNULL(SUM(precio_total), 0) as total_dev
-      FROM devoluciones 
-      WHERE empresa_id = ? AND MONTH(fecha) = ? AND YEAR(fecha) = ?
-    `,
+      `SELECT 
+        IFNULL(SUM(d.precio_total), 0) as total_dev,
+        IFNULL(SUM((SELECT SUM(dd.cantidad * p.precio_compra) FROM detalle_devoluciones dd JOIN productos p ON dd.producto_id = p.id WHERE dd.devolucion_id = d.id)), 0) as costo_dev
+      FROM devoluciones d
+      WHERE d.empresa_id = ? AND MONTH(d.fecha) = ? AND YEAR(d.fecha) = ?`,
       [empresa_id, currentMonth, currentYear],
     );
 
-    // 4. Obtener GASTOS OPERATIVOS del mes
+    // 4. Gastos
     const [gastos] = await db.execute(
-      `
-      SELECT IFNULL(SUM(monto), 0) as total_gas 
-      FROM gastos 
-      WHERE empresa_id = ? AND MONTH(fecha) = ? AND YEAR(fecha) = ?
-    `,
+      `SELECT IFNULL(SUM(monto), 0) as total_gas FROM gastos WHERE empresa_id = ? AND MONTH(fecha) = ? AND YEAR(fecha) = ?`,
       [empresa_id, currentMonth, currentYear],
     );
 
-    const totalDevoluciones = parseFloat(devoluciones[0].total_dev || 0);
+    const totalDevolucionesMonto = parseFloat(devoluciones[0].total_dev || 0);
+    const totalDevolucionesCosto = parseFloat(devoluciones[0].costo_dev || 0);
     const totalGastosMes = parseFloat(gastos[0].total_gas || 0);
 
     let brutoVentas = 0;
-    let costoMercaderiaTotal = 0;
+    let costoMercaderiaVentas = 0;
     let comisionesTotales = 0;
 
     ventas.forEach((v) => {
       brutoVentas += parseFloat(v.precio_total);
-      costoMercaderiaTotal += parseFloat(v.costo_vta);
+      costoMercaderiaVentas += parseFloat(v.costo_vta);
 
-      // Cálculo de mordida de pasarelas
       const mordidaTarjeta = parseFloat(v.tarjeta || 0) * (dCom.tarjeta || 0);
       const mordidaMP =
         parseFloat(v.mercadopago || 0) * (dCom.mercadopago || 0);
       const mordidaTransf =
         parseFloat(v.transferencia || 0) * (dCom.transferencia || 0);
-
       comisionesTotales += mordidaTarjeta + mordidaMP + mordidaTransf;
     });
 
-    // --- FÓRMULA DE GANANCIA NETA REAL ---
-    const facturacionLimpia = brutoVentas - totalDevoluciones;
-    const gananciaBruta = facturacionLimpia - costoMercaderiaTotal;
+    // --- 🚀 LA FÓRMULA DE LA VERDAD (Sincronizada con Dashboard) 🚀 ---
+
+    // Facturación Neta = Total Ventas - Total Devoluciones
+    const facturacionLimpia = brutoVentas - totalDevolucionesMonto;
+
+    // Costo Mercadería Real = Costo de lo vendido - Costo de lo devuelto
+    const CMV_Real = costoMercaderiaVentas - totalDevolucionesCosto;
+
+    // Ganancia Bruta = Lo que cobré neto - Lo que me costó lo que realmente se llevaron
+    const gananciaBruta = facturacionLimpia - CMV_Real;
+
+    // Ganancia Neta Final
     const gananciaNetaReal = gananciaBruta - comisionesTotales - totalGastosMes;
 
     res.json({
       success: true,
       metricas: {
-        ventas_brutas: facturacionLimpia.toFixed(2),
-        costo_mercaderia: costoMercaderiaTotal.toFixed(2),
-        comisiones_bancarias: comisionesTotales.toFixed(2),
-        gastos_operativos: totalGastosMes.toFixed(2),
-        ganancia_neta_real: gananciaNetaReal.toFixed(2),
+        ventas_brutas: facturacionLimpia,
+        costo_mercaderia: CMV_Real,
+        comisiones_bancarias: comisionesTotales,
+        gastos_operativos: totalGastosMes,
+        ganancia_neta_real: gananciaNetaReal,
         margen_limpio_porcentaje:
           facturacionLimpia > 0
             ? ((gananciaNetaReal / facturacionLimpia) * 100).toFixed(2)
@@ -2371,103 +2373,6 @@ const getVentasSummary = async (req, res) => {
     res.status(500).json({ total: 0, totalAnio: 0 });
   }
 };
-
-// const getVentasDashboard = async (req, res) => {
-//   try {
-//     const empresa_id = req.user.empresa_id;
-//     // Quitamos la dependencia de MY_CAJA para los totales globales
-
-//     const options = {
-//       timeZone: "America/Argentina/Buenos_Aires",
-//       year: "numeric",
-//       month: "numeric",
-//       day: "numeric",
-//     };
-//     const todayStr = new Intl.DateTimeFormat("en-CA", options).format(
-//       new Date(),
-//     );
-//     const currentMonth = new Date().getMonth() + 1;
-//     const currentYear = new Date().getFullYear();
-
-//     // 1. VENTAS NETAS TOTALES (De TODAS las cajas de la empresa)
-//     const [v] = await db.execute(
-//       `SELECT
-//         IFNULL(SUM(CASE WHEN DATE(fecha) = ? THEN precio_total ELSE 0 END), 0) as dia,
-//         IFNULL(SUM(CASE WHEN MONTH(fecha) = ? AND YEAR(fecha) = ? THEN precio_total ELSE 0 END), 0) as mes,
-//         IFNULL(SUM(CASE WHEN YEAR(fecha) = ? THEN precio_total ELSE 0 END), 0) as anio
-//       FROM ventas WHERE empresa_id = ?`, // 👈 Quitamos filtro de caja_id
-//       [todayStr, currentMonth, currentYear, currentYear, empresa_id],
-//     );
-
-//     const [d] = await db.execute(
-//       `SELECT
-//         IFNULL(SUM(CASE WHEN DATE(fecha) = ? THEN precio_total ELSE 0 END), 0) as dia,
-//         IFNULL(SUM(CASE WHEN MONTH(fecha) = ? AND YEAR(fecha) = ? THEN precio_total ELSE 0 END), 0) as mes,
-//         IFNULL(SUM(CASE WHEN YEAR(fecha) = ? THEN precio_total ELSE 0 END), 0) as anio
-//       FROM devoluciones WHERE empresa_id = ?`, // 👈 Quitamos filtro de caja_id
-//       [todayStr, currentMonth, currentYear, currentYear, empresa_id],
-//     );
-
-//     // 2. GANANCIA NETA REAL TOTAL (De TODAS las cajas)
-//     const [gReal] = await db.execute(
-//       `SELECT
-//         IFNULL(SUM(CASE WHEN DATE(fecha) = ? THEN (precio_total - costo_total) ELSE 0 END), 0) as dia,
-//         IFNULL(SUM(CASE WHEN MONTH(fecha) = ? AND YEAR(fecha) = ? THEN (precio_total - costo_total) ELSE 0 END), 0) as mes,
-//         IFNULL(SUM(CASE WHEN YEAR(fecha) = ? THEN (precio_total - costo_total) ELSE 0 END), 0) as anio
-//        FROM (
-//          SELECT v.fecha, v.precio_total, v.empresa_id,
-//                 (SELECT IFNULL(SUM(dv.cantidad * dv.precio_compra), 0) FROM detalle_ventas dv WHERE dv.venta_id = v.id) as costo_total
-//          FROM ventas v
-//        ) t WHERE empresa_id = ?`, // 👈 Quitamos filtro de caja_id
-//       [todayStr, currentMonth, currentYear, currentYear, empresa_id],
-//     );
-
-//     // 3. GASTOS TOTALES (De TODAS las cajas)
-//     const [gas] = await db.execute(
-//       `SELECT
-//         IFNULL(SUM(CASE WHEN DATE(fecha) = ? THEN monto ELSE 0 END), 0) as dia,
-//         IFNULL(SUM(CASE WHEN MONTH(fecha) = ? AND YEAR(fecha) = ? THEN monto ELSE 0 END), 0) as mes,
-//         IFNULL(SUM(CASE WHEN YEAR(fecha) = ? THEN monto ELSE 0 END), 0) as anio
-//       FROM gastos WHERE empresa_id = ?`, // 👈 Quitamos filtro de caja_id
-//       [todayStr, currentMonth, currentYear, currentYear, empresa_id],
-//     );
-
-//     // 4. CONTEOS GENERALES
-//     const [counts] = await db.execute(`
-//       SELECT
-//         (SELECT COUNT(*) FROM productos WHERE empresa_id = ${empresa_id}) as productos,
-//         (SELECT COUNT(*) FROM productos WHERE empresa_id = ${empresa_id} AND stock <= stock_minimo) as bajoStock,
-//         (SELECT COUNT(*) FROM clientes WHERE empresa_id = ${empresa_id}) as clientes,
-//         (SELECT COUNT(*) FROM ventas WHERE empresa_id = ${empresa_id}) as ventasCount,
-//         (SELECT IFNULL(SUM(CASE WHEN tipo = 'deuda' THEN importe ELSE -importe END), 0) FROM compras_cta_cte WHERE empresa_id = ${empresa_id}) as deuda_gral
-//     `);
-
-//     // Top Productos Globales (Para que coincida con la visión general)
-//     const [top] = await db.execute(
-//       `SELECT p.nombre, SUM(dv.cantidad) as veces_vendido
-//        FROM detalle_ventas dv JOIN ventas v ON dv.venta_id = v.id JOIN productos p ON dv.producto_id = p.id
-//        WHERE v.empresa_id = ? GROUP BY p.id ORDER BY veces_vendido DESC LIMIT 10`,
-//       [empresa_id],
-//     );
-
-//     res.json({
-//       productosBajoStock: counts[0].bajoStock,
-//       ventas_dia: Math.max(parseFloat(v[0].dia) - parseFloat(d[0].dia), 0),
-//       ventas_mes: Math.max(parseFloat(v[0].mes) - parseFloat(d[0].mes), 0),
-//       ventas_anio: Math.max(parseFloat(v[0].anio) - parseFloat(d[0].anio), 0),
-//       devoluciones_dia: parseFloat(d[0].dia),
-//       devoluciones_mes: parseFloat(d[0].mes),
-//       devoluciones_anio: parseFloat(d[0].anio),
-//       ganancia_dia: parseFloat(gReal[0].dia) - parseFloat(gas[0].dia),
-//       ganancia_mes: parseFloat(gReal[0].mes) - parseFloat(gas[0].mes),
-//       ganancia_anio: parseFloat(gReal[0].anio) - parseFloat(gas[0].anio),
-//       deuda_general: parseFloat(counts[0].deuda_gral),
-//       topProductos: top,
-//     });
-//   } catch (error) {
-//     res.status(500).json({ error: error.message });
-//   }
-// };
 
 const getVentasDashboard = async (req, res) => {
   try {
