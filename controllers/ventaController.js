@@ -2372,10 +2372,106 @@ const getVentasSummary = async (req, res) => {
   }
 };
 
+// const getVentasDashboard = async (req, res) => {
+//   try {
+//     const empresa_id = req.user.empresa_id;
+//     // Quitamos la dependencia de MY_CAJA para los totales globales
+
+//     const options = {
+//       timeZone: "America/Argentina/Buenos_Aires",
+//       year: "numeric",
+//       month: "numeric",
+//       day: "numeric",
+//     };
+//     const todayStr = new Intl.DateTimeFormat("en-CA", options).format(
+//       new Date(),
+//     );
+//     const currentMonth = new Date().getMonth() + 1;
+//     const currentYear = new Date().getFullYear();
+
+//     // 1. VENTAS NETAS TOTALES (De TODAS las cajas de la empresa)
+//     const [v] = await db.execute(
+//       `SELECT
+//         IFNULL(SUM(CASE WHEN DATE(fecha) = ? THEN precio_total ELSE 0 END), 0) as dia,
+//         IFNULL(SUM(CASE WHEN MONTH(fecha) = ? AND YEAR(fecha) = ? THEN precio_total ELSE 0 END), 0) as mes,
+//         IFNULL(SUM(CASE WHEN YEAR(fecha) = ? THEN precio_total ELSE 0 END), 0) as anio
+//       FROM ventas WHERE empresa_id = ?`, // 👈 Quitamos filtro de caja_id
+//       [todayStr, currentMonth, currentYear, currentYear, empresa_id],
+//     );
+
+//     const [d] = await db.execute(
+//       `SELECT
+//         IFNULL(SUM(CASE WHEN DATE(fecha) = ? THEN precio_total ELSE 0 END), 0) as dia,
+//         IFNULL(SUM(CASE WHEN MONTH(fecha) = ? AND YEAR(fecha) = ? THEN precio_total ELSE 0 END), 0) as mes,
+//         IFNULL(SUM(CASE WHEN YEAR(fecha) = ? THEN precio_total ELSE 0 END), 0) as anio
+//       FROM devoluciones WHERE empresa_id = ?`, // 👈 Quitamos filtro de caja_id
+//       [todayStr, currentMonth, currentYear, currentYear, empresa_id],
+//     );
+
+//     // 2. GANANCIA NETA REAL TOTAL (De TODAS las cajas)
+//     const [gReal] = await db.execute(
+//       `SELECT
+//         IFNULL(SUM(CASE WHEN DATE(fecha) = ? THEN (precio_total - costo_total) ELSE 0 END), 0) as dia,
+//         IFNULL(SUM(CASE WHEN MONTH(fecha) = ? AND YEAR(fecha) = ? THEN (precio_total - costo_total) ELSE 0 END), 0) as mes,
+//         IFNULL(SUM(CASE WHEN YEAR(fecha) = ? THEN (precio_total - costo_total) ELSE 0 END), 0) as anio
+//        FROM (
+//          SELECT v.fecha, v.precio_total, v.empresa_id,
+//                 (SELECT IFNULL(SUM(dv.cantidad * dv.precio_compra), 0) FROM detalle_ventas dv WHERE dv.venta_id = v.id) as costo_total
+//          FROM ventas v
+//        ) t WHERE empresa_id = ?`, // 👈 Quitamos filtro de caja_id
+//       [todayStr, currentMonth, currentYear, currentYear, empresa_id],
+//     );
+
+//     // 3. GASTOS TOTALES (De TODAS las cajas)
+//     const [gas] = await db.execute(
+//       `SELECT
+//         IFNULL(SUM(CASE WHEN DATE(fecha) = ? THEN monto ELSE 0 END), 0) as dia,
+//         IFNULL(SUM(CASE WHEN MONTH(fecha) = ? AND YEAR(fecha) = ? THEN monto ELSE 0 END), 0) as mes,
+//         IFNULL(SUM(CASE WHEN YEAR(fecha) = ? THEN monto ELSE 0 END), 0) as anio
+//       FROM gastos WHERE empresa_id = ?`, // 👈 Quitamos filtro de caja_id
+//       [todayStr, currentMonth, currentYear, currentYear, empresa_id],
+//     );
+
+//     // 4. CONTEOS GENERALES
+//     const [counts] = await db.execute(`
+//       SELECT
+//         (SELECT COUNT(*) FROM productos WHERE empresa_id = ${empresa_id}) as productos,
+//         (SELECT COUNT(*) FROM productos WHERE empresa_id = ${empresa_id} AND stock <= stock_minimo) as bajoStock,
+//         (SELECT COUNT(*) FROM clientes WHERE empresa_id = ${empresa_id}) as clientes,
+//         (SELECT COUNT(*) FROM ventas WHERE empresa_id = ${empresa_id}) as ventasCount,
+//         (SELECT IFNULL(SUM(CASE WHEN tipo = 'deuda' THEN importe ELSE -importe END), 0) FROM compras_cta_cte WHERE empresa_id = ${empresa_id}) as deuda_gral
+//     `);
+
+//     // Top Productos Globales (Para que coincida con la visión general)
+//     const [top] = await db.execute(
+//       `SELECT p.nombre, SUM(dv.cantidad) as veces_vendido
+//        FROM detalle_ventas dv JOIN ventas v ON dv.venta_id = v.id JOIN productos p ON dv.producto_id = p.id
+//        WHERE v.empresa_id = ? GROUP BY p.id ORDER BY veces_vendido DESC LIMIT 10`,
+//       [empresa_id],
+//     );
+
+//     res.json({
+//       productosBajoStock: counts[0].bajoStock,
+//       ventas_dia: Math.max(parseFloat(v[0].dia) - parseFloat(d[0].dia), 0),
+//       ventas_mes: Math.max(parseFloat(v[0].mes) - parseFloat(d[0].mes), 0),
+//       ventas_anio: Math.max(parseFloat(v[0].anio) - parseFloat(d[0].anio), 0),
+//       devoluciones_dia: parseFloat(d[0].dia),
+//       devoluciones_mes: parseFloat(d[0].mes),
+//       devoluciones_anio: parseFloat(d[0].anio),
+//       ganancia_dia: parseFloat(gReal[0].dia) - parseFloat(gas[0].dia),
+//       ganancia_mes: parseFloat(gReal[0].mes) - parseFloat(gas[0].mes),
+//       ganancia_anio: parseFloat(gReal[0].anio) - parseFloat(gas[0].anio),
+//       deuda_general: parseFloat(counts[0].deuda_gral),
+//       topProductos: top,
+//     });
+//   } catch (error) {
+//     res.status(500).json({ error: error.message });
+//   }
+// };
+
 const getVentasDashboard = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
-    // Quitamos la dependencia de MY_CAJA para los totales globales
 
     const options = {
       timeZone: "America/Argentina/Buenos_Aires",
@@ -2389,66 +2485,94 @@ const getVentasDashboard = async (req, res) => {
     const currentMonth = new Date().getMonth() + 1;
     const currentYear = new Date().getFullYear();
 
-    // 1. VENTAS NETAS TOTALES (De TODAS las cajas de la empresa)
+    // 1. VENTAS BRUTAS (Para el cálculo de volumen)
     const [v] = await db.execute(
       `SELECT 
         IFNULL(SUM(CASE WHEN DATE(fecha) = ? THEN precio_total ELSE 0 END), 0) as dia,
         IFNULL(SUM(CASE WHEN MONTH(fecha) = ? AND YEAR(fecha) = ? THEN precio_total ELSE 0 END), 0) as mes,
         IFNULL(SUM(CASE WHEN YEAR(fecha) = ? THEN precio_total ELSE 0 END), 0) as anio
-      FROM ventas WHERE empresa_id = ?`, // 👈 Quitamos filtro de caja_id
+      FROM ventas WHERE empresa_id = ?`,
       [todayStr, currentMonth, currentYear, currentYear, empresa_id],
     );
 
+    // 2. DEVOLUCIONES (Monto total devuelto)
     const [d] = await db.execute(
       `SELECT 
         IFNULL(SUM(CASE WHEN DATE(fecha) = ? THEN precio_total ELSE 0 END), 0) as dia,
         IFNULL(SUM(CASE WHEN MONTH(fecha) = ? AND YEAR(fecha) = ? THEN precio_total ELSE 0 END), 0) as mes,
         IFNULL(SUM(CASE WHEN YEAR(fecha) = ? THEN precio_total ELSE 0 END), 0) as anio
-      FROM devoluciones WHERE empresa_id = ?`, // 👈 Quitamos filtro de caja_id
+      FROM devoluciones WHERE empresa_id = ?`,
       [todayStr, currentMonth, currentYear, currentYear, empresa_id],
     );
 
-    // 2. GANANCIA NETA REAL TOTAL (De TODAS las cajas)
-    const [gReal] = await db.execute(
+    // 3. MARGEN DE VENTAS (Precio Venta - Costo Reposición)
+    const [gVentas] = await db.execute(
       `SELECT 
         IFNULL(SUM(CASE WHEN DATE(fecha) = ? THEN (precio_total - costo_total) ELSE 0 END), 0) as dia,
         IFNULL(SUM(CASE WHEN MONTH(fecha) = ? AND YEAR(fecha) = ? THEN (precio_total - costo_total) ELSE 0 END), 0) as mes,
         IFNULL(SUM(CASE WHEN YEAR(fecha) = ? THEN (precio_total - costo_total) ELSE 0 END), 0) as anio
        FROM (
          SELECT v.fecha, v.precio_total, v.empresa_id,
-                (SELECT IFNULL(SUM(dv.cantidad * dv.precio_compra), 0) FROM detalle_ventas dv WHERE dv.venta_id = v.id) as costo_total
+                (SELECT IFNULL(SUM(dv.cantidad * p.precio_compra), 0) FROM detalle_ventas dv JOIN productos p ON dv.producto_id = p.id WHERE dv.venta_id = v.id) as costo_total
          FROM ventas v
-       ) t WHERE empresa_id = ?`, // 👈 Quitamos filtro de caja_id
+       ) t WHERE empresa_id = ?`,
       [todayStr, currentMonth, currentYear, currentYear, empresa_id],
     );
 
-    // 3. GASTOS TOTALES (De TODAS las cajas)
+    // 4. 🚀 MARGEN DE DEVOLUCIONES (Lo que hay que restar de la ganancia) 🚀
+    const [gDevoluciones] = await db.execute(
+      `SELECT 
+        IFNULL(SUM(CASE WHEN DATE(fecha) = ? THEN (precio_total - costo_total) ELSE 0 END), 0) as dia,
+        IFNULL(SUM(CASE WHEN MONTH(fecha) = ? AND YEAR(fecha) = ? THEN (precio_total - costo_total) ELSE 0 END), 0) as mes,
+        IFNULL(SUM(CASE WHEN YEAR(fecha) = ? THEN (precio_total - costo_total) ELSE 0 END), 0) as anio
+       FROM (
+         SELECT d.fecha, d.precio_total, d.empresa_id,
+                (SELECT IFNULL(SUM(dd.cantidad * p.precio_compra), 0) FROM detalle_devoluciones dd JOIN productos p ON dd.producto_id = p.id WHERE dd.devolucion_id = d.id) as costo_total
+         FROM devoluciones d
+       ) t WHERE empresa_id = ?`,
+      [todayStr, currentMonth, currentYear, currentYear, empresa_id],
+    );
+
+    // 5. GASTOS TOTALES
     const [gas] = await db.execute(
       `SELECT 
         IFNULL(SUM(CASE WHEN DATE(fecha) = ? THEN monto ELSE 0 END), 0) as dia,
         IFNULL(SUM(CASE WHEN MONTH(fecha) = ? AND YEAR(fecha) = ? THEN monto ELSE 0 END), 0) as mes,
         IFNULL(SUM(CASE WHEN YEAR(fecha) = ? THEN monto ELSE 0 END), 0) as anio
-      FROM gastos WHERE empresa_id = ?`, // 👈 Quitamos filtro de caja_id
+      FROM gastos WHERE empresa_id = ?`,
       [todayStr, currentMonth, currentYear, currentYear, empresa_id],
     );
 
-    // 4. CONTEOS GENERALES
+    // 6. CONTEOS Y TOP
     const [counts] = await db.execute(`
       SELECT 
         (SELECT COUNT(*) FROM productos WHERE empresa_id = ${empresa_id}) as productos,
         (SELECT COUNT(*) FROM productos WHERE empresa_id = ${empresa_id} AND stock <= stock_minimo) as bajoStock,
         (SELECT COUNT(*) FROM clientes WHERE empresa_id = ${empresa_id}) as clientes,
-        (SELECT COUNT(*) FROM ventas WHERE empresa_id = ${empresa_id}) as ventasCount,
         (SELECT IFNULL(SUM(CASE WHEN tipo = 'deuda' THEN importe ELSE -importe END), 0) FROM compras_cta_cte WHERE empresa_id = ${empresa_id}) as deuda_gral
     `);
 
-    // Top Productos Globales (Para que coincida con la visión general)
     const [top] = await db.execute(
       `SELECT p.nombre, SUM(dv.cantidad) as veces_vendido 
        FROM detalle_ventas dv JOIN ventas v ON dv.venta_id = v.id JOIN productos p ON dv.producto_id = p.id 
        WHERE v.empresa_id = ? GROUP BY p.id ORDER BY veces_vendido DESC LIMIT 10`,
       [empresa_id],
     );
+
+    // 🚀 LÓGICA DE CÁLCULO FINAL 🚀
+    // Ganancia Neta = (Utilidad Ventas - Utilidad Devoluciones) - Gastos
+    const ganancia_dia =
+      parseFloat(gVentas[0].dia) -
+      parseFloat(gDevoluciones[0].dia) -
+      parseFloat(gas[0].dia);
+    const ganancia_mes =
+      parseFloat(gVentas[0].mes) -
+      parseFloat(gDevoluciones[0].mes) -
+      parseFloat(gas[0].mes);
+    const ganancia_anio =
+      parseFloat(gVentas[0].anio) -
+      parseFloat(gDevoluciones[0].anio) -
+      parseFloat(gas[0].anio);
 
     res.json({
       productosBajoStock: counts[0].bajoStock,
@@ -2458,9 +2582,9 @@ const getVentasDashboard = async (req, res) => {
       devoluciones_dia: parseFloat(d[0].dia),
       devoluciones_mes: parseFloat(d[0].mes),
       devoluciones_anio: parseFloat(d[0].anio),
-      ganancia_dia: parseFloat(gReal[0].dia) - parseFloat(gas[0].dia),
-      ganancia_mes: parseFloat(gReal[0].mes) - parseFloat(gas[0].mes),
-      ganancia_anio: parseFloat(gReal[0].anio) - parseFloat(gas[0].anio),
+      ganancia_dia: ganancia_dia,
+      ganancia_mes: ganancia_mes,
+      ganancia_anio: ganancia_anio,
       deuda_general: parseFloat(counts[0].deuda_gral),
       topProductos: top,
     });

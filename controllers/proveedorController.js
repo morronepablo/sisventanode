@@ -419,47 +419,67 @@ const getRadarInflacion = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
 
-    // CONSULTA CORREGIDA
-    // Cambiamos 'contacto_nombre' por 'contacto'
-    // Aseguramos que la tabla sea 'proveedores'
+    // 🚀 QUERY REPARADA: Cálculo directo del porcentaje en el AVG
     const query = `
       SELECT 
-        prov.id as proveedor_id,
-        prov.empresa as proveedor_nombre,
-        prov.contacto, 
-        COUNT(DISTINCT p.id) as productos_analizados,
-        AVG(((dc_actual.precio_compra - dc_anterior.precio_compra) / dc_anterior.precio_compra) * 100) as inflacion_promedio,
-        MAX(c_actual.fecha) as ultima_factura
-      FROM detalle_compras dc_actual
-      JOIN compras c_actual ON dc_actual.compra_id = c_actual.id
-      JOIN productos p ON dc_actual.producto_id = p.id
-      JOIN proveedors prov ON c_actual.proveedor_id = prov.id
-      JOIN detalle_compras dc_anterior ON dc_actual.producto_id = dc_anterior.producto_id
-      JOIN compras c_anterior ON dc_anterior.compra_id = c_anterior.id AND c_anterior.proveedor_id = prov.id
-      WHERE c_actual.empresa_id = ? 
-        AND c_actual.fecha > c_anterior.fecha 
-        AND c_actual.fecha >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)
-      GROUP BY prov.id
+        prov_id as proveedor_id,
+        proveedor_nombre,
+        contacto,
+        COUNT(DISTINCT item_id) as productos_analizados,
+        -- Calculamos la inflación promedio basada en la diferencia de cada línea de factura
+        AVG((precio_esta_factura - precio_compra_anterior) / precio_compra_anterior * 100) as inflacion_promedio,
+        MAX(fecha_compra) as ultima_factura
+      FROM (
+        SELECT 
+          dc.id as item_id,
+          c.proveedor_id as prov_id,
+          pr.empresa as proveedor_nombre,
+          pr.contacto,
+          c.fecha as fecha_compra,
+          dc.precio_compra as precio_esta_factura,
+          -- Buscamos el precio anterior (Cualquier proveedor) para ese producto
+          (
+            SELECT dc2.precio_compra 
+            FROM detalle_compras dc2
+            JOIN compras c2 ON dc2.compra_id = c2.id
+            WHERE dc2.producto_id = dc.producto_id 
+              AND (c2.fecha < c.fecha OR (c2.fecha = c.fecha AND c2.id < c.id))
+              AND c2.empresa_id = ?
+            ORDER BY c2.fecha DESC, c2.id DESC
+            LIMIT 1
+          ) as precio_compra_anterior
+        FROM detalle_compras dc
+        JOIN compras c ON dc.compra_id = c.id
+        JOIN proveedors pr ON c.proveedor_id = pr.id
+        WHERE c.empresa_id = ?
+          AND c.fecha >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)
+      ) as auditoria
+      WHERE precio_compra_anterior IS NOT NULL
+        AND precio_compra_anterior > 0
+        -- 💡 Solo nos interesan las facturas donde el precio SUBIÓ
+        AND precio_esta_factura > precio_compra_anterior 
+      GROUP BY proveedor_id
       ORDER BY inflacion_promedio DESC
     `;
 
-    const [rows] = await db.execute(query, [empresa_id]);
+    // Pasamos empresa_id 2 veces para las subconsultas
+    const [rows] = await db.execute(query, [empresa_id, empresa_id]);
 
-    const result = rows.map((r) => ({
-      ...r,
-      inflacion_promedio: parseFloat(r.inflacion_promedio || 0).toFixed(2),
-      estado:
-        r.inflacion_promedio > 15
-          ? "CRÍTICO"
-          : r.inflacion_promedio > 8
-            ? "ALERTA"
-            : "ESTABLE",
-    }));
+    const result = rows.map((r) => {
+      const inflacion = parseFloat(r.inflacion_promedio || 0);
+      return {
+        ...r,
+        inflacion_promedio: inflacion.toFixed(2),
+        estado:
+          inflacion > 15 ? "CRÍTICO" : inflacion > 8 ? "ALERTA" : "ESTABLE",
+      };
+    });
 
     res.json(result);
   } catch (error) {
-    console.error("❌ ERROR RADAR INFLACION:", error);
-    res.status(500).json({ message: error.message });
+    // 🕵️‍♂️ Debug para ver el error real si persiste
+    console.error("❌ ERROR RADAR INFLACION:", error.message);
+    res.status(500).json({ message: "Error interno al calcular impacto" });
   }
 };
 
