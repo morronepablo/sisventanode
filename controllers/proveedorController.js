@@ -366,30 +366,25 @@ const getRankingProveedoresBI = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
 
-    // LÓGICA BASADA EN TU CAPTURA DE PANTALLA:
-    // 1. Tabla: 'proveedores'
-    // 2. Columna Nombre: 'empresa'
-    // 3. Vínculo: A través de la tabla compras
+    // 🚀 QUERY NIVEL DIOS: Auditoría de Inversión vs. Retorno 🚀
     const query = `
       SELECT 
         pr.id,
-        pr.empresa as proveedor, 
-        COUNT(DISTINCT v.id) as cantidad_ventas,
-        SUM(dv.cantidad * dv.precio_venta) as total_facturado,
-        SUM(dv.cantidad * dv.precio_compra) as total_costo,
-        SUM(dv.cantidad * (dv.precio_venta - dv.precio_compra)) as utilidad_neta
-      FROM detalle_ventas dv
-      JOIN ventas v ON dv.venta_id = v.id
-      JOIN productos p ON dv.producto_id = p.id
-      JOIN proveedors pr ON pr.id = (
-          SELECT c.proveedor_id 
-          FROM detalle_compras dc 
-          JOIN compras c ON dc.compra_id = c.id 
-          WHERE dc.producto_id = p.id 
-          ORDER BY c.fecha DESC LIMIT 1
-      )
-      WHERE v.empresa_id = ? 
-        AND v.fecha >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
+        pr.empresa as proveedor,
+        -- 1. Cuánta plata le dimos al proveedor
+        SUM(dc.cantidad * dc.precio_compra) as total_invertido,
+        -- 2. Cuánta plata generó esa mercadería (proyectado al precio de venta del momento)
+        SUM(dc.cantidad * p.precio_venta) as retorno_estimado,
+        -- 3. Utilidad Real (Margen que nos deja este proveedor específicamente)
+        SUM(dc.cantidad * (p.precio_venta - dc.precio_compra)) as utilidad_neta,
+        -- 4. Cuántos productos distintos le compramos
+        COUNT(DISTINCT p.id) as variedad_items
+      FROM detalle_compras dc
+      JOIN compras c ON dc.compra_id = c.id
+      JOIN productos p ON dc.producto_id = p.id
+      JOIN proveedors pr ON c.proveedor_id = pr.id
+      WHERE c.empresa_id = ? 
+        AND c.fecha >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)
       GROUP BY pr.id
       ORDER BY utilidad_neta DESC
     `;
@@ -397,28 +392,26 @@ const getRankingProveedoresBI = async (req, res) => {
     const [rows] = await db.execute(query, [empresa_id]);
 
     const ranking = rows.map((r) => {
-      const facturado = parseFloat(r.total_facturado || 0);
+      const invertido = parseFloat(r.total_invertido || 0);
       const utilidad = parseFloat(r.utilidad_neta || 0);
+      // El margen ahora es: ¿Cuánto rinde cada peso que le pongo a este proveedor?
       const margen =
-        facturado > 0 ? ((utilidad / facturado) * 100).toFixed(2) : 0;
+        invertido > 0 ? ((utilidad / invertido) * 100).toFixed(2) : 0;
 
       return {
         id: r.id,
         proveedor: r.proveedor,
-        cantidad_ventas: r.cantidad_ventas,
-        total_facturado: facturado.toFixed(2),
-        total_costo: parseFloat(r.total_costo || 0).toFixed(2),
+        total_facturado: r.retorno_estimado, // Lo que el stock de este proveedor genera
         utilidad_neta: utilidad.toFixed(2),
         margen_promedio: margen,
+        variedad: r.variedad_items,
       };
     });
 
     res.json(ranking);
   } catch (error) {
     console.error("ERROR PROVIDER BI:", error.message);
-    res
-      .status(500)
-      .json({ error: "Error al calcular rentabilidad de proveedores" });
+    res.status(500).json({ error: "Error en el motor de análisis de cartera" });
   }
 };
 
