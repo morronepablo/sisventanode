@@ -431,27 +431,42 @@ const generarInformeProductosPDF = async (req, res) => {
     // 4. Construir filas de la tabla
     let filas = "";
     let totalGral = 0;
+
     productos.forEach((p) => {
       totalGral += parseFloat(p.total);
       filas += `
         <tr>
             <td style="text-align: center; vertical-align: middle;">${p.codigo || "N/A"}</td>
             <td style="vertical-align: middle;">
-                <div style="font-weight: bold; text-transform: uppercase;">${p.nombre}</div>
-                <div style="font-size: 9px; color: #007bff;">Proveedor: ${p.proveedor_nombre}</div>
+                <div style="font-weight: bold; text-transform: uppercase; margin-bottom: 4px;">${p.nombre}</div>
+                <!-- 🛡️ BADGE DE PROVEEDOR ESTILO RETAIL -->
+                <div style="display: block; margin-top: 2px;">
+                    <span style="
+                        background-color: #e1f5fe; 
+                        color: #0288d1; 
+                        padding: 2px 8px; 
+                        border-radius: 10px; 
+                        font-size: 8px; 
+                        font-weight: bold; 
+                        border: 1px solid #b3e5fc;
+                        text-transform: uppercase;
+                        display: inline-block;
+                    ">
+                        🚛 ${p.proveedor_nombre}
+                    </span>
+                </div>
             </td>
             <td style="text-align: center; vertical-align: middle;">${p.cantidad}</td>
             <td style="text-align: center; vertical-align: middle;">${p.unidad || "Unid."}</td>
             <td style="text-align: right; vertical-align: middle;">$ ${parseFloat(
               p.costo,
             ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
-            <td style="text-align: right; vertical-align: middle; font-weight: bold;">$ ${parseFloat(
+            <td style="text-align: right; vertical-align: middle; font-weight: bold; background-color: #fcfcfc;">$ ${parseFloat(
               p.total,
             ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
         </tr>`;
     });
 
-    // 5. HTML completo del reporte con estilos ejecutivos
     const htmlContent = `
     <!DOCTYPE html>
     <html>
