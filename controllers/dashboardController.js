@@ -498,7 +498,7 @@ const getGodModeStats = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
 
-    // 📈 1. Ventas de HOY
+    // 📈 1. Ventas de HOY (Pulso Horario)
     const [ventasHoy] = await db.execute(
       `SELECT HOUR(created_at) as hora, SUM(precio_total) as total 
        FROM ventas 
@@ -507,7 +507,7 @@ const getGodModeStats = async (req, res) => {
       [empresa_id],
     );
 
-    // 📈 2. Ventas de AYER
+    // 📈 2. Ventas de AYER (Comparativa)
     const [ventasAyer] = await db.execute(
       `SELECT HOUR(created_at) as hora, SUM(precio_total) as total 
        FROM ventas 
@@ -516,21 +516,38 @@ const getGodModeStats = async (req, res) => {
       [empresa_id],
     );
 
-    // 💰 3. Anatomía Financiera (Mes Actual)
-    const [profit] = await db.execute(
+    // 💰 3. ANATOMÍA FINANCIERA REAL (Sincronizada con Devoluciones)
+    // Calculamos Ingresos Netos y Costos Netos por separado para evitar duplicados por JOIN
+    const [finanzas] = await db.execute(
       `SELECT 
-        IFNULL(SUM(v.precio_total), 0) as ingresos_brutos,
-        IFNULL(SUM(dv.cantidad * p.precio_compra), 0) as costo_mercaderia
-      FROM detalle_ventas dv
-      JOIN ventas v ON dv.venta_id = v.id
-      JOIN productos p ON dv.producto_id = p.id
-      WHERE v.empresa_id = ? 
-        AND MONTH(v.created_at) = MONTH(CURDATE()) 
-        AND YEAR(v.created_at) = YEAR(CURDATE())`,
-      [empresa_id],
+        -- A. INGRESOS NETOS: (Ventas Totales - Devoluciones Totales)
+        ((SELECT IFNULL(SUM(precio_total), 0) FROM ventas WHERE empresa_id = ? AND MONTH(created_at) = MONTH(CURDATE()) AND YEAR(created_at) = YEAR(CURDATE())) - 
+         (SELECT IFNULL(SUM(precio_total), 0) FROM devoluciones WHERE empresa_id = ? AND MONTH(created_at) = MONTH(CURDATE()) AND YEAR(created_at) = YEAR(CURDATE()))) as ingresos_brutos,
+        
+        -- B. COSTO DE MERCADERÍA NETO: (Costo de ventas - Costo de productos que volvieron por devolución)
+        ((SELECT IFNULL(SUM(dv.cantidad * p.precio_compra), 0) 
+          FROM detalle_ventas dv 
+          JOIN ventas v ON dv.venta_id = v.id 
+          JOIN productos p ON dv.producto_id = p.id 
+          WHERE v.empresa_id = ? AND MONTH(v.created_at) = MONTH(CURDATE()) AND YEAR(v.created_at) = YEAR(CURDATE())) -
+         (SELECT IFNULL(SUM(dd.cantidad * p.precio_compra), 0) 
+          FROM detalle_devoluciones dd 
+          JOIN devoluciones d ON dd.devolucion_id = d.id 
+          JOIN productos p ON dd.producto_id = p.id 
+          WHERE d.empresa_id = ? AND MONTH(d.created_at) = MONTH(CURDATE()) AND YEAR(d.created_at) = YEAR(CURDATE()))) as costo_mercaderia
+      `,
+      [empresa_id, empresa_id, empresa_id, empresa_id],
     );
 
-    // 🏆 4. Top 5 Categorías
+    // 💸 9. GASTOS REALES DEL MES (Fijos + Variables)
+    const [gastosRes] = await db.execute(
+      `SELECT IFNULL(SUM(monto), 0) as total_mensual FROM gastos 
+       WHERE empresa_id = ? AND MONTH(fecha) = MONTH(CURDATE()) AND YEAR(fecha) = YEAR(CURDATE())`,
+      [empresa_id],
+    );
+    const gastosReales = parseFloat(gastosRes[0].total_mensual);
+
+    // 🏆 4. Top 5 Categorías (Facturación Real)
     const [categorias] = await db.execute(
       `SELECT c.nombre, SUM(dv.cantidad * dv.precio_venta) as total
       FROM detalle_ventas dv
@@ -542,7 +559,7 @@ const getGodModeStats = async (req, res) => {
       [empresa_id],
     );
 
-    // 📈 5. INFLACIÓN REAL DEL LOCAL
+    // 📈 5. INFLACIÓN REAL DEL LOCAL (Variación de costos últimos 30 días)
     const [inflacion] = await db.execute(
       `SELECT IFNULL(AVG((costo_nuevo - costo_anterior) / costo_anterior) * 100, 0) as variacion
       FROM historial_precios hp
@@ -552,16 +569,21 @@ const getGodModeStats = async (req, res) => {
     );
 
     // 📦 6. ALERTAS Y PATRIMONIO ARS
-    const [alertas] = await db.execute(
-      `SELECT 
-        (SELECT COUNT(*) FROM productos WHERE empresa_id = ? AND stock <= stock_minimo) as bajo_stock,
-        (SELECT COUNT(*) FROM ventas WHERE empresa_id = ? AND DATE(created_at) = CURDATE()) as tickets_hoy,
-        (SELECT IFNULL(SUM(stock * precio_compra), 0) FROM productos WHERE empresa_id = ?) as patrimonio_ars`,
-      [empresa_id, empresa_id, empresa_id],
+    const [patrimonioRes] = await db.execute(
+      `SELECT IFNULL(SUM(stock * precio_compra), 0) as total FROM productos WHERE empresa_id = ?`,
+      [empresa_id],
+    );
+    const [alertasRes] = await db.execute(
+      `SELECT COUNT(*) as total FROM productos WHERE empresa_id = ? AND stock <= stock_minimo`,
+      [empresa_id],
+    );
+    const [ticketsRes] = await db.execute(
+      `SELECT COUNT(*) as total FROM ventas WHERE empresa_id = ? AND DATE(created_at) = CURDATE()`,
+      [empresa_id],
     );
 
     // 🏆 7. PRODUCTO MÁS VENDIDO DEL DÍA
-    const [topProducto] = await db.execute(
+    const [topProdRes] = await db.execute(
       `SELECT p.nombre FROM detalle_ventas dv
       JOIN ventas v ON dv.venta_id = v.id
       JOIN productos p ON dv.producto_id = p.id
@@ -570,111 +592,71 @@ const getGodModeStats = async (req, res) => {
       [empresa_id],
     );
 
-    // 💵 8. FETCH DOLAR MEP REAL (Con Headers de identificación y Timeout)
-    let cotizacionFinal = 1469;
+    // 💵 8. FETCH DOLAR MEP REAL (Sincronizado)
+    let cotizacionFinal = 1469.0;
     try {
       const response = await axios.get(
         "https://dolarapi.com/v1/dolares/bolsa",
-        {
-          timeout: 5000,
-          headers: { "User-Agent": "MorroneBI-Agent/1.0" },
-        },
+        { timeout: 3000 },
       );
-
-      if (response.data && response.data.venta) {
+      if (response.data?.venta)
         cotizacionFinal = parseFloat(response.data.venta);
-        console.log(`✅ [Oracle Eye] Dólar actualizado: ${cotizacionFinal}`);
-      }
     } catch (e) {
-      console.error("❌ ERROR API DÓLAR:", e.message);
+      console.error("Error Dólar API");
     }
-
-    const patrimonioARS = parseFloat(alertas[0].patrimonio_ars || 0);
-
-    // 💸 9. GASTOS REALES DEL MES (Fijos + Variables del Cirujano)
-    const [gastosRes] = await db.execute(
-      `
-      SELECT IFNULL(SUM(monto), 0) as total_mensual 
-      FROM gastos 
-      WHERE empresa_id = ? 
-        AND MONTH(fecha) = MONTH(CURDATE()) 
-        AND YEAR(fecha) = YEAR(CURDATE())
-    `,
-      [empresa_id],
-    );
-
-    const gastosReales = parseFloat(gastosRes[0].total_mensual);
 
     // 📦 10. RENDIMIENTO POR CAJA (Hoy)
     const [cajasRes] = await db.execute(
-      `
-      SELECT 
-        v.caja_id, 
-        SUM(v.precio_total) as monto, 
-        COUNT(*) as tickets 
-      FROM ventas v
-      WHERE v.empresa_id = ? AND DATE(v.created_at) = CURDATE()
-      GROUP BY v.caja_id 
-      ORDER BY monto DESC
-    `,
+      `SELECT v.caja_id, SUM(v.precio_total) as monto, COUNT(*) as tickets 
+       FROM ventas v WHERE v.empresa_id = ? AND DATE(v.created_at) = CURDATE()
+       GROUP BY v.caja_id ORDER BY monto DESC`,
       [empresa_id],
     );
 
-    // 💳 11. MIX DE PAGOS REAL (SOLO HOY)
+    // 💳 11. MIX DE PAGOS REAL (Hoy)
     const [pagosHoy] = await db.execute(
-      `
-      SELECT 
-        IFNULL(SUM(efectivo), 0) as EFECTIVO,
-        IFNULL(SUM(tarjeta), 0) as TARJETA,
-        IFNULL(SUM(mercadopago), 0) as MERCADOPAGO,
-        IFNULL(SUM(transferencia), 0) as TRANSFERENCIA
-      FROM ventas 
-      WHERE empresa_id = ? 
-        AND DATE(created_at) = CURDATE()`,
+      `SELECT IFNULL(SUM(efectivo), 0) as EFECTIVO, IFNULL(SUM(tarjeta), 0) as TARJETA,
+              IFNULL(SUM(mercadopago), 0) as MERCADOPAGO, IFNULL(SUM(transferencia), 0) as TRANSFERENCIA
+       FROM ventas WHERE empresa_id = ? AND DATE(created_at) = CURDATE()`,
       [empresa_id],
     );
-
-    // Formateamos para el gráfico
     const r = pagosHoy[0];
     const pagosMix = [
       { label: "Efectivo", value: parseFloat(r.EFECTIVO) },
       { label: "Tarjeta", value: parseFloat(r.TARJETA) },
       { label: "Mercado Pago", value: parseFloat(r.MERCADOPAGO) },
       { label: "Transferencia", value: parseFloat(r.TRANSFERENCIA) },
-    ].filter((item) => item.value > 0); // Solo los que tienen movimientos hoy
+    ].filter((i) => i.value > 0);
 
     // 📅 12. RENDIMIENTO SEMANAL (Español)
     const [semanal] = await db.execute(
-      `
-      SELECT 
-        CASE DAYOFWEEK(created_at)
+      `SELECT CASE DAYOFWEEK(created_at)
           WHEN 1 THEN 'Dom' WHEN 2 THEN 'Lun' WHEN 3 THEN 'Mar' 
           WHEN 4 THEN 'Mie' WHEN 5 THEN 'Jue' WHEN 6 THEN 'Vie' WHEN 7 THEN 'Sab'
-        END as dia,
-        SUM(precio_total) as total,
-        MAX(created_at) as fecha_orden
-      FROM ventas 
-      WHERE empresa_id = ? AND created_at >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
-      GROUP BY dia ORDER BY fecha_orden ASC`,
+        END as dia, SUM(precio_total) as total, MAX(created_at) as fecha_orden
+       FROM ventas WHERE empresa_id = ? AND created_at >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+       GROUP BY dia ORDER BY fecha_orden ASC`,
       [empresa_id],
     );
 
+    // --- RESPUESTA FINAL SINCRONIZADA ---
     res.json({
       hoy: ventasHoy,
       ayer: ventasAyer,
-      profit: profit[0],
+      profit: finanzas[0], // 🚀 DATA CORREGIDA SIN DUPLICADOS
       gastos_mes: gastosReales,
       cajas: cajasRes,
       pagosMix,
       semanal,
       categorias,
       inflacion_real: parseFloat(inflacion[0].variacion).toFixed(2),
-      stock_critico: alertas[0].bajo_stock,
-      tickets_hoy: alertas[0].tickets_hoy,
+      stock_critico: alertasRes[0].total,
+      tickets_hoy: ticketsRes[0].total,
       dolar_mep: cotizacionFinal.toFixed(2),
-      // ✅ CORREGIDO: Usamos cotizacionFinal para el cálculo del Equity Shield
-      patrimonio_usd: (patrimonioARS / cotizacionFinal).toFixed(2),
-      top_hoy: topProducto[0]?.nombre || "Sin ventas hoy",
+      patrimonio_usd: (
+        parseFloat(patrimonioRes[0].total) / cotizacionFinal
+      ).toFixed(2),
+      top_hoy: topProdRes[0]?.nombre || "Sin ventas hoy",
     });
   } catch (error) {
     console.error("❌ ERROR MONITOR BI:", error.message);
