@@ -2465,7 +2465,9 @@ const getVentasDashboard = async (req, res) => {
       ventas_dia: Math.max(parseFloat(v[0].dia) - parseFloat(d[0].dia), 0),
       ventas_mes: Math.max(parseFloat(v[0].mes) - parseFloat(d[0].mes), 0),
       ventas_anio: Math.max(parseFloat(v[0].anio) - parseFloat(d[0].anio), 0),
+      devoluciones_dia: parseFloat(d[0].dia),
       devoluciones_mes: parseFloat(d[0].mes),
+      devoluciones_anio: parseFloat(d[0].anio),
       ganancia_dia: parseFloat(uVentas[0].dia) - parseFloat(uDev[0].dia),
       ganancia_mes: parseFloat(uVentas[0].mes) - parseFloat(uDev[0].mes), // <--- DARÁ $26.550
       ganancia_anio: parseFloat(uVentas[0].anio) - parseFloat(uDev[0].anio),
