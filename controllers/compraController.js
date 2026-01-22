@@ -346,16 +346,25 @@ const getInformeProductos = async (req, res) => {
   try {
     const { fecha_inicio, fecha_fin } = req.query;
     const empresa_id = req.user.empresa_id;
+
     const query = `
-            SELECT p.codigo, p.nombre, SUM(dc.cantidad) as cantidad, u.nombre as unidad, p.precio_compra as costo, SUM(dc.cantidad * p.precio_compra) as total
-            FROM detalle_compras dc
-            JOIN compras c ON dc.compra_id = c.id
-            JOIN productos p ON dc.producto_id = p.id
-            LEFT JOIN unidads u ON p.unidad_id = u.id
-            WHERE c.empresa_id = ? AND c.fecha BETWEEN ? AND ?
-            GROUP BY p.id, p.codigo, p.nombre, u.nombre, p.precio_compra
-            ORDER BY total DESC
-        `;
+      SELECT 
+        p.codigo, 
+        p.nombre, 
+        prov.empresa as proveedor_nombre, -- 👈 Traemos el nombre directo de la compra
+        SUM(dc.cantidad) as cantidad, 
+        u.nombre as unidad, 
+        dc.precio_compra as costo, 
+        SUM(dc.cantidad * dc.precio_compra) as total
+      FROM detalle_compras dc
+      JOIN compras c ON dc.compra_id = c.id
+      JOIN productos p ON dc.producto_id = p.id
+      JOIN proveedors prov ON c.proveedor_id = prov.id -- 👈 JOIN directo, sin subconsultas
+      LEFT JOIN unidads u ON p.unidad_id = u.id
+      WHERE c.empresa_id = ? AND c.fecha BETWEEN ? AND ?
+      GROUP BY p.id, prov.id, dc.precio_compra
+      ORDER BY p.nombre ASC
+    `;
     const [rows] = await db.execute(query, [
       empresa_id,
       fecha_inicio,
@@ -382,17 +391,24 @@ const generarInformeProductosPDF = async (req, res) => {
     );
     const empresa = empresaRows[0];
 
-    // 2. Obtener los datos del informe (Misma query que el listado)
+    // 2. 🛡️ QUERY SINCERADA: Producto + Proveedor + Costo Real Pagado
     const query = `
-        SELECT p.codigo, p.nombre, SUM(dc.cantidad) as cantidad, u.nombre as unidad, 
-               p.precio_compra as costo, SUM(dc.cantidad * p.precio_compra) as total
+        SELECT 
+            p.codigo, 
+            p.nombre, 
+            prov.empresa as proveedor_nombre, 
+            SUM(dc.cantidad) as cantidad, 
+            u.nombre as unidad, 
+            dc.precio_compra as costo, 
+            SUM(dc.cantidad * dc.precio_compra) as total
         FROM detalle_compras dc
         JOIN compras c ON dc.compra_id = c.id
         JOIN productos p ON dc.producto_id = p.id
+        JOIN proveedors prov ON c.proveedor_id = prov.id
         LEFT JOIN unidads u ON p.unidad_id = u.id
         WHERE c.empresa_id = ? AND c.fecha BETWEEN ? AND ?
-        GROUP BY p.id, p.codigo, p.nombre, u.nombre, p.precio_compra
-        ORDER BY total DESC
+        GROUP BY p.id, prov.id, dc.precio_compra
+        ORDER BY p.nombre ASC, total DESC
     `;
     const [productos] = await db.execute(query, [
       empresa_id,
@@ -419,20 +435,23 @@ const generarInformeProductosPDF = async (req, res) => {
       totalGral += parseFloat(p.total);
       filas += `
         <tr>
-            <td style="text-align: center;">${p.codigo || "N/A"}</td>
-            <td>${p.nombre}</td>
-            <td style="text-align: center;">${p.cantidad}</td>
-            <td style="text-align: center;">${p.unidad || "Unid."}</td>
-            <td style="text-align: right;">$ ${parseFloat(
+            <td style="text-align: center; vertical-align: middle;">${p.codigo || "N/A"}</td>
+            <td style="vertical-align: middle;">
+                <div style="font-weight: bold; text-transform: uppercase;">${p.nombre}</div>
+                <div style="font-size: 9px; color: #007bff;">Proveedor: ${p.proveedor_nombre}</div>
+            </td>
+            <td style="text-align: center; vertical-align: middle;">${p.cantidad}</td>
+            <td style="text-align: center; vertical-align: middle;">${p.unidad || "Unid."}</td>
+            <td style="text-align: right; vertical-align: middle;">$ ${parseFloat(
               p.costo,
             ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
-            <td style="text-align: right;">$ ${parseFloat(
+            <td style="text-align: right; vertical-align: middle; font-weight: bold;">$ ${parseFloat(
               p.total,
             ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
         </tr>`;
     });
 
-    // 5. HTML completo del reporte
+    // 5. HTML completo del reporte con estilos ejecutivos
     const htmlContent = `
     <!DOCTYPE html>
     <html>
@@ -440,12 +459,13 @@ const generarInformeProductosPDF = async (req, res) => {
         <meta charset="UTF-8">
         <style>
             body { font-family: 'Helvetica', sans-serif; color: #333; font-size: 11px; }
-            .header { border-bottom: 2px solid #007bff; padding: 10px; margin-bottom: 20px; }
-            .table { width: 100%; border-collapse: collapse; }
-            .table th { background-color: #343a40; color: #fff; padding: 8px; border: 1px solid #dee2e6; }
+            .header { border-bottom: 3px solid #007bff; padding: 10px; margin-bottom: 20px; }
+            .table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+            .table th { background-color: #343a40; color: #fff; padding: 10px 8px; border: 1px solid #dee2e6; text-transform: uppercase; font-size: 10px; }
             .table td { padding: 8px; border: 1px solid #dee2e6; }
-            .total-box { text-align: right; margin-top: 20px; font-size: 14px; font-weight: bold; border-top: 2px solid #333; padding-top: 10px; }
+            .total-box { text-align: right; margin-top: 30px; font-size: 16px; font-weight: bold; border-top: 2px solid #333; padding-top: 10px; color: #000; }
             #pageFooter { position: fixed; bottom: -15px; left: 0; right: 0; text-align: center; font-size: 9px; color: #999; border-top: 1px solid #eee; padding-top: 10px; }
+            .badge-prov { font-size: 9px; color: #007bff; }
         </style>
     </head>
     <body>
@@ -453,32 +473,30 @@ const generarInformeProductosPDF = async (req, res) => {
             <table style="width:100%">
                 <tr>
                     <td style="width:70%">
-                        <h1 style="margin:0">${empresa.nombre_empresa}</h1>
-                        <p style="margin:5px 0">CUIT: ${
-                          empresa.cuit
-                        } | Reporte de Compras por Productos</p>
+                        <h1 style="margin:0; color: #000;">${empresa.nombre_empresa}</h1>
+                        <p style="margin:5px 0; font-weight: bold;">CUIT: ${empresa.cuit}</p>
+                        <p style="margin:0; color: #666;">Informe Detallado de Compras por Productos</p>
                     </td>
                     <td style="text-align:right">
-                        ${
-                          logoBase64
-                            ? `<img src="${logoBase64}" style="width:70px">`
-                            : ""
-                        }
+                        ${logoBase64 ? `<img src="${logoBase64}" style="width:80px">` : ""}
                     </td>
                 </tr>
             </table>
         </div>
 
-        <h2 style="text-align:center">Informe del ${fInicio} al ${fFin}</h2>
+        <h3 style="text-align:center; background: #f8f9fa; padding: 10px; border-radius: 5px;">
+            PERÍODO: ${fInicio} al ${fFin}
+        </h3>
+
         <table class="table">
             <thead>
                 <tr>
-                    <th>Código</th>
-                    <th>Producto</th>
-                    <th>Cant.</th>
-                    <th>Unidad</th>
-                    <th>Costo Unit.</th>
-                    <th>Subtotal</th>
+                    <th style="width: 15%">Código</th>
+                    <th style="width: 35%">Producto / Origen</th>
+                    <th style="width: 8%">Cant.</th>
+                    <th style="width: 12%">Unidad</th>
+                    <th style="width: 15%">Costo Pagado</th>
+                    <th style="width: 15%">Subtotal</th>
                 </tr>
             </thead>
             <tbody>
@@ -487,15 +505,13 @@ const generarInformeProductosPDF = async (req, res) => {
         </table>
 
         <div class="total-box">
-            TOTAL INVERTIDO: $ ${totalGral.toLocaleString("es-AR", {
+            TOTAL GENERAL INVERTIDO: $ ${totalGral.toLocaleString("es-AR", {
               minimumFractionDigits: 2,
             })}
         </div>
 
         <div id="pageFooter">
-            Reporte generado el ${new Date().toLocaleString(
-              "es-AR",
-            )} - Sistema de Ventas
+            Documento de Auditoría Interna - Generado el ${new Date().toLocaleString("es-AR")}
         </div>
     </body>
     </html>`;
