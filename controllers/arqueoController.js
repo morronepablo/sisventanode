@@ -42,10 +42,10 @@ const getAllArqueos = async (req, res) => {
       rows.map(async (arq) => {
         const [movs] = await db.execute(
           "SELECT * FROM movimiento_cajas WHERE arqueo_id = ? ORDER BY created_at ASC",
-          [arq.id]
+          [arq.id],
         );
         return { ...arq, movimientos: movs };
-      })
+      }),
     );
 
     res.json(results);
@@ -91,7 +91,7 @@ const createArqueo = async (req, res) => {
     // Verificamos si YA hay una abierta en esta caja
     const [existente] = await db.execute(
       "SELECT id FROM arqueos WHERE empresa_id = ? AND caja_id = ? AND estado = 'Abierto'",
-      [empresa_id, caja_id]
+      [empresa_id, caja_id],
     );
 
     if (existente.length > 0) {
@@ -111,14 +111,14 @@ const createArqueo = async (req, res) => {
     });
 
     console.log(
-      `[ARQUEO] Caja ${caja_id} abierta por usuario ${usuario_id}. ID Arqueo: ${nuevoId}`
+      `[ARQUEO] Caja ${caja_id} abierta por usuario ${usuario_id}. ID Arqueo: ${nuevoId}`,
     );
 
     await registrarLog(
       req,
       "CREAR",
       "ARQUEO_CAJA",
-      `Apertura de Caja N° ${caja_id}. Monto inicial: $${monto_inicial}`
+      `Apertura de Caja N° ${caja_id}. Monto inicial: $${monto_inicial}`,
     );
 
     res
@@ -140,7 +140,7 @@ const getArqueoById = async (req, res) => {
        FROM arqueos a 
        LEFT JOIN users u ON a.usuario_id = u.id 
        WHERE a.id = ?`,
-      [id]
+      [id],
     );
 
     if (arqueoRows.length === 0) {
@@ -156,19 +156,19 @@ const getArqueoById = async (req, res) => {
         IFNULL(SUM(transferencia), 0) as total_transf_sistema,
         IFNULL(SUM(efectivo), 0) as total_efectivo_sistema
        FROM ventas WHERE arqueo_id = ?`,
-      [id]
+      [id],
     );
 
     // 3. Obtener los Movimientos Manuales (Ingresos y Egresos)
     const [movimientos] = await db.execute(
       "SELECT * FROM movimiento_cajas WHERE arqueo_id = ? ORDER BY created_at ASC",
-      [id]
+      [id],
     );
 
     // 4. Obtener los Retiros de Seguridad
     const [retiros] = await db.execute(
       "SELECT * FROM retiros_caja WHERE arqueo_id = ? ORDER BY fecha ASC",
-      [id]
+      [id],
     );
 
     // 🚀 ENVIAMOS TODO EL PAQUETE AL FRONTEND (incluyendo totales_sistema)
@@ -203,7 +203,7 @@ const updateArqueo = async (req, res) => {
       req,
       "EDITAR",
       "ARQUEO_CAJA",
-      `Se actualizaron los datos del arqueo ID: ${id}`
+      `Se actualizaron los datos del arqueo ID: ${id}`,
     );
 
     res.json({ message: "Arqueo actualizado exitosamente" });
@@ -230,7 +230,7 @@ const storeMovimiento = async (req, res) => {
       req,
       "CREAR",
       "ARQUEO_MOVIMIENTO",
-      `Movimiento manual de ${tipo}: $${monto}. Motivo: ${descripcion}`
+      `Movimiento manual de ${tipo}: $${monto}. Motivo: ${descripcion}`,
     );
 
     res
@@ -265,7 +265,7 @@ const closeArqueo = async (req, res) => {
       JOIN users u ON a.usuario_id = u.id 
       JOIN empresas e ON a.empresa_id = e.id 
       WHERE a.id = ?`,
-      [id]
+      [id],
     );
 
     if (arqueoRows.length === 0)
@@ -277,7 +277,7 @@ const closeArqueo = async (req, res) => {
     const [salesRows] = await db.execute(
       `
       SELECT IFNULL(SUM(efectivo), 0) as efe_sys FROM ventas WHERE arqueo_id = ?`,
-      [id]
+      [id],
     );
     const efe_sistema = parseFloat(salesRows[0].efe_sys);
 
@@ -288,14 +288,14 @@ const closeArqueo = async (req, res) => {
         SUM(CASE WHEN tipo = 'Ingreso' AND descripcion NOT LIKE 'Venta%' THEN monto ELSE 0 END) as ing_man,
         SUM(CASE WHEN tipo = 'Egreso' THEN monto ELSE 0 END) as egr_man
       FROM movimiento_cajas WHERE arqueo_id = ?`,
-      [id]
+      [id],
     );
     const ing_man = parseFloat(movRows[0].ing_man || 0);
     const egr_man = parseFloat(movRows[0].egr_man || 0);
 
     const [retRows] = await db.execute(
       "SELECT IFNULL(SUM(monto), 0) as total FROM retiros_caja WHERE arqueo_id = ?",
-      [id]
+      [id],
     );
     const t_retiros = parseFloat(retRows[0].total);
 
@@ -335,7 +335,7 @@ const closeArqueo = async (req, res) => {
         ventas_mercadopago,
         ventas_transferencia,
         id,
-      ]
+      ],
     );
 
     // 8. Log y Sockets
@@ -345,7 +345,7 @@ const closeArqueo = async (req, res) => {
       req,
       "CERRAR",
       "ARQUEOS",
-      `Cierre ID ${id}. Venta declarada: ${venta_efectivo_fisica}. Dif: ${diferencia}`
+      `Cierre ID ${id}. Venta declarada: ${venta_efectivo_fisica}. Dif: ${diferencia}`,
     );
 
     // 9. WhatsApp Directo (Replicando lógica de clientes)
@@ -366,7 +366,7 @@ const closeArqueo = async (req, res) => {
       `🤖 _Enterprise Retail BI_`;
 
     await sendWS(infoEmpresa.telefono, mensaje).catch((e) =>
-      console.log("WS Error")
+      console.log("WS Error"),
     );
 
     res.json({ success: true, diferencia });
@@ -381,7 +381,7 @@ const countArqueos = async (req, res) => {
     const empresa_id = req.user.empresa_id;
     const [rows] = await db.execute(
       "SELECT COUNT(*) AS total FROM arqueos WHERE empresa_id = ?",
-      [empresa_id]
+      [empresa_id],
     );
     res.json({ total: rows[0].total });
   } catch (error) {
@@ -396,7 +396,7 @@ const generarReporte = async (req, res) => {
     // 1. Obtener datos de la empresa
     const [empresaRows] = await db.execute(
       "SELECT * FROM empresas WHERE id = ?",
-      [empresa_id]
+      [empresa_id],
     );
     const empresa = empresaRows[0];
     if (!empresa) return res.status(404).send("Empresa no encontrada");
@@ -474,7 +474,7 @@ const generarReporte = async (req, res) => {
                     <td style="border:none; color: #28a745;">$ ${fmt(ing)}</td>
                     <td style="border:none; color: #dc3545;">$ ${fmt(egr)}</td>
                     <td style="border:none; color: #fd7e14; font-weight: bold;">$ ${fmt(
-                      diferencia
+                      diferencia,
                     )}</td>
                 </tr>
              </table>
@@ -562,11 +562,11 @@ const getArqueosSummary = async (req, res) => {
     const year = new Date().getFullYear();
     const [totalRows] = await db.execute(
       "SELECT COUNT(*) AS total FROM arqueos WHERE empresa_id = ?",
-      [empresa_id]
+      [empresa_id],
     );
     const [yearRows] = await db.execute(
       "SELECT COUNT(*) AS totalAnio FROM arqueos WHERE YEAR(fecha_apertura) = ? AND empresa_id = ?",
-      [year, empresa_id]
+      [year, empresa_id],
     );
     res.json({
       total: totalRows[0].total || 0,
@@ -577,36 +577,90 @@ const getArqueosSummary = async (req, res) => {
   }
 };
 
+// const getMonitorTiempoReal = async (req, res) => {
+//   try {
+//     const empresa_id = req.user.empresa_id;
+
+//     // 1. Buscamos todos los arqueos que estén ABIERTOS actualmente
+//     const query = `
+//       SELECT
+//         a.id as arqueo_id, a.caja_id, a.monto_inicial, a.fecha_apertura,
+//         u.name as cajero,
+//         -- Suma de Ventas por medio de pago
+//         (SELECT IFNULL(SUM(v.efectivo), 0) FROM ventas v WHERE v.arqueo_id = a.id) as ventas_efectivo,
+//         (SELECT IFNULL(SUM(v.tarjeta), 0) FROM ventas v WHERE v.arqueo_id = a.id) as ventas_tarjeta,
+//         (SELECT IFNULL(SUM(v.mercadopago), 0) FROM ventas v WHERE v.arqueo_id = a.id) as ventas_mp,
+//         -- Gastos registrados en este arqueo
+//         (SELECT IFNULL(SUM(g.monto), 0) FROM gastos g WHERE g.arqueo_id = a.id) as total_gastos,
+//         -- Retiros parciales realizados
+//         (SELECT IFNULL(SUM(r.monto), 0) FROM retiros_caja r WHERE r.arqueo_id = a.id) as total_retiros
+//       FROM arqueos a
+//       JOIN users u ON a.usuario_id = u.id
+//       WHERE a.empresa_id = ? AND a.estado = 'abierto'
+//     `;
+
+//     const [cajas] = await db.execute(query, [empresa_id]);
+
+//     const reporte = cajas.map((c) => {
+//       // Cálculo del Efectivo Real que DEBERÍA haber en el cajón en este momento
+//       const efectivoEnCaja =
+//         parseFloat(c.monto_inicial) +
+//         parseFloat(c.ventas_efectivo) -
+//         parseFloat(c.total_gastos) -
+//         parseFloat(c.total_retiros);
+
+//       return {
+//         ...c,
+//         efectivo_actual: efectivoEnCaja.toFixed(2),
+//         total_digital: (
+//           parseFloat(c.ventas_tarjeta) + parseFloat(c.ventas_mp)
+//         ).toFixed(2),
+//       };
+//     });
+
+//     res.json(reporte);
+//   } catch (error) {
+//     res.status(500).json({ error: error.message });
+//   }
+// };
+
 const getMonitorTiempoReal = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
 
-    // 1. Buscamos todos los arqueos que estén ABIERTOS actualmente
+    // QUERY FILTRADA: Solo tomamos el flujo real del cajón físico
     const query = `
       SELECT 
         a.id as arqueo_id, a.caja_id, a.monto_inicial, a.fecha_apertura,
         u.name as cajero,
-        -- Suma de Ventas por medio de pago
-        (SELECT IFNULL(SUM(v.efectivo), 0) FROM ventas v WHERE v.arqueo_id = a.id) as ventas_efectivo,
+        -- 1. VENTAS DIGITALES (Solo para información, no afectan el efectivo físico)
         (SELECT IFNULL(SUM(v.tarjeta), 0) FROM ventas v WHERE v.arqueo_id = a.id) as ventas_tarjeta,
         (SELECT IFNULL(SUM(v.mercadopago), 0) FROM ventas v WHERE v.arqueo_id = a.id) as ventas_mp,
-        -- Gastos registrados en este arqueo
-        (SELECT IFNULL(SUM(g.monto), 0) FROM gastos g WHERE g.arqueo_id = a.id) as total_gastos,
-        -- Retiros parciales realizados
+        
+        -- 2. FLUJO TOTAL DE EFECTIVO (Ventas Cash + Mov. Manuales + Gastos)
+        -- En este sistema, las ventas efectivo YA están en movimiento_cajas
+        (SELECT IFNULL(SUM(CASE WHEN mc.tipo = 'Ingreso' THEN mc.monto ELSE 0 END), 0) 
+         FROM movimiento_cajas mc WHERE mc.arqueo_id = a.id) as ingresos_totales,
+         
+        (SELECT IFNULL(SUM(CASE WHEN mc.tipo = 'Egreso' THEN mc.monto ELSE 0 END), 0) 
+         FROM movimiento_cajas mc WHERE mc.arqueo_id = a.id) as egresos_totales,
+         
+        -- 3. RETIROS DE SEGURIDAD
         (SELECT IFNULL(SUM(r.monto), 0) FROM retiros_caja r WHERE r.arqueo_id = a.id) as total_retiros
       FROM arqueos a
       JOIN users u ON a.usuario_id = u.id
-      WHERE a.empresa_id = ? AND a.estado = 'abierto'
+      WHERE a.empresa_id = ? AND a.fecha_cierre IS NULL
     `;
 
     const [cajas] = await db.execute(query, [empresa_id]);
 
     const reporte = cajas.map((c) => {
-      // Cálculo del Efectivo Real que DEBERÍA haber en el cajón en este momento
+      // CÁLCULO SINCERADO:
+      // Monto Inicial + Ingresos (que incluyen ventas efectivo) - Egresos - Retiros
       const efectivoEnCaja =
         parseFloat(c.monto_inicial) +
-        parseFloat(c.ventas_efectivo) -
-        parseFloat(c.total_gastos) -
+        parseFloat(c.ingresos_totales) -
+        parseFloat(c.egresos_totales) -
         parseFloat(c.total_retiros);
 
       return {
@@ -620,6 +674,7 @@ const getMonitorTiempoReal = async (req, res) => {
 
     res.json(reporte);
   } catch (error) {
+    console.error("ERROR LIVE MONITOR:", error.message);
     res.status(500).json({ error: error.message });
   }
 };
@@ -632,7 +687,7 @@ const postRetiroParcial = async (req, res) => {
     // 1. Registrar el retiro
     await db.execute(
       "INSERT INTO retiros_caja (arqueo_id, monto, motivo, usuario_id, caja_id) VALUES (?, ?, ?, ?, ?)",
-      [arqueo_id, monto, motivo, usuario_id, caja_id]
+      [arqueo_id, monto, motivo, usuario_id, caja_id],
     );
 
     // 2. Registrar log de seguridad
@@ -640,7 +695,7 @@ const postRetiroParcial = async (req, res) => {
       req,
       "RETIRO",
       "ARQUEOS",
-      `Retiro parcial de $${monto} en Caja ${caja_id}. Motivo: ${motivo}`
+      `Retiro parcial de $${monto} en Caja ${caja_id}. Motivo: ${motivo}`,
     );
 
     res.json({ success: true, message: "Retiro registrado correctamente" });
