@@ -34,55 +34,17 @@ class Producto {
       JOIN unidads u ON p.unidad_id = u.id
       WHERE p.id = ?
     `,
-      [id]
+      [id],
     );
     return rows[0] || null;
   }
-
-  //   static async create(data) {
-  //     const {
-  //       categoria_id,
-  //       unidad_id,
-  //       codigo,
-  //       nombre,
-  //       nombre_corto,
-  //       stock,
-  //       stock_minimo,
-  //       precio_compra,
-  //       aplicar_porcentaje,
-  //       valor_porcentaje,
-  //       precio_venta,
-  //       imagen,
-  //     } = data;
-
-  //     const [result] = await db.execute(
-  //       `
-  //       INSERT INTO productos (categoria_id, unidad_id, codigo, nombre, nombre_corto, stock, stock_minimo, precio_compra, aplicar_porcentaje, valor_porcentaje, precio_venta, imagen)
-  //       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  //     `,
-  //       [
-  //         categoria_id,
-  //         unidad_id,
-  //         codigo,
-  //         nombre,
-  //         nombre_corto,
-  //         stock,
-  //         stock_minimo,
-  //         precio_compra,
-  //         aplicar_porcentaje,
-  //         valor_porcentaje,
-  //         precio_venta,
-  //         imagen,
-  //       ]
-  //     );
-
-  //     return result.insertId;
-  //   }
 
   static async create(data) {
     const {
       categoria_id,
       unidad_id,
+      unidad_compra_id, // 👈 NUEVO
+      factor_conversion, // 👈 NUEVO
       codigo,
       nombre,
       nombre_corto,
@@ -95,19 +57,22 @@ class Producto {
       precio_venta,
       descripcion,
       fecha_ingreso,
-      imagen, // <-- Asegúrate de recibir estos
+      imagen,
+      empresa_id, // 👈 Lo tomamos del objeto data
     } = data;
 
     const [result] = await db.execute(
       `INSERT INTO productos (
-      categoria_id, unidad_id, codigo, nombre, nombre_corto, 
-      stock, stock_minimo, stock_maximo, precio_compra, 
-      aplicar_porcentaje, valor_porcentaje, precio_venta, 
+      categoria_id, unidad_id, unidad_compra_id, factor_conversion, 
+      codigo, nombre, nombre_corto, stock, stock_minimo, stock_maximo, 
+      precio_compra, aplicar_porcentaje, valor_porcentaje, precio_venta, 
       descripcion, fecha_ingreso, imagen, empresa_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         categoria_id,
         unidad_id,
+        unidad_compra_id || null, // 👈 Manejo de nulos si no se elige caja
+        factor_conversion || 1.0, // 👈 Default 1
         codigo,
         nombre,
         nombre_corto,
@@ -121,66 +86,19 @@ class Producto {
         descripcion,
         fecha_ingreso,
         imagen,
-      ]
+        empresa_id || 1,
+      ],
     );
 
     return result.insertId;
   }
 
-  //   static async updateById(id, data) {
-  //     const {
-  //       categoria_id,
-  //       unidad_id,
-  //       codigo,
-  //       nombre,
-  //       nombre_corto,
-  //       stock,
-  //       stock_minimo,
-  //       stock_maximo, // Agregado
-  //       precio_compra,
-  //       aplicar_porcentaje,
-  //       valor_porcentaje,
-  //       precio_venta,
-  //       descripcion, // Agregado
-  //       fecha_ingreso, // Agregado
-  //       imagen,
-  //     } = data;
-
-  //     const [result] = await db.execute(
-  //       `
-  //       UPDATE productos SET
-  //         categoria_id = ?, unidad_id = ?, codigo = ?, nombre = ?, nombre_corto = ?,
-  //         stock = ?, stock_minimo = ?, stock_maximo = ?, precio_compra = ?, aplicar_porcentaje = ?,
-  //         valor_porcentaje = ?, precio_venta = ?, descripcion = ?, fecha_ingreso = ?, imagen = ?
-  //       WHERE id = ?
-  //     `,
-  //       [
-  //         categoria_id,
-  //         unidad_id,
-  //         codigo,
-  //         nombre,
-  //         nombre_corto,
-  //         stock,
-  //         stock_minimo,
-  //         stock_maximo,
-  //         precio_compra,
-  //         aplicar_porcentaje,
-  //         valor_porcentaje,
-  //         precio_venta,
-  //         descripcion,
-  //         fecha_ingreso,
-  //         imagen,
-  //         id,
-  //       ]
-  //     );
-
-  //     return result.affectedRows > 0;
-  //   }
-
   static async updateById(id, data) {
     const {
       categoria_id,
       unidad_id,
+      unidad_compra_id, // 👈 NUEVO
+      factor_conversion, // 👈 NUEVO
       codigo,
       nombre,
       nombre_corto,
@@ -198,14 +116,17 @@ class Producto {
 
     const [result] = await db.execute(
       `UPDATE productos SET
-      categoria_id = ?, unidad_id = ?, codigo = ?, nombre = ?, nombre_corto = ?,
-      stock = ?, stock_minimo = ?, stock_maximo = ?, precio_compra = ?, 
-      aplicar_porcentaje = ?, valor_porcentaje = ?, precio_venta = ?, 
-      descripcion = ?, fecha_ingreso = ?, imagen = ?
+      categoria_id = ?, unidad_id = ?, unidad_compra_id = ?, factor_conversion = ?, 
+      codigo = ?, nombre = ?, nombre_corto = ?, stock = ?, stock_minimo = ?, 
+      stock_maximo = ?, precio_compra = ?, aplicar_porcentaje = ?, 
+      valor_porcentaje = ?, precio_venta = ?, descripcion = ?, 
+      fecha_ingreso = ?, imagen = ?
     WHERE id = ?`,
       [
         categoria_id,
         unidad_id,
+        unidad_compra_id || null,
+        factor_conversion || 1.0,
         codigo,
         nombre,
         nombre_corto,
@@ -220,7 +141,7 @@ class Producto {
         fecha_ingreso,
         imagen,
         id,
-      ]
+      ],
     );
 
     return result.affectedRows > 0;

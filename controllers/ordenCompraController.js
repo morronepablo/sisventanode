@@ -26,13 +26,14 @@ const storeOrden = async (req, res) => {
 
     const { proveedor_id, fecha, items, observaciones } = req.body;
 
-    // ✅ Calcula el total estimado
-    const totalEstimado = items.reduce(
-      (acc, item) => acc + item.cantidad * item.precio_compra,
-      0
-    );
+    // 1. Calculamos el total estimado respetando la escala elegida
+    const totalEstimado = items.reduce((acc, it) => {
+      const costoTotalFila = it.es_bulto
+        ? it.cantidad * (it.precio_compra * it.factor_conversion)
+        : it.cantidad * it.precio_compra;
+      return acc + costoTotalFila;
+    }, 0);
 
-    // ✅ Inserta la OC con el total estimado
     const [resOc] = await connection.execute(
       "INSERT INTO ordenes_compra (fecha, proveedor_id, usuario_id, empresa_id, observaciones, total_estimado) VALUES (?, ?, ?, ?, ?, ?)",
       [
@@ -41,17 +42,31 @@ const storeOrden = async (req, res) => {
         req.user.id,
         req.user.empresa_id,
         observaciones,
-        totalEstimado, // 👈 AQUÍ LO GUARDAMOS
-      ]
+        totalEstimado,
+      ],
     );
 
     const orden_id = resOc.insertId;
 
-    // Guarda los ítems
-    for (const item of items) {
+    // 2. Guardamos los ítems con trazabilidad total
+    for (const it of items) {
+      const unidadesBase = it.es_bulto
+        ? it.cantidad * it.factor_conversion
+        : it.cantidad;
+
       await connection.execute(
-        "INSERT INTO detalle_ordenes_compra (orden_id, producto_id, cantidad_pedida, precio_estimado) VALUES (?, ?, ?, ?)",
-        [orden_id, item.producto_id, item.cantidad, item.precio_compra]
+        `INSERT INTO detalle_ordenes_compra 
+         (orden_id, producto_id, cantidad_pedida, precio_estimado, es_bulto, factor_utilizado, cantidad_unidades_base) 
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          orden_id,
+          it.producto_id,
+          it.cantidad, // La cantidad que el usuario ve (ej: 2)
+          it.precio_compra, // Precio unitario base
+          it.es_bulto ? 1 : 0,
+          it.factor_conversion,
+          unidadesBase, // El total real que entrará al stock (ej: 48)
+        ],
       );
     }
 
@@ -69,32 +84,30 @@ const getOrdenById = async (req, res) => {
   try {
     const { id } = req.params;
 
-    // 1. Consultar cabecera con el nombre del proveedor
     const [orden] = await db.execute(
       `SELECT oc.*, p.empresa as proveedor_nombre 
        FROM ordenes_compra oc
        JOIN proveedors p ON oc.proveedor_id = p.id
        WHERE oc.id = ?`,
-      [id]
+      [id],
     );
 
-    // 2. Consultar los ítems del pedido
+    // 🛡️ QUERY ACTUALIZADA CON TRAZABILIDAD DE UNIDADES
     const [items] = await db.execute(
-      `SELECT d.*, p.nombre as producto_nombre 
+      `SELECT d.*, p.nombre as producto_nombre, 
+              u.nombre as unidad_base_nombre
        FROM detalle_ordenes_compra d 
        JOIN productos p ON d.producto_id = p.id 
+       LEFT JOIN unidads u ON p.unidad_id = u.id
        WHERE d.orden_id = ?`,
-      [id]
+      [id],
     );
 
-    if (orden.length === 0) {
-      return res.status(404).json({ message: "Orden no encontrada" });
-    }
+    if (orden.length === 0)
+      return res.status(404).json({ message: "No encontrada" });
 
-    // 3. Devolver todo junto
     res.json({ ...orden[0], items });
   } catch (error) {
-    console.error("Error al obtener OC:", error);
     res.status(500).json({ message: error.message });
   }
 };
@@ -106,25 +119,32 @@ const recibirOrden = async (req, res) => {
     const { id } = req.params;
     const { items } = req.body;
 
-    // 1. Actualizar únicamente las cantidades recibidas en el detalle de la OC
+    // 1. Actualizar las cantidades recibidas CONVIRTIENDO A UNIDADES BASE
     for (const it of items) {
+      // cantidad_llegó viene en la escala pedida (ej: bultos).
+      // La convertimos a unidades base para que la auditoría sea real contra el stock.
+      const factor = parseFloat(it.factor_utilizado || 1);
+      const unidadesBaseRecibidas = parseFloat(it.cantidad_llegó) * factor;
+
       await connection.execute(
         "UPDATE detalle_ordenes_compra SET cantidad_recibida = ? WHERE id = ?",
-        [it.cantidad_llegó, it.id]
+        [unidadesBaseRecibidas, it.id],
       );
     }
 
     // 2. Marcar la Orden de Compra como 'Recibida'
     await connection.execute(
       "UPDATE ordenes_compra SET estado = 'Recibida' WHERE id = ?",
-      [id]
+      [id],
     );
 
     await connection.commit();
-    res.json({ success: true, message: "Recepción auditada correctamente" });
+    res.json({
+      success: true,
+      message: "Recepción auditada y convertida correctamente",
+    });
   } catch (error) {
     await connection.rollback();
-    console.error("Error al recibir OC:", error);
     res.status(500).json({ message: error.message });
   } finally {
     connection.release();
