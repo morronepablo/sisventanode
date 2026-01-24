@@ -1566,181 +1566,19 @@ const getAnaliticaBCG = async (req, res) => {
   }
 };
 
-// const getMonitorRotacion = async (req, res) => {
-//   try {
-//     const empresa_id = req.user.empresa_id;
-
-//     // ELIMINAMOS p.created_at del GREATEST para que solo cuente VENTAS reales
-//     const query = `
-//       SELECT
-//         p.id, p.nombre, p.codigo, p.stock,
-//         IFNULL(u.nombre, 'Unid') as unidad_nombre,
-//         -- 1. Ventas Directas Hoy (Solo para las Cards de arriba)
-//         IFNULL((
-//           SELECT SUM(dv.cantidad)
-//           FROM detalle_ventas dv
-//           JOIN ventas v ON dv.venta_id = v.id
-//           WHERE dv.producto_id = p.id AND DATE(v.fecha) = CURDATE() AND v.empresa_id = ?
-//         ), 0) as cant_directa_hoy,
-//         -- 2. Ventas por Combos Hoy
-//         IFNULL((
-//           SELECT SUM(dv2.cantidad * cp.cantidad)
-//           FROM detalle_ventas dv2
-//           JOIN ventas v2 ON dv2.venta_id = v2.id
-//           JOIN combo_producto cp ON dv2.combo_id = cp.combo_id
-//           WHERE cp.producto_id = p.id AND DATE(v2.fecha) = CURDATE() AND v2.empresa_id = ?
-//         ), 0) as cant_combo_hoy,
-//         -- 3. Última Salida Real (Solo ventas directas o combos)
-//         GREATEST(
-//           IFNULL((SELECT MAX(v3.fecha) FROM detalle_ventas dv3 JOIN ventas v3 ON dv3.venta_id = v3.id WHERE dv3.producto_id = p.id AND v3.empresa_id = ?), '1900-01-01'),
-//           IFNULL((SELECT MAX(v4.fecha) FROM detalle_ventas dv4 JOIN ventas v4 ON dv4.venta_id = v4.id JOIN combo_producto cp4 ON dv4.combo_id = cp4.combo_id WHERE cp4.producto_id = p.id AND v4.empresa_id = ?), '1900-01-01')
-//         ) as ultima_actividad
-//       FROM productos p
-//       LEFT JOIN unidads u ON p.unidad_id = u.id
-//       WHERE p.empresa_id = ?
-//       ORDER BY ultima_actividad DESC
-//     `;
-
-//     const [rows] = await db.execute(query, [
-//       empresa_id,
-//       empresa_id,
-//       empresa_id,
-//       empresa_id,
-//       empresa_id,
-//     ]);
-
-//     const reporte = rows.map((r) => {
-//       const hoy = new Date();
-//       hoy.setHours(0, 0, 0, 0);
-
-//       // Si la última actividad es la fecha de fallback, marcamos como Sin Ventas
-//       const noHayVentas = r.ultima_actividad === "1900-01-01";
-//       const ultima = noHayVentas ? null : new Date(r.ultima_actividad);
-
-//       let diffDays = 999; // Por defecto estancado si no hay ventas
-//       if (ultima) {
-//         ultima.setHours(0, 0, 0, 0);
-//         diffDays = Math.floor(Math.abs(hoy - ultima) / (1000 * 60 * 60 * 24));
-//       }
-
-//       return {
-//         id: r.id,
-//         nombre: r.nombre,
-//         codigo: r.codigo,
-//         stock: r.stock,
-//         unidad_nombre: r.unidad_nombre,
-//         dias_inactivo: diffDays,
-//         ultima_fecha: noHayVentas ? "Sin Ventas" : r.ultima_actividad,
-//         cantidad_hoy:
-//           parseFloat(r.cant_directa_hoy) + parseFloat(r.cant_combo_hoy),
-//       };
-//     });
-
-//     res.json(reporte);
-//   } catch (error) {
-//     console.error("❌ ERROR MONITOR ROTACIÓN:", error);
-//     res.status(500).json({ message: "Error al procesar la rotación" });
-//   }
-// };
-
-// const getMonitorRotacion = async (req, res) => {
-//   try {
-//     const empresa_id = req.user.empresa_id;
-
-//     // 🛡️ SINCERAMIENTO DE FECHA: Usamos la fecha del sistema para asegurar coincidencia
-//     const today = new Date().toISOString().split("T")[0];
-
-//     const query = `
-//       SELECT
-//         p.id, p.nombre, p.codigo, p.stock,
-//         IFNULL(u.nombre, 'Unid') as unidad_nombre,
-//         -- 1. Ventas Directas Hoy (Sincronizado con 'today')
-//         IFNULL((
-//           SELECT SUM(dv.cantidad)
-//           FROM detalle_ventas dv
-//           JOIN ventas v ON dv.venta_id = v.id
-//           WHERE dv.producto_id = p.id AND DATE(v.fecha) = ? AND v.empresa_id = ?
-//         ), 0) as cant_directa_hoy,
-//         -- 2. Ventas por Combos Hoy (Hibridación de Stock)
-//         IFNULL((
-//           SELECT SUM(dv2.cantidad * cp.cantidad)
-//           FROM detalle_ventas dv2
-//           JOIN ventas v2 ON dv2.venta_id = v2.id
-//           JOIN combo_producto cp ON dv2.combo_id = cp.combo_id
-//           WHERE cp.producto_id = p.id AND DATE(v2.fecha) = ? AND v2.empresa_id = ?
-//         ), 0) as cant_combo_hoy,
-//         -- 3. Última Salida Real (Calculamos la fecha máxima entre ventas directas y combos)
-//         (
-//           SELECT MAX(fecha_salida) FROM (
-//             SELECT v3.fecha as fecha_salida
-//             FROM detalle_ventas dv3 JOIN ventas v3 ON dv3.venta_id = v3.id
-//             WHERE dv3.producto_id = p.id AND v3.empresa_id = ?
-//             UNION ALL
-//             SELECT v4.fecha as fecha_salida
-//             FROM detalle_ventas dv4 JOIN ventas v4 ON dv4.venta_id = v4.id
-//             JOIN combo_producto cp4 ON dv4.combo_id = cp4.combo_id
-//             WHERE cp4.producto_id = p.id AND v4.empresa_id = ?
-//           ) as historial
-//         ) as ultima_actividad
-//       FROM productos p
-//       LEFT JOIN unidads u ON p.unidad_id = u.id
-//       WHERE p.empresa_id = ?
-//       ORDER BY ultima_actividad DESC
-//     `;
-
-//     // Pasamos los parámetros en orden: today, emp, today, emp, emp, emp, emp
-//     const [rows] = await db.execute(query, [
-//       today,
-//       empresa_id, // Para cant_directa
-//       today,
-//       empresa_id, // Para cant_combo
-//       empresa_id,
-//       empresa_id, // Para ultima_actividad
-//       empresa_id, // Para el WHERE final
-//     ]);
-
-//     const reporte = rows.map((r) => {
-//       const hoyRef = new Date(today + "T00:00:00");
-//       const ultima = r.ultima_actividad ? new Date(r.ultima_actividad) : null;
-
-//       let diffDays = 999;
-//       if (ultima) {
-//         // Normalizamos la fecha de la DB para comparar solo días
-//         const ultimaNormalizada = new Date(
-//           ultima.toISOString().split("T")[0] + "T00:00:00",
-//         );
-//         diffDays = Math.floor(
-//           (hoyRef - ultimaNormalizada) / (1000 * 60 * 60 * 24),
-//         );
-//         // Si por zona horaria da negativo, lo clavamos en 0 (Hoy)
-//         if (diffDays < 0) diffDays = 0;
-//       }
-
-//       return {
-//         id: r.id,
-//         nombre: r.nombre,
-//         codigo: r.codigo,
-//         stock: r.stock,
-//         unidad_nombre: r.unidad_nombre,
-//         dias_inactivo: diffDays,
-//         ultima_fecha: r.ultima_actividad || "Sin Ventas",
-//         cantidad_hoy:
-//           parseFloat(r.cant_directa_hoy) + parseFloat(r.cant_combo_hoy),
-//       };
-//     });
-
-//     res.json(reporte);
-//   } catch (error) {
-//     console.error("❌ ERROR MONITOR ROTACIÓN:", error);
-//     res.status(500).json({ message: "Error al procesar la rotación" });
-//   }
-// };
-
 const getMonitorRotacion = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
     // Sincronización de fecha desde Node para evitar desfases de Timezone
-    const today = new Date().toISOString().split("T")[0];
+
+    // 🛡️ FIX DE ZONA HORARIA: Forzamos Fecha Local Argentina (en-CA devuelve YYYY-MM-DD)
+    const options = {
+      timeZone: "America/Argentina/Buenos_Aires",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    };
+    const today = new Intl.DateTimeFormat("en-CA", options).format(new Date());
 
     const query = `
       SELECT 
