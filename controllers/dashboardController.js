@@ -6,9 +6,9 @@ const getFullChartData = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
     const MY_CAJA = Number(process.env.CAJA_ID || 1);
-    const now = new Date();
-    const currentYear = now.getFullYear();
-    const selectedMonth = parseInt(req.query.month) || now.getMonth() + 1;
+    const selectedMonth =
+      parseInt(req.query.month) || new Date().getMonth() + 1;
+    const currentYear = new Date().getFullYear();
 
     let prevMonth = selectedMonth - 1;
     let prevMonthYear = currentYear;

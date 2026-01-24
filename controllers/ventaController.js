@@ -2377,10 +2377,19 @@ const getVentasSummary = async (req, res) => {
 const getVentasDashboard = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
-    const now = new Date();
-    const todayStr = now.toISOString().split("T")[0];
-    const currentMonth = now.getMonth() + 1;
-    const currentYear = now.getFullYear();
+    // 🛡️ LOCALIZACIÓN FORZADA (Buenos Aires, Argentina)
+    const optionsArg = {
+      timeZone: "America/Argentina/Buenos_Aires",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    };
+    const formatter = new Intl.DateTimeFormat("en-CA", optionsArg); // en-CA devuelve YYYY-MM-DD
+    const todayStr = formatter.format(new Date());
+
+    const parts = todayStr.split("-");
+    const currentYear = parseInt(parts[0]);
+    const currentMonth = parseInt(parts[1]);
 
     // 1. VENTAS BRUTAS (Total Facturado - Total Devuelto)
     const [v] = await db.execute(
