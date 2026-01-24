@@ -53,9 +53,13 @@ const getCompraById = async (req, res) => {
 const getTmpCompras = async (req, res) => {
   try {
     const query = `
-      SELECT t.*, p.nombre, p.codigo 
+      SELECT t.*, p.nombre, p.codigo, 
+             u_base.nombre as unidad_base, 
+             u_compra.nombre as unidad_bulto
       FROM tmp_compras t 
       JOIN productos p ON t.producto_id = p.id 
+      LEFT JOIN unidads u_base ON p.unidad_id = u_base.id
+      LEFT JOIN unidads u_compra ON p.unidad_compra_id = u_compra.id
       WHERE t.usuario_id = ?
     `;
     const [rows] = await db.execute(query, [req.query.usuario_id]);
@@ -65,18 +69,33 @@ const getTmpCompras = async (req, res) => {
   }
 };
 
+const toggleTmpBulto = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { es_bulto } = req.body;
+    await db.execute("UPDATE tmp_compras SET es_bulto = ? WHERE id = ?", [
+      es_bulto,
+      id,
+    ]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const postTmpCompra = async (req, res) => {
   try {
     const { producto_id, cantidad, usuario_id, proveedor_id } = req.body;
 
-    // 1. Obtener precio del maestro
+    // 1. Buscamos precio y factor de conversión del producto
     const [prod] = await db.execute(
-      "SELECT precio_compra FROM productos WHERE id = ?",
+      "SELECT precio_compra, factor_conversion FROM productos WHERE id = ?",
       [producto_id],
     );
-    const precio_maestro = prod[0] ? parseFloat(prod[0].precio_compra) : 0;
+    const p_maestro = prod[0] ? parseFloat(prod[0].precio_compra) : 0;
+    const f_conversion = prod[0] ? parseFloat(prod[0].factor_conversion) : 1;
 
-    // 2. 🚩 ALERTA DE TRAICIÓN: Último precio con ESTE proveedor
+    // 2. Alerta de Traición (mantenemos tu lógica)
     const [priceSpecific] = await db.execute(
       `SELECT dc.precio_compra FROM detalle_compras dc 
        JOIN compras c ON dc.compra_id = c.id 
@@ -87,37 +106,34 @@ const postTmpCompra = async (req, res) => {
     const precio_anterior =
       priceSpecific.length > 0
         ? parseFloat(priceSpecific[0].precio_compra)
-        : precio_maestro;
+        : p_maestro;
 
-    // 3. 🤝 EL NEGOCIADOR: Buscar el MEJOR PRECIO (mínimo) de los últimos 90 días entre TODOS los proveedores
+    // 3. El Negociador (mantenemos tu lógica)
     const [bestPriceRows] = await db.execute(
-      `SELECT dc.precio_compra, prov.empresa as proveedor_nombre
-       FROM detalle_compras dc 
-       JOIN compras c ON dc.compra_id = c.id 
-       JOIN proveedors prov ON c.proveedor_id = prov.id
-       WHERE dc.producto_id = ? AND c.empresa_id = ? 
-         AND c.fecha >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)
+      `SELECT dc.precio_compra, prov.empresa as proveedor_nombre FROM detalle_compras dc 
+       JOIN compras c ON dc.compra_id = c.id JOIN proveedors prov ON c.proveedor_id = prov.id
+       WHERE dc.producto_id = ? AND c.empresa_id = ? AND c.fecha >= DATE_SUB(CURDATE(), INTERVAL 90 DAY)
        ORDER BY dc.precio_compra ASC LIMIT 1`,
       [producto_id, req.user.empresa_id],
     );
-
     const mejor_precio =
       bestPriceRows.length > 0 ? parseFloat(bestPriceRows[0].precio_compra) : 0;
     const mejor_proveedor =
       bestPriceRows.length > 0 ? bestPriceRows[0].proveedor_nombre : null;
 
-    // Insertamos incluyendo los datos para el Negociador
+    // 4. 🛡️ INSERCIÓN SINCERADA: Agregamos factor_utilizado
     await db.execute(
       `INSERT INTO tmp_compras 
-       (producto_id, cantidad, precio_compra, precio_anterior, mejor_precio, mejor_proveedor, usuario_id, created_at, updated_at) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+       (producto_id, cantidad, precio_compra, precio_anterior, mejor_precio, mejor_proveedor, factor_utilizado, es_bulto, usuario_id, created_at, updated_at) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, NOW(), NOW())`,
       [
         producto_id,
         cantidad,
-        precio_maestro,
+        p_maestro,
         precio_anterior,
         mejor_precio,
         mejor_proveedor,
+        f_conversion, // 👈 Se guarda el factor actual del producto
         usuario_id,
       ],
     );
@@ -1235,6 +1251,7 @@ module.exports = {
   getListadoCompras,
   getCompraById,
   getTmpCompras,
+  toggleTmpBulto,
   postTmpCompra,
   deleteTmpCompra,
   storeCompra,

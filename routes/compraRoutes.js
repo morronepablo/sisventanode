@@ -18,6 +18,7 @@ const {
   generarInformeNoPagadasPDF,
   updateTmpQuantity,
   updateTmpPrice,
+  toggleTmpBulto,
   getAuditoriaTraicion,
   getSugerenciasCompra,
   getAuditoriaProductos,
@@ -59,6 +60,7 @@ router.get("/tmp", getTmpCompras);
 router.post("/tmp", postTmpCompra);
 router.put("/tmp/:id", updateTmpQuantity);
 router.put("/tmp/price/:id", updateTmpPrice);
+router.put("/tmp/bulto/:id", toggleTmpBulto);
 router.delete("/tmp/:id", deleteTmpCompra);
 router.post("/update-precio", updatePrecioCompra);
 router.post("/bi/enviar-pedido-ws", postPedidoWhatsApp);
