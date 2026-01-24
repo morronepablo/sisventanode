@@ -74,8 +74,22 @@ const getTmpVentas = async (req, res) => {
   }
 };
 
+const toggleTmpBultoVenta = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { es_bulto } = req.body;
+    await db.execute("UPDATE tmp_ventas SET es_bulto = ? WHERE id = ?", [
+      es_bulto,
+      id,
+    ]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 const postTmpVenta = async (req, res) => {
-  console.log("--- INICIO AGREGAR AL CARRITO VENTA ---");
+  console.log("--- INICIO AGREGAR AL CARRITO VENTA (CON CONVERSIÓN) ---");
   try {
     const { codigo, cantidad, usuario_id, producto_id, combo_id } = req.body;
     const userId = usuario_id || req.user.id;
@@ -83,15 +97,18 @@ const postTmpVenta = async (req, res) => {
 
     let item = null;
     let tipo = null;
+    let factor_conv = 1.0; // Por defecto el factor es 1 (unidad base)
 
+    // 1. Identificación del Ítem (Mantenemos todas tus funcionalidades de búsqueda)
     if (producto_id) {
       const [rows] = await db.execute(
-        "SELECT id, nombre, stock FROM productos WHERE id = ? AND empresa_id = ?",
+        "SELECT id, nombre, stock, factor_conversion FROM productos WHERE id = ? AND empresa_id = ?",
         [producto_id, empresa_id],
       );
       if (rows.length > 0) {
         item = rows[0];
         tipo = "producto";
+        factor_conv = parseFloat(item.factor_conversion || 1.0);
       }
     } else if (combo_id) {
       const [rows] = await db.execute(
@@ -101,16 +118,18 @@ const postTmpVenta = async (req, res) => {
       if (rows.length > 0) {
         item = rows[0];
         tipo = "combo";
+        factor_conv = 1.0; // Combos siempre factor 1
       }
     } else if (codigo) {
       const term = codigo.toString().trim();
       const [pRows] = await db.execute(
-        "SELECT id, nombre, stock FROM productos WHERE (codigo = ? OR nombre LIKE ?) AND empresa_id = ? LIMIT 1",
+        "SELECT id, nombre, stock, factor_conversion FROM productos WHERE (codigo = ? OR nombre LIKE ?) AND empresa_id = ? LIMIT 1",
         [term, `%${term}%`, empresa_id],
       );
       if (pRows.length > 0) {
         item = pRows[0];
         tipo = "producto";
+        factor_conv = parseFloat(item.factor_conversion || 1.0);
       } else {
         const [cRows] = await db.execute(
           "SELECT id, nombre FROM combos WHERE (codigo = ? OR nombre LIKE ?) AND empresa_id = ? LIMIT 1",
@@ -119,27 +138,48 @@ const postTmpVenta = async (req, res) => {
         if (cRows.length > 0) {
           item = cRows[0];
           tipo = "combo";
+          factor_conv = 1.0;
         }
       }
     }
 
     if (!item) return res.json({ success: false, message: "No encontrado." });
 
+    // 2. Validación de Stock (Mantenemos tu lógica original)
     if (tipo === "producto" && item.stock < cantidad) {
       return res.json({
         success: false,
-        message: `Stock insuficiente para ${item.nombre}.`,
+        message: `Stock insuficiente para ${item.nombre}. Disponible: ${item.stock}`,
       });
     }
 
     const columnaId = tipo === "producto" ? "producto_id" : "combo_id";
-    await db.execute(
-      `INSERT INTO tmp_ventas (cantidad, ${columnaId}, session_id, created_at, updated_at) VALUES (?, ?, ?, NOW(), NOW())`,
-      [cantidad, item.id, userId],
+
+    // 3. 🚀 LÓGICA DE AGREGAR O ACTUALIZAR (UPSERT) 🚀
+    // Para que no se dupliquen filas del mismo producto en la misma escala (Unidad)
+    const [exist] = await db.execute(
+      `SELECT id, cantidad FROM tmp_ventas 
+       WHERE ${columnaId} = ? AND session_id = ? AND es_bulto = 0`,
+      [item.id, userId],
     );
 
+    if (exist.length > 0) {
+      // Si ya está en el carrito como unidad, solo sumamos cantidad
+      await db.execute(
+        "UPDATE tmp_ventas SET cantidad = cantidad + ?, updated_at = NOW() WHERE id = ?",
+        [cantidad, exist[0].id],
+      );
+    } else {
+      // Si es nuevo, insertamos con el factor_utilizado para activar el switch en el Front
+      await db.execute(
+        `INSERT INTO tmp_ventas (cantidad, ${columnaId}, session_id, factor_utilizado, es_bulto, created_at, updated_at) 
+         VALUES (?, ?, ?, ?, 0, NOW(), NOW())`,
+        [cantidad, item.id, userId, factor_conv],
+      );
+    }
+
     console.log(
-      `[VENTAS] Ítem agregado al temporal: ${item.nombre} (Cant: ${cantidad})`,
+      `[VENTAS] Ítem procesado: ${item.nombre} (Factor: ${factor_conv})`,
     );
     res.json({ success: true });
   } catch (error) {
@@ -1452,7 +1492,7 @@ const getVentaById = async (req, res) => {
     const { id } = req.params;
     const empresa_id = req.user.empresa_id;
 
-    // 1. Obtener la venta
+    // 1. Obtener la cabecera de la venta
     const [ventaRows] = await db.execute(
       `
       SELECT v.*, cl.nombre_cliente, cl.cuil_codigo 
@@ -1466,10 +1506,10 @@ const getVentaById = async (req, res) => {
       return res.status(404).json({ message: "Venta no encontrada" });
     const venta = ventaRows[0];
 
-    // 2. Obtener los detalles
+    // 2. Obtener los detalles (El modelo ya debe traer es_bulto y factor_utilizado)
     const detalles = await Venta.getDetallesByVentaId(id);
 
-    // 3. Procesar precios y componentes
+    // 3. Procesar precios, componentes y ESCALAS LOGÍSTICAS
     const detallesProcesados = await Promise.all(
       detalles.map(async (d) => {
         let componentes = [];
@@ -1486,26 +1526,32 @@ const getVentaById = async (req, res) => {
           componentes = compRows;
         }
 
-        // --- LÓGICA DE PRECIO SINCRONIZADA CON EL MODELO ---
-        let precioUnitario = 0;
+        // --- LÓGICA DE PRECIO UNITARIO BASE ---
+        let precioUnitarioBase = 0;
         if (d.producto_id) {
-          // Si el producto tiene 'aplicar_porcentaje' activo
           if (d.aplicar_porcentaje == 1) {
-            precioUnitario =
+            precioUnitarioBase =
               parseFloat(d.precio_compra) *
               (1 + (parseFloat(d.valor_porcentaje) || 0) / 100);
           } else {
-            precioUnitario = parseFloat(d.precio_venta) || 0;
+            precioUnitarioBase = parseFloat(d.precio_venta) || 0;
           }
         } else if (d.combo_id) {
-          // Si es combo, usamos combo_precio definido en el modelo
-          precioUnitario = parseFloat(d.combo_precio) || 0;
+          precioUnitarioBase = parseFloat(d.combo_precio) || 0;
         }
+
+        // --- 🚀 SINCERAMIENTO DE ESCALA (FACTOR DE BULTO) 🚀 ---
+        // Si es bulto, el subtotal debe contemplar el factor de conversión
+        const factor = parseFloat(d.factor_utilizado || 1);
+        const multiplicador = d.es_bulto === 1 ? factor : 1;
+
+        const subtotalSincerado =
+          parseFloat(d.cantidad) * precioUnitarioBase * multiplicador;
 
         return {
           ...d,
-          precio_unitario: precioUnitario,
-          subtotal: parseFloat(d.cantidad) * precioUnitario,
+          precio_unitario: precioUnitarioBase,
+          subtotal: subtotalSincerado, // 👈 Ahora reflejará el total real de la escala
           componentes,
         };
       }),
@@ -2491,6 +2537,7 @@ const getVentasDashboard = async (req, res) => {
 module.exports = {
   getListadoVentas,
   getTmpVentas,
+  toggleTmpBultoVenta,
   postTmpVenta,
   deleteTmpVenta,
   storeVenta,

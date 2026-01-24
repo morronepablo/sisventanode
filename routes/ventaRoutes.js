@@ -10,6 +10,7 @@ const {
   getDeudaCliente,
   getVentaTicket,
   updateTmpVentaQuantity,
+  toggleTmpBultoVenta,
   countVentas,
   getVentasSummary,
   generarReporte,
@@ -63,6 +64,7 @@ router.get("/bi/velocidad-caja", getVelocidadCaja);
 router.get("/tmp", getTmpVentas);
 router.post("/tmp", postTmpVenta);
 router.put("/tmp/:id", updateTmpVentaQuantity);
+router.put("/tmp/bulto/:id", toggleTmpBultoVenta);
 router.delete("/tmp/:id", deleteTmpVenta);
 router.get("/deuda-cliente/:id", getDeudaCliente);
 
