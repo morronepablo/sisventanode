@@ -154,48 +154,100 @@ const postTmpVenta = async (req, res) => {
       });
     }
 
-    // Buscar el producto/combo
-    let query = "";
-    let params = [];
+    // Variables para el resultado
     let item = null;
+    let itemType = "producto"; // 'producto' o 'combo'
 
+    // Caso 1: Se proporcionó producto_id específico
     if (producto_id) {
-      query = `
-        SELECT p.*, u.nombre as unidad_nombre, 
-               u2.nombre as unidad_bulto_nombre
-        FROM productos p
-        LEFT JOIN unidads u ON p.unidad_id = u.id
-        LEFT JOIN unidads u2 ON p.unidad_compra_id = u2.id
-        WHERE p.id = ? AND p.empresa_id = ?`;
-      params = [producto_id, empresa_id];
-    } else if (combo_id) {
-      query = "SELECT * FROM combos WHERE id = ? AND empresa_id = ?";
-      params = [combo_id, empresa_id];
-    } else if (codigo) {
-      query = `
-        SELECT p.*, u.nombre as unidad_nombre, 
-               u2.nombre as unidad_bulto_nombre
-        FROM productos p
-        LEFT JOIN unidads u ON p.unidad_id = u.id
-        LEFT JOIN unidads u2 ON p.unidad_compra_id = u2.id
-        WHERE (p.codigo = ? OR p.nombre LIKE ?) AND p.empresa_id = ?
-        LIMIT 1`;
-      params = [codigo, `%${codigo}%`, empresa_id];
+      const [results] = await db.execute(
+        `SELECT p.*, u.nombre as unidad_nombre, 
+                u2.nombre as unidad_bulto_nombre,
+                'producto' as tipo
+         FROM productos p
+         LEFT JOIN unidads u ON p.unidad_id = u.id
+         LEFT JOIN unidads u2 ON p.unidad_compra_id = u2.id
+         WHERE p.id = ? AND p.empresa_id = ?`,
+        [producto_id, empresa_id],
+      );
+
+      if (results.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "Producto no encontrado",
+        });
+      }
+      item = results[0];
+      itemType = "producto";
+    }
+    // Caso 2: Se proporcionó combo_id específico
+    else if (combo_id) {
+      const [results] = await db.execute(
+        "SELECT *, 'combo' as tipo FROM combos WHERE id = ? AND empresa_id = ?",
+        [combo_id, empresa_id],
+      );
+
+      if (results.length === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "Combo no encontrado",
+        });
+      }
+      item = results[0];
+      itemType = "combo";
+    }
+    // Caso 3: Se busca por código (busca primero en productos, luego en combos)
+    else if (codigo) {
+      // Primero buscar en productos
+      const [productResults] = await db.execute(
+        `SELECT p.*, u.nombre as unidad_nombre, 
+                u2.nombre as unidad_bulto_nombre,
+                'producto' as tipo
+         FROM productos p
+         LEFT JOIN unidads u ON p.unidad_id = u.id
+         LEFT JOIN unidads u2 ON p.unidad_compra_id = u2.id
+         WHERE (p.codigo = ? OR p.nombre LIKE ?) 
+           AND p.empresa_id = ?
+         LIMIT 1`,
+        [codigo, `%${codigo}%`, empresa_id],
+      );
+
+      if (productResults.length > 0) {
+        item = productResults[0];
+        itemType = "producto";
+      } else {
+        // Si no encuentra producto, buscar en combos
+        const [comboResults] = await db.execute(
+          `SELECT c.*, NULL as unidad_nombre, 
+                  NULL as unidad_bulto_nombre,
+                  'combo' as tipo
+           FROM combos c
+           WHERE (c.codigo = ? OR c.nombre LIKE ?) 
+             AND c.empresa_id = ?
+           LIMIT 1`,
+          [codigo, `%${codigo}%`, empresa_id],
+        );
+
+        if (comboResults.length === 0) {
+          return res.status(404).json({
+            success: false,
+            message: "Producto/combo no encontrado",
+          });
+        }
+        item = comboResults[0];
+        itemType = "combo";
+      }
     }
 
-    const [results] = await db.execute(query, params);
-
-    if (results.length === 0) {
+    if (!item) {
       return res.status(404).json({
         success: false,
         message: "Producto/combo no encontrado",
       });
     }
 
-    item = results[0];
-
-    // Validar stock (solo productos)
-    if (producto_id || codigo) {
+    // Validar stock (solo productos, no combos)
+    if (itemType === "producto") {
       const stockActual = parseFloat(item.stock) || 0;
       const cantidadSolicitada = parseFloat(cantidad) || 1;
 
@@ -208,8 +260,9 @@ const postTmpVenta = async (req, res) => {
     }
 
     // Insertar en tmp_ventas
-    const esBultoNum = es_bulto ? 1 : 0;
-    const factor = parseFloat(item.factor_conversion) || 1;
+    const esBultoNum = itemType === "producto" ? (es_bulto ? 1 : 0) : 0;
+    const factor =
+      itemType === "producto" ? parseFloat(item.factor_conversion) || 1 : 1;
 
     const insertQuery = `
       INSERT INTO tmp_ventas 
@@ -218,8 +271,8 @@ const postTmpVenta = async (req, res) => {
 
     const insertParams = [
       parseFloat(cantidad) || 1,
-      producto_id || codigo ? item.id : null,
-      combo_id ? item.id : null,
+      itemType === "producto" ? item.id : null,
+      itemType === "combo" ? item.id : null,
       usuario_id,
       factor,
       esBultoNum,
@@ -231,7 +284,7 @@ const postTmpVenta = async (req, res) => {
 
     res.json({
       success: true,
-      message: "Producto agregado correctamente",
+      message: `${itemType === "combo" ? "Combo" : "Producto"} agregado correctamente`,
       data: {
         id: result.insertId,
         nombre: item.nombre,
@@ -241,6 +294,7 @@ const postTmpVenta = async (req, res) => {
         factor: factor,
         unidad: item.unidad_nombre || "Unidad",
         codigo: item.codigo || "",
+        tipo: itemType,
       },
     });
   } catch (error) {
