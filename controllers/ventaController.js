@@ -712,61 +712,63 @@ const getInformeProductos = async (req, res) => {
           SUM(total_neto - (cantidad_base * costo_base)) as ganancia,
           SUM(total_neto) as total
       FROM (
-          -- 1. VENTAS
+          -- 1. VENTAS (Individuales o Combos)
           SELECT 
               v.fecha, v.id as ticket_id,
-              p.codigo, p.nombre, dv.es_bulto, dv.factor_utilizado,
-              IF(dv.es_bulto = 1, u2.nombre, u1.nombre) as unidad_medida,
+              COALESCE(p.codigo, co.codigo) as codigo,
+              COALESCE(p.nombre, co.nombre) as nombre,
+              dv.es_bulto, dv.factor_utilizado,
+              CASE 
+                WHEN dv.combo_id IS NOT NULL THEN 'COMBO'
+                WHEN dv.es_bulto = 1 THEN u2.nombre
+                ELSE u1.nombre
+              END as unidad_medida,
               dv.cantidad as cantidad_op,
               dv.cantidad_unidades_base as cantidad_base,
               dv.precio_compra as costo_base,
-              (dv.cantidad_unidades_base * dv.precio_venta) * 
-              IFNULL((v.precio_total / NULLIF((SELECT SUM(dv2.cantidad_unidades_base * dv2.precio_venta) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id), 0)), 1) as total_neto
+              ( (dv.cantidad * dv.precio_venta * IF(dv.es_bulto=1, dv.factor_utilizado, 1)) * 
+                IFNULL((v.precio_total / NULLIF((SELECT SUM(dv2.cantidad * dv2.precio_venta * IF(dv2.es_bulto=1, dv2.factor_utilizado, 1)) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id), 0)), 1)
+              ) as total_neto
           FROM detalle_ventas dv
           JOIN ventas v ON dv.venta_id = v.id
-          JOIN productos p ON dv.producto_id = p.id
+          LEFT JOIN productos p ON dv.producto_id = p.id
+          LEFT JOIN combos co ON dv.combo_id = co.id
           LEFT JOIN unidads u1 ON p.unidad_id = u1.id
           LEFT JOIN unidads u2 ON p.unidad_compra_id = u2.id
-          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ? AND dv.producto_id IS NOT NULL
-
-          UNION ALL
-
-          -- 2. COMBOS (Abre el combo para auditar stock)
-          SELECT 
-              v.fecha, v.id as ticket_id,
-              p.codigo, p.nombre, 0 as es_bulto, 1.00 as factor_utilizado,
-              u1.nombre as unidad_medida,
-              (dv.cantidad * cp.cantidad) as cantidad_op,
-              (dv.cantidad * cp.cantidad) as cantidad_base,
-              p.precio_compra as costo_base,
-              ((dv.cantidad * cp.cantidad) * p.precio_venta) * 
-              IFNULL((v.precio_total / NULLIF((SELECT SUM(dv3.cantidad_unidades_base * dv3.precio_venta) FROM detalle_ventas dv3 WHERE dv3.venta_id = v.id), 0)), 1) as total_neto
-          FROM detalle_ventas dv
-          JOIN ventas v ON dv.venta_id = v.id
-          JOIN combo_producto cp ON dv.combo_id = cp.combo_id
-          JOIN productos p ON cp.producto_id = p.id
-          LEFT JOIN unidads u1 ON p.unidad_id = u1.id
           WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
 
           UNION ALL
 
-          -- 3. DEVOLUCIONES
+          -- 2. DEVOLUCIONES (Buscamos precios en productos/combos porque detalle_devoluciones no los tiene)
           SELECT 
               dev.fecha, dev.id as ticket_id,
-              p.codigo, p.nombre, dd.es_bulto, dd.factor_utilizado,
-              IF(dd.es_bulto = 1, u2.nombre, u1.nombre) as unidad_medida,
+              COALESCE(p.codigo, co.codigo) as codigo,
+              COALESCE(p.nombre, co.nombre) as nombre,
+              dd.es_bulto, dd.factor_utilizado,
+              CASE 
+                WHEN dd.combo_id IS NOT NULL THEN 'COMBO'
+                WHEN dd.es_bulto = 1 THEN u2.nombre
+                ELSE u1.nombre
+              END as unidad_medida,
               (dd.cantidad * -1) as cantidad_op,
               (dd.cantidad_unidades_base * -1) as cantidad_base,
-              p.precio_compra as costo_base,
-              (dd.cantidad_unidades_base * p.precio_venta) * -1 as total_neto
+              -- BUSQUEDA DE COSTO
+              CASE 
+                WHEN dd.producto_id IS NOT NULL THEN p.precio_compra
+                WHEN dd.combo_id IS NOT NULL THEN (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = dd.combo_id)
+                ELSE 0 
+              END as costo_base,
+              -- TOTAL DEVOLUCION (Usamos precio de venta actual del maestro)
+              (dd.cantidad_unidades_base * COALESCE(p.precio_venta, co.precio_venta, 0)) * -1 as total_neto
           FROM detalle_devoluciones dd
           JOIN devoluciones dev ON dd.devolucion_id = dev.id
-          JOIN productos p ON dd.producto_id = p.id
+          LEFT JOIN productos p ON dd.producto_id = p.id
+          LEFT JOIN combos co ON dd.combo_id = co.id
           LEFT JOIN unidads u1 ON p.unidad_id = u1.id
           LEFT JOIN unidads u2 ON p.unidad_compra_id = u2.id
           WHERE dev.empresa_id = ? AND dev.fecha BETWEEN ? AND ?
       ) as t
-      GROUP BY fecha, ticket_id, codigo, nombre, es_bulto, factor_utilizado, unidad_medida
+      GROUP BY fecha, ticket_id, codigo, nombre, es_bulto, factor_utilizado, unidad_medida, costo_base
       ORDER BY fecha DESC, ticket_id DESC
     `;
 
@@ -777,13 +779,11 @@ const getInformeProductos = async (req, res) => {
       empresa_id,
       fecha_inicio,
       fecha_fin,
-      empresa_id,
-      fecha_inicio,
-      fecha_fin,
     ]);
     res.json(rows);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error("ERROR INFORME PRODUCTOS:", error.message);
+    res.status(500).json({ message: "Error al procesar el informe" });
   }
 };
 
@@ -794,75 +794,85 @@ const generarInformeProductosPDF = async (req, res) => {
     const fInicio = fecha_inicio.split("-").reverse().join("/");
     const fFin = fecha_fin.split("-").reverse().join("/");
 
-    // Query optimizada (mantener la misma que ya funciona)
+    // USAR LA MISMA QUERY EXACTA QUE EL VISUAL
     const query = `
       SELECT 
           DATE_FORMAT(fecha, '%d/%m/%Y') as fecha_fmt,
           ticket_id,
-          codigo, nombre, 
-          es_bulto, factor_utilizado, unidad_medida,
+          codigo, 
+          nombre, 
+          es_bulto, 
+          factor_utilizado, 
+          unidad_medida,
           SUM(cantidad_op) as cantidad,
           costo_base as costo,
           SUM(total_neto) / SUM(NULLIF(cantidad_op, 0)) as venta,
           SUM(total_neto - (cantidad_base * costo_base)) as ganancia,
-          SUM(total_neto) as total
+          SUM(total_neto) as total,
+          -- Agregar campo para identificar combos
+          CASE WHEN unidad_medida = 'COMBO' THEN 1 ELSE 0 END as es_combo
       FROM (
-          -- 1. VENTAS
+          -- 1. VENTAS (Individuales o Combos)
           SELECT 
               v.fecha, v.id as ticket_id,
-              p.codigo, p.nombre, dv.es_bulto, dv.factor_utilizado,
-              IF(dv.es_bulto = 1, u2.nombre, u1.nombre) as unidad_medida,
+              COALESCE(p.codigo, co.codigo) as codigo,
+              COALESCE(p.nombre, co.nombre) as nombre,
+              dv.es_bulto, 
+              dv.factor_utilizado,
+              CASE 
+                WHEN dv.combo_id IS NOT NULL THEN 'COMBO'
+                WHEN dv.es_bulto = 1 THEN u2.nombre
+                ELSE u1.nombre
+              END as unidad_medida,
               dv.cantidad as cantidad_op,
               dv.cantidad_unidades_base as cantidad_base,
               dv.precio_compra as costo_base,
-              (dv.cantidad_unidades_base * dv.precio_venta) * 
-              IFNULL((v.precio_total / NULLIF((SELECT SUM(dv2.cantidad_unidades_base * dv2.precio_venta) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id), 0)), 1) as total_neto
+              ( (dv.cantidad * dv.precio_venta * IF(dv.es_bulto=1, dv.factor_utilizado, 1)) * 
+                IFNULL((v.precio_total / NULLIF((SELECT SUM(dv2.cantidad * dv2.precio_venta * IF(dv2.es_bulto=1, dv2.factor_utilizado, 1)) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id), 0)), 1)
+              ) as total_neto
           FROM detalle_ventas dv
           JOIN ventas v ON dv.venta_id = v.id
-          JOIN productos p ON dv.producto_id = p.id
+          LEFT JOIN productos p ON dv.producto_id = p.id
+          LEFT JOIN combos co ON dv.combo_id = co.id
           LEFT JOIN unidads u1 ON p.unidad_id = u1.id
           LEFT JOIN unidads u2 ON p.unidad_compra_id = u2.id
-          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ? AND dv.producto_id IS NOT NULL
-
-          UNION ALL
-
-          -- 2. COMBOS
-          SELECT 
-              v.fecha, v.id as ticket_id,
-              p.codigo, p.nombre, 0 as es_bulto, 1.00 as factor_utilizado,
-              u1.nombre as unidad_medida,
-              (dv.cantidad * cp.cantidad) as cantidad_op,
-              (dv.cantidad * cp.cantidad) as cantidad_base,
-              p.precio_compra as costo_base,
-              ((dv.cantidad * cp.cantidad) * p.precio_venta) * 
-              IFNULL((v.precio_total / NULLIF((SELECT SUM(dv3.cantidad_unidades_base * dv3.precio_venta) FROM detalle_ventas dv3 WHERE dv3.venta_id = v.id), 0)), 1) as total_neto
-          FROM detalle_ventas dv
-          JOIN ventas v ON dv.venta_id = v.id
-          JOIN combo_producto cp ON dv.combo_id = cp.combo_id
-          JOIN productos p ON cp.producto_id = p.id
-          LEFT JOIN unidads u1 ON p.unidad_id = u1.id
           WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
 
           UNION ALL
 
-          -- 3. DEVOLUCIONES
+          -- 2. DEVOLUCIONES
           SELECT 
               dev.fecha, dev.id as ticket_id,
-              p.codigo, p.nombre, dd.es_bulto, dd.factor_utilizado,
-              IF(dd.es_bulto = 1, u2.nombre, u1.nombre) as unidad_medida,
+              COALESCE(p.codigo, co.codigo) as codigo,
+              COALESCE(p.nombre, co.nombre) as nombre,
+              dd.es_bulto, 
+              dd.factor_utilizado,
+              CASE 
+                WHEN dd.combo_id IS NOT NULL THEN 'COMBO'
+                WHEN dd.es_bulto = 1 THEN u2.nombre
+                ELSE u1.nombre
+              END as unidad_medida,
               (dd.cantidad * -1) as cantidad_op,
               (dd.cantidad_unidades_base * -1) as cantidad_base,
-              p.precio_compra as costo_base,
-              (dd.cantidad_unidades_base * p.precio_venta) * -1 as total_neto
+              -- BUSQUEDA DE COSTO
+              CASE 
+                WHEN dd.producto_id IS NOT NULL THEN p.precio_compra
+                WHEN dd.combo_id IS NOT NULL THEN (SELECT SUM(cp.cantidad * p2.precio_compra) FROM combo_producto cp JOIN productos p2 ON cp.producto_id = p2.id WHERE cp.combo_id = dd.combo_id)
+                ELSE 0 
+              END as costo_base,
+              -- TOTAL DEVOLUCION
+              (dd.cantidad_unidades_base * COALESCE(p.precio_venta, co.precio_venta, 0)) * -1 as total_neto
           FROM detalle_devoluciones dd
           JOIN devoluciones dev ON dd.devolucion_id = dev.id
-          JOIN productos p ON dd.producto_id = p.id
+          LEFT JOIN productos p ON dd.producto_id = p.id
+          LEFT JOIN combos co ON dd.combo_id = co.id
           LEFT JOIN unidads u1 ON p.unidad_id = u1.id
           LEFT JOIN unidads u2 ON p.unidad_compra_id = u2.id
           WHERE dev.empresa_id = ? AND dev.fecha BETWEEN ? AND ?
       ) as t
-      GROUP BY fecha, ticket_id, codigo, nombre, es_bulto, factor_utilizado, unidad_medida
-      ORDER BY fecha DESC, ticket_id DESC`;
+      GROUP BY fecha, ticket_id, codigo, nombre, es_bulto, factor_utilizado, unidad_medida, costo_base
+      ORDER BY fecha DESC, ticket_id DESC
+    `;
 
     const [rows] = await db.execute(query, [
       empresa_id,
@@ -871,10 +881,9 @@ const generarInformeProductosPDF = async (req, res) => {
       empresa_id,
       fecha_inicio,
       fecha_fin,
-      empresa_id,
-      fecha_inicio,
-      fecha_fin,
     ]);
+
+    console.log(`📊 PDF: ${rows.length} registros obtenidos`);
 
     // Funciones de formato
     const fmt = (val) =>
@@ -906,88 +915,96 @@ const generarInformeProductosPDF = async (req, res) => {
         ? ((totalGanancia / totalFacturacion) * 100).toFixed(1)
         : "0.0";
 
-    // Dividir en páginas - 15 filas por página como sugieres
-    const filasPorPagina = 14;
-    const totalPaginas = Math.ceil(rows.length / filasPorPagina);
+    // Dividir en páginas - 20 filas por página para landscape
+    const filasPorPagina = 14; // Un poco menos para dejar espacio para header
     const paginas = [];
 
     for (let i = 0; i < rows.length; i += filasPorPagina) {
       paginas.push(rows.slice(i, i + filasPorPagina));
     }
 
-    // FUNCIÓN para generar filas con altura fija
+    // FUNCIÓN para generar filas
     const generarFila = (item, esPar) => {
       const ganancia = parseFloat(item.ganancia) || 0;
       const total = parseFloat(item.total) || 0;
       const esBulto = item.es_bulto === 1;
-      const alturaFila = "24px"; // Altura fija para todas las filas
+      const esCombo = item.es_combo === 1 || item.unidad_medida === "COMBO";
+      const alturaFila = "22px";
 
       return `
-        <tr style="height: ${alturaFila}; ${esPar ? "background-color: #f8f9fa;" : "background-color: white;"} border-bottom: 1px solid #e0e0e0;">
-          <!-- FECHA -->
-          <td style="padding: 2px 3px; font-size: 8px; text-align: center; font-weight: 600; color: #333; vertical-align: middle; width: 7%;">
-            ${item.fecha_fmt}
-          </td>
-          
-          <!-- TICKET -->
-          <td style="padding: 2px 3px; font-size: 8px; text-align: center; vertical-align: middle; width: 9%;">
-            <div style="background: #2c3e50; color: white; padding: 1px 3px; border-radius: 2px; font-weight: 600; font-size: 7px; white-space: nowrap; display: inline-block; min-width: 60px;">
-              T-${String(item.ticket_id).padStart(6, "0")}
-            </div>
-          </td>
-          
-          <!-- PRODUCTO -->
-          <td style="padding: 2px 4px; font-size: 8px; vertical-align: middle; width: 35%;">
-            <div style="font-weight: 600; color: #333; line-height: 1.1; overflow: hidden; height: 16px;">
-              ${item.nombre}
-            </div>
-            <div style="font-size: 7px; color: #666; line-height: 1; margin-top: 1px;">
-              <span style="background: #f5f5f5; padding: 1px 3px; border-radius: 1px; margin-right: 3px; font-family: 'Courier New', monospace; border: 1px solid #ddd; font-size: 6.5px; display: inline-block;">
-                ${item.codigo}
-              </span>
-              ${esBulto ? `<span style="color: #0d6efd; font-weight: 600; background: #e7f1ff; padding: 1px 3px; border-radius: 1px; border: 1px solid #b6d4fe; font-size: 6.5px; display: inline-block;">Bulto x${item.factor_utilizado}</span>` : ""}
-            </div>
-          </td>
-          
-          <!-- CANTIDAD -->
-          <td style="padding: 2px 3px; font-size: 9px; text-align: center; font-weight: 700; font-family: 'Courier New', monospace; vertical-align: middle; width: 5%;">
-            ${fmtNumero(Math.abs(item.cantidad))}
-          </td>
-          
-          <!-- ESCALA -->
-          <td style="padding: 2px 3px; text-align: center; vertical-align: middle; width: 7%;">
-            <span style="background: ${esBulto ? "#e7f1ff" : "#f8f9fa"}; 
-                    color: ${esBulto ? "#0d6efd" : "#6c757d"}; 
-                    padding: 1px 4px; border-radius: 6px; 
-                    font-size: 7px; font-weight: 700; 
-                    border: 1px solid ${esBulto ? "#b6d4fe" : "#dee2e6"};
-                    display: inline-block;
-                    white-space: nowrap;">
-              ${(item.unidad_medida || "Unid").toUpperCase()}
-            </span>
-          </td>
-          
-          <!-- COSTO -->
-          <td style="padding: 2px 3px; font-size: 8px; text-align: right; color: #6c757d; font-family: 'Courier New', monospace; font-weight: 600; vertical-align: middle; width: 8%;">
-            $ ${fmt(item.costo)}
-          </td>
-          
-          <!-- VENTA -->
-          <td style="padding: 2px 3px; font-size: 8px; text-align: right; font-weight: 700; font-family: 'Courier New', monospace; color: #2c3e50; vertical-align: middle; width: 9%;">
-            $ ${fmt(item.venta)}
-          </td>
-          
-          <!-- GANANCIA -->
-          <td style="padding: 2px 3px; font-size: 8px; text-align: right; font-weight: 700; color: ${ganancia >= 0 ? "#28a745" : "#dc3545"}; font-family: 'Courier New', monospace; vertical-align: middle; width: 10%;">
-            $ ${fmt(ganancia)}
-          </td>
-          
-          <!-- TOTAL -->
-          <td style="padding: 2px 3px; font-size: 8px; text-align: right; font-weight: 800; color: #333; background: #f8f9fa; font-family: 'Courier New', monospace; vertical-align: middle; width: 10%;">
-            $ ${fmt(total)}
-          </td>
-        </tr>
-      `;
+    <tr style="height: ${alturaFila}; ${esPar ? "background-color: #f8f9fa;" : "background-color: white;"} border-bottom: 1px solid #e0e0e0;">
+      <!-- FECHA -->
+      <td style="padding: 2px 3px; font-size: 8px; text-align: center; font-weight: 600; color: #333; vertical-align: middle; width: 7%;">
+        ${item.fecha_fmt}
+      </td>
+
+      <!-- TICKET -->
+      <td style="padding: 2px 3px; font-size: 8px; text-align: center; vertical-align: middle; width: 9%;">
+        <div style="background: #2c3e50; color: white; padding: 1px 3px; border-radius: 2px; font-weight: 600; font-size: 7px; white-space: nowrap; display: inline-block; min-width: 60px;">
+          T-${String(item.ticket_id).padStart(6, "0")}
+        </div>
+      </td>
+
+      <!-- PRODUCTO - MOSTRAR SOLO EL COMBO, NO LOS PRODUCTOS INDIVIDUALES -->
+      <td style="padding: 2px 4px; font-size: 8px; vertical-align: middle; width: 35%;">
+        <div style="font-weight: 600; color: #333; line-height: 1.1; overflow: hidden; height: 16px;">
+          ${item.nombre}
+        </div>
+        <div style="font-size: 7px; color: #666; line-height: 1; margin-top: 1px;">
+          ${
+            esCombo
+              ? `<span style="color: #6610f2; font-weight: 700; background: #e7dcff; padding: 1px 4px; border-radius: 1px; border: 1px solid #c9b3ff; font-size: 6.5px; display: inline-block;">COMBO</span>`
+              : item.codigo
+                ? `<span style="background: #f5f5f5; padding: 1px 3px; border-radius: 1px; margin-right: 3px; font-family: 'Courier New', monospace; border: 1px solid #ddd; font-size: 6.5px; display: inline-block;">${item.codigo}</span>`
+                : ""
+          }
+          ${
+            esBulto && !esCombo
+              ? `<span style="color: #0d6efd; font-weight: 600; background: #e7f1ff; padding: 1px 3px; border-radius: 1px; border: 1px solid #b6d4fe; font-size: 6.5px; display: inline-block;">Bulto x${item.factor_utilizado}</span>`
+              : ""
+          }
+        </div>
+      </td>
+
+      <!-- CANTIDAD -->
+      <td style="padding: 2px 3px; font-size: 9px; text-align: center; font-weight: 700; font-family: 'Courier New', monospace; vertical-align: middle; width: 5%;">
+        ${fmtNumero(Math.abs(item.cantidad))}
+      </td>
+
+      <!-- ESCALA -->
+      <td style="padding: 2px 3px; text-align: center; vertical-align: middle; width: 7%;">
+        <span style="background: ${esCombo ? "#e7dcff" : esBulto ? "#e7f1ff" : "#f8f9fa"};
+                color: ${esCombo ? "#6610f2" : esBulto ? "#0d6efd" : "#6c757d"};
+                padding: 1px 4px; border-radius: 6px;
+                font-size: 7px; font-weight: 700;
+                border: 1px solid ${esCombo ? "#c9b3ff" : esBulto ? "#b6d4fe" : "#dee2e6"};
+                display: inline-block;
+                white-space: nowrap;">
+          ${esCombo ? "COMBO" : (item.unidad_medida || "Unid").toUpperCase()}
+        </span>
+      </td>
+
+      <!-- COSTO -->
+      <td style="padding: 2px 3px; font-size: 8px; text-align: right; color: #6c757d; font-family: 'Courier New', monospace; font-weight: 600; vertical-align: middle; width: 8%;">
+        $ ${fmt(item.costo)}
+      </td>
+
+      <!-- VENTA -->
+      <td style="padding: 2px 3px; font-size: 8px; text-align: right; font-weight: 700; font-family: 'Courier New', monospace; color: #2c3e50; vertical-align: middle; width: 9%;">
+        $ ${fmt(item.venta)}
+      </td>
+
+      <!-- GANANCIA -->
+      <td style="padding: 2px 3px; font-size: 8px; text-align: right; font-weight: 700; color: ${ganancia >= 0 ? "#28a745" : "#dc3545"}; font-family: 'Courier New', monospace; vertical-align: middle; width: 10%;">
+        $ ${fmt(ganancia)}
+      </td>
+
+      <!-- TOTAL -->
+      <td style="padding: 2px 3px; font-size: 8px; text-align: right; font-weight: 800; color: #333; background: #f8f9fa; font-family: 'Courier New', monospace; vertical-align: middle; width: 10%;">
+        $ ${fmt(total)}
+      </td>
+    </tr>
+  `;
     };
 
     // Generar cada página
@@ -1009,15 +1026,15 @@ const generarInformeProductosPDF = async (req, res) => {
 
       return `
         <div style="page-break-after: ${paginaIndex < paginas.length - 1 ? "always" : "avoid"};">
-          <!-- Header IDENTICO en cada página -->
+          <!-- Header con información fija -->
           <div style="border-bottom: 2px solid #28a745; padding-bottom: 5px; margin-bottom: 5px;">
             <div style="text-align: center;">
               <h1 style="color: #2c3e50; font-size: 14px; font-weight: 800; margin: 0 0 2px 0; text-transform: uppercase; letter-spacing: 0.5px;">
                 📊 AUDITORÍA DETALLADA DE VENTAS
               </h1>
               <div style="font-size: 8px; color: #666; margin-bottom: 2px;">
-                <strong>Período:</strong> ${fInicio} al ${fFin} | 
-                <strong>Página:</strong> ${paginaIndex + 1} de ${paginas.length} | 
+                <strong>Período:</strong> ${fInicio} al ${fFin} |
+                <strong>Página:</strong> ${paginaIndex + 1} de ${paginas.length} |
                 <strong>Registros:</strong> ${pagina.length}
               </div>
             </div>
@@ -1072,7 +1089,7 @@ const generarInformeProductosPDF = async (req, res) => {
               : ""
           }
 
-          <!-- Encabezado de tabla IDENTICO en cada página -->
+          <!-- Encabezado de tabla -->
           <table style="width: 100%; border-collapse: collapse; margin-bottom: 2px; background: #2c3e50; table-layout: fixed; font-size: 8px;">
             <thead>
               <tr>
@@ -1154,9 +1171,9 @@ const generarInformeProductosPDF = async (req, res) => {
               : ""
           }
 
-          <!-- Footer con información de generación -->
+          <!-- Footer -->
           <div style="margin-top: 10px; padding-top: 5px; border-top: 1px solid #eee; font-size: 7px; color: #888; text-align: center;">
-            Generado: ${new Date().toLocaleDateString("es-AR", { day: "2-digit", month: "2-digit", year: "numeric" })} ${new Date().toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" })} | Sistema de Ventas © ${new Date().getFullYear()}
+            Generado: ${new Date().toLocaleDateString("es-AR")} ${new Date().toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" })} | Sistema de Ventas
           </div>
         </div>
       `;
@@ -1171,12 +1188,12 @@ const generarInformeProductosPDF = async (req, res) => {
         <title>Auditoría de Ventas - ${fInicio} al ${fFin}</title>
         <style>
           @page {
-            margin: 12mm 8mm 15mm 8mm;
+            margin: 15mm 8mm 15mm 8mm;
             size: A4 landscape;
           }
-          
+
           body {
-            font-family: 'Segoe UI', 'Roboto', sans-serif;
+            font-family: 'Segoe UI', 'Arial', sans-serif;
             color: #333;
             margin: 0;
             padding: 0;
@@ -1185,21 +1202,15 @@ const generarInformeProductosPDF = async (req, res) => {
             -webkit-print-color-adjust: exact;
             print-color-adjust: exact;
           }
-          
+
           table {
             border-collapse: collapse;
+            table-layout: fixed;
           }
-          
+
           th, td {
             vertical-align: middle;
             overflow: hidden;
-          }
-          
-          /* Forzar alturas consistentes */
-          tr {
-            height: 24px !important;
-            min-height: 24px !important;
-            max-height: 24px !important;
           }
         </style>
       </head>
@@ -1209,39 +1220,46 @@ const generarInformeProductosPDF = async (req, res) => {
       </html>
     `;
 
+    console.log("🛠️ Generando PDF...");
+
     // Configuración del PDF
     const options = {
       format: "A4",
       orientation: "landscape",
       border: {
-        top: "12mm",
+        top: "15mm",
         bottom: "15mm",
         left: "8mm",
         right: "8mm",
       },
-      displayHeaderFooter: false,
+      type: "pdf",
+      timeout: 120000,
     };
 
     // Generar PDF
     pdf.create(html, options).toBuffer((err, buffer) => {
       if (err) {
-        console.error("Error generando PDF:", err);
+        console.error("❌ Error generando PDF:", err.message);
         return res.status(500).json({
           success: false,
           message: "Error al generar el documento PDF",
+          error: err.message,
         });
       }
+
+      console.log("✅ PDF generado exitosamente");
 
       const fecha = new Date().toISOString().split("T")[0];
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader(
         "Content-Disposition",
-        `inline; filename="auditoria_ventas_${fInicio}_al_${fFin}.pdf"`,
+        `attachment; filename="auditoria_ventas_${fInicio}_al_${fFin}.pdf"`,
       );
       res.send(buffer);
     });
   } catch (error) {
-    console.error("ERROR en generarInformeProductosPDF:", error);
+    console.error("🔥 ERROR en generarInformeProductosPDF:", error.message);
+    console.error("🔥 Stack:", error.stack);
     res.status(500).json({
       success: false,
       message: "Error interno al generar el informe",
