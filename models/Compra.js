@@ -26,8 +26,12 @@ const Compra = {
         dc.*, 
         prod.nombre as producto_nombre, 
         prod.codigo as producto_codigo,
-        u_base.nombre as unidad_base_nombre,   -- 👈 Nombre de la unidad base (ej: Gramos)
-        u_compra.nombre as unidad_bulto_nombre -- 👈 Nombre de la unidad bulto (ej: Kilo)
+        u_base.nombre as unidad_base_nombre,   -- Unidad base (ej: Gramos)
+        u_compra.nombre as unidad_bulto_nombre, -- Unidad bulto (ej: Kilo)
+        -- Agregamos campos de escalas para mostrar correctamente
+        dc.es_bulto,
+        dc.factor_utilizado,
+        dc.cantidad_unidades_base
       FROM detalle_compras dc
       LEFT JOIN productos prod ON dc.producto_id = prod.id
       LEFT JOIN unidads u_base ON prod.unidad_id = u_base.id

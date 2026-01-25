@@ -32,27 +32,61 @@ const getListadoVentas = async (req, res) => {
     for (const v of ventas) {
       const detallesRaw = await Venta.getDetallesByVentaId(v.id);
 
-      // 🚀 PROCESAMOS CADA DETALLE PARA QUE EL PRECIO SEA REAL 🚀
+      // 🚀 PROCESAMOS CADA DETALLE CONSIDERANDO ESCALA Y BULTOS 🚀
       const detallesProcesados = detallesRaw.map((d) => {
         let precioUnitario = 0;
+        let cantidadMostrar = parseFloat(d.cantidad);
+        let equivalencia_unidades = 1;
+        let escala_nombre = "UNIDAD";
+
+        // Si es producto (no combo)
         if (d.producto_id) {
-          // Lógica de porcentaje o precio fijo para productos
-          if (d.aplicar_porcentaje == 1) {
-            precioUnitario =
-              parseFloat(d.precio_compra) *
-              (1 + (parseFloat(d.valor_porcentaje) || 0) / 100);
-          } else {
-            precioUnitario = parseFloat(d.precio_venta) || 0;
+          // 🚀 SISTEMA DE BULTOS EXISTENTE (es_bulto y factor_utilizado)
+          if (d.es_bulto == 1) {
+            const factor = parseFloat(d.factor_utilizado) || 1;
+
+            if (d.aplicar_porcentaje == 1) {
+              const precioBase = parseFloat(d.precio_compra) * factor;
+              precioUnitario =
+                precioBase * (1 + (parseFloat(d.valor_porcentaje) || 0) / 100);
+            } else {
+              // Si hay precio_venta_bulto específico, usarlo
+              if (d.precio_venta_bulto) {
+                precioUnitario = parseFloat(d.precio_venta_bulto);
+              } else {
+                precioUnitario = parseFloat(d.precio_venta) * factor;
+              }
+            }
+            escala_nombre = d.unidad_bulto_nombre || "BULTO";
+            equivalencia_unidades = factor;
           }
-        } else if (d.combo_id) {
-          // Si es combo, usamos el precio del combo guardado
+          // 🚀 UNIDAD INDIVIDUAL
+          else {
+            if (d.aplicar_porcentaje == 1) {
+              precioUnitario =
+                parseFloat(d.precio_compra) *
+                (1 + (parseFloat(d.valor_porcentaje) || 0) / 100);
+            } else {
+              precioUnitario = parseFloat(d.precio_venta) || 0;
+            }
+            escala_nombre = d.unidad_base_nombre || "UNIDAD";
+            equivalencia_unidades = 1;
+          }
+        }
+        // Si es combo
+        else if (d.combo_id) {
           precioUnitario = parseFloat(d.combo_precio) || 0;
+          escala_nombre = "COMBO";
         }
 
         return {
           ...d,
           precio_unitario: precioUnitario,
-          importe_neto: parseFloat(d.cantidad) * precioUnitario,
+          importe_neto: cantidadMostrar * precioUnitario,
+          // Campos adicionales para mostrar correctamente
+          escala_nombre: escala_nombre,
+          equivalencia_unidades: equivalencia_unidades,
+          cantidad_mostrar: cantidadMostrar,
         };
       });
 
@@ -89,104 +123,134 @@ const toggleTmpBultoVenta = async (req, res) => {
 };
 
 const postTmpVenta = async (req, res) => {
-  console.log("--- INICIO AGREGAR AL CARRITO VENTA (CON CONVERSIÓN) ---");
   try {
-    const { codigo, cantidad, usuario_id, producto_id, combo_id } = req.body;
-    const userId = usuario_id || req.user.id;
-    const empresa_id = req.user.empresa_id;
+    console.log("Datos recibidos:", req.body);
+    console.log("Usuario:", req.user);
 
-    let item = null;
-    let tipo = null;
-    let factor_conv = 1.0; // Por defecto el factor es 1 (unidad base)
+    const {
+      codigo,
+      cantidad = 1,
+      producto_id,
+      combo_id,
+      es_bulto = 0,
+    } = req.body;
 
-    // 1. Identificación del Ítem (Mantenemos todas tus funcionalidades de búsqueda)
-    if (producto_id) {
-      const [rows] = await db.execute(
-        "SELECT id, nombre, stock, factor_conversion FROM productos WHERE id = ? AND empresa_id = ?",
-        [producto_id, empresa_id],
-      );
-      if (rows.length > 0) {
-        item = rows[0];
-        tipo = "producto";
-        factor_conv = parseFloat(item.factor_conversion || 1.0);
-      }
-    } else if (combo_id) {
-      const [rows] = await db.execute(
-        "SELECT id, nombre FROM combos WHERE id = ? AND empresa_id = ?",
-        [combo_id, empresa_id],
-      );
-      if (rows.length > 0) {
-        item = rows[0];
-        tipo = "combo";
-        factor_conv = 1.0; // Combos siempre factor 1
-      }
-    } else if (codigo) {
-      const term = codigo.toString().trim();
-      const [pRows] = await db.execute(
-        "SELECT id, nombre, stock, factor_conversion FROM productos WHERE (codigo = ? OR nombre LIKE ?) AND empresa_id = ? LIMIT 1",
-        [term, `%${term}%`, empresa_id],
-      );
-      if (pRows.length > 0) {
-        item = pRows[0];
-        tipo = "producto";
-        factor_conv = parseFloat(item.factor_conversion || 1.0);
-      } else {
-        const [cRows] = await db.execute(
-          "SELECT id, nombre FROM combos WHERE (codigo = ? OR nombre LIKE ?) AND empresa_id = ? LIMIT 1",
-          [term, `%${term}%`, empresa_id],
-        );
-        if (cRows.length > 0) {
-          item = cRows[0];
-          tipo = "combo";
-          factor_conv = 1.0;
-        }
-      }
-    }
-
-    if (!item) return res.json({ success: false, message: "No encontrado." });
-
-    // 2. Validación de Stock (Mantenemos tu lógica original)
-    if (tipo === "producto" && item.stock < cantidad) {
-      return res.json({
+    // Validar autenticación
+    if (!req.user || !req.user.id) {
+      return res.status(401).json({
         success: false,
-        message: `Stock insuficiente para ${item.nombre}. Disponible: ${item.stock}`,
+        message: "Usuario no autenticado",
       });
     }
 
-    const columnaId = tipo === "producto" ? "producto_id" : "combo_id";
+    const usuario_id = req.user.id;
+    const empresa_id = req.user.empresa_id;
 
-    // 3. 🚀 LÓGICA DE AGREGAR O ACTUALIZAR (UPSERT) 🚀
-    // Para que no se dupliquen filas del mismo producto en la misma escala (Unidad)
-    const [exist] = await db.execute(
-      `SELECT id, cantidad FROM tmp_ventas 
-       WHERE ${columnaId} = ? AND session_id = ? AND es_bulto = 0`,
-      [item.id, userId],
-    );
-
-    if (exist.length > 0) {
-      // Si ya está en el carrito como unidad, solo sumamos cantidad
-      await db.execute(
-        "UPDATE tmp_ventas SET cantidad = cantidad + ?, updated_at = NOW() WHERE id = ?",
-        [cantidad, exist[0].id],
-      );
-    } else {
-      // Si es nuevo, insertamos con el factor_utilizado para activar el switch en el Front
-      await db.execute(
-        `INSERT INTO tmp_ventas (cantidad, ${columnaId}, session_id, factor_utilizado, es_bulto, created_at, updated_at) 
-         VALUES (?, ?, ?, ?, 0, NOW(), NOW())`,
-        [cantidad, item.id, userId, factor_conv],
-      );
+    // Validar datos mínimos
+    if (!codigo && !producto_id && !combo_id) {
+      return res.status(400).json({
+        success: false,
+        message: "Debe proporcionar código, producto_id o combo_id",
+      });
     }
 
-    console.log(
-      `[VENTAS] Ítem procesado: ${item.nombre} (Factor: ${factor_conv})`,
-    );
-    res.json({ success: true });
+    // Buscar el producto/combo
+    let query = "";
+    let params = [];
+    let item = null;
+
+    if (producto_id) {
+      query = `
+        SELECT p.*, u.nombre as unidad_nombre, 
+               u2.nombre as unidad_bulto_nombre
+        FROM productos p
+        LEFT JOIN unidads u ON p.unidad_id = u.id
+        LEFT JOIN unidads u2 ON p.unidad_compra_id = u2.id
+        WHERE p.id = ? AND p.empresa_id = ?`;
+      params = [producto_id, empresa_id];
+    } else if (combo_id) {
+      query = "SELECT * FROM combos WHERE id = ? AND empresa_id = ?";
+      params = [combo_id, empresa_id];
+    } else if (codigo) {
+      query = `
+        SELECT p.*, u.nombre as unidad_nombre, 
+               u2.nombre as unidad_bulto_nombre
+        FROM productos p
+        LEFT JOIN unidads u ON p.unidad_id = u.id
+        LEFT JOIN unidads u2 ON p.unidad_compra_id = u2.id
+        WHERE (p.codigo = ? OR p.nombre LIKE ?) AND p.empresa_id = ?
+        LIMIT 1`;
+      params = [codigo, `%${codigo}%`, empresa_id];
+    }
+
+    const [results] = await db.execute(query, params);
+
+    if (results.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Producto/combo no encontrado",
+      });
+    }
+
+    item = results[0];
+
+    // Validar stock (solo productos)
+    if (producto_id || codigo) {
+      const stockActual = parseFloat(item.stock) || 0;
+      const cantidadSolicitada = parseFloat(cantidad) || 1;
+
+      if (stockActual < cantidadSolicitada) {
+        return res.status(400).json({
+          success: false,
+          message: `Stock insuficiente. Disponible: ${stockActual}`,
+        });
+      }
+    }
+
+    // Insertar en tmp_ventas
+    const esBultoNum = es_bulto ? 1 : 0;
+    const factor = parseFloat(item.factor_conversion) || 1;
+
+    const insertQuery = `
+      INSERT INTO tmp_ventas 
+      (cantidad, producto_id, combo_id, session_id, factor_utilizado, es_bulto, created_at, updated_at) 
+      VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())`;
+
+    const insertParams = [
+      parseFloat(cantidad) || 1,
+      producto_id || codigo ? item.id : null,
+      combo_id ? item.id : null,
+      usuario_id,
+      factor,
+      esBultoNum,
+    ];
+
+    console.log("Insertando en tmp_ventas:", insertParams);
+
+    const [result] = await db.execute(insertQuery, insertParams);
+
+    res.json({
+      success: true,
+      message: "Producto agregado correctamente",
+      data: {
+        id: result.insertId,
+        nombre: item.nombre,
+        cantidad: parseFloat(cantidad) || 1,
+        precio: parseFloat(item.precio_venta) || 0,
+        es_bulto: esBultoNum,
+        factor: factor,
+        unidad: item.unidad_nombre || "Unidad",
+        codigo: item.codigo || "",
+      },
+    });
   } catch (error) {
-    console.error("[VENTAS ERROR] postTmpVenta:", error.message);
-    res.status(500).json({ message: "Error interno" });
+    console.error("Error en postTmpVenta:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error interno del servidor",
+      error: error.message,
+    });
   }
-  console.log("--- FIN AGREGAR AL CARRITO VENTA ---");
 };
 
 const deleteTmpVenta = async (req, res) => {
@@ -636,118 +700,171 @@ const getInformeProductos = async (req, res) => {
     const { fecha_inicio, fecha_fin } = req.query;
     const empresa_id = req.user.empresa_id;
 
-    // ELIMINAMOS MY_CAJA para que el informe sea GLOBAL
     const query = `
       SELECT 
-          codigo, nombre, unidad,
-          SUM(cantidad_neta) as cantidad,
-          AVG(costo_unitario) as costo,
-          SUM(total_neto) / SUM(cantidad_neta) as venta,
-          SUM(total_neto - (cantidad_neta * costo_unitario)) as ganancia,
+          DATE_FORMAT(fecha, '%d/%m/%Y') as fecha_fmt,
+          ticket_id,
+          codigo, nombre, 
+          es_bulto, factor_utilizado, unidad_medida,
+          SUM(cantidad_op) as cantidad,
+          costo_base as costo,
+          SUM(total_neto) / SUM(NULLIF(cantidad_op, 0)) as venta,
+          SUM(total_neto - (cantidad_base * costo_base)) as ganancia,
           SUM(total_neto) as total
       FROM (
-          -- 1. PRODUCTOS VENDIDOS INDIVIDUALMENTE (Toda la Empresa)
+          -- 1. VENTAS
           SELECT 
-              p.codigo, p.nombre, IFNULL(u.nombre, 'Unidad') as unidad,
-              dv.cantidad as cantidad_neta,
-              dv.precio_compra as costo_unitario,
-              (dv.cantidad * dv.precio_venta) * 
-              (CASE WHEN (SELECT SUM(dv2.cantidad * dv2.precio_venta) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id) = 0 THEN 1 
-               ELSE (v.precio_total / (SELECT SUM(dv2.cantidad * dv2.precio_venta) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id)) END) as total_neto
+              v.fecha, v.id as ticket_id,
+              p.codigo, p.nombre, dv.es_bulto, dv.factor_utilizado,
+              IF(dv.es_bulto = 1, u2.nombre, u1.nombre) as unidad_medida,
+              dv.cantidad as cantidad_op,
+              dv.cantidad_unidades_base as cantidad_base,
+              dv.precio_compra as costo_base,
+              (dv.cantidad_unidades_base * dv.precio_venta) * 
+              IFNULL((v.precio_total / NULLIF((SELECT SUM(dv2.cantidad_unidades_base * dv2.precio_venta) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id), 0)), 1) as total_neto
           FROM detalle_ventas dv
           JOIN ventas v ON dv.venta_id = v.id
           JOIN productos p ON dv.producto_id = p.id
-          LEFT JOIN unidads u ON p.unidad_id = u.id
-          WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ? AND dv.producto_id IS NOT NULL
+          LEFT JOIN unidads u1 ON p.unidad_id = u1.id
+          LEFT JOIN unidads u2 ON p.unidad_compra_id = u2.id
+          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ? AND dv.producto_id IS NOT NULL
 
           UNION ALL
 
-          -- 2. PRODUCTOS VENDIDOS DENTRO DE COMBOS (Toda la Empresa)
+          -- 2. COMBOS (Abre el combo para auditar stock)
           SELECT 
-              p.codigo, p.nombre, IFNULL(u.nombre, 'Unidad') as unidad,
-              (dv.cantidad * cp.cantidad) as cantidad_neta,
-              p.precio_compra as costo_unitario,
+              v.fecha, v.id as ticket_id,
+              p.codigo, p.nombre, 0 as es_bulto, 1.00 as factor_utilizado,
+              u1.nombre as unidad_medida,
+              (dv.cantidad * cp.cantidad) as cantidad_op,
+              (dv.cantidad * cp.cantidad) as cantidad_base,
+              p.precio_compra as costo_base,
               ((dv.cantidad * cp.cantidad) * p.precio_venta) * 
-              (CASE WHEN (SELECT SUM(dv3.cantidad * dv3.precio_venta) FROM detalle_ventas dv3 WHERE dv3.venta_id = v.id) = 0 THEN 1 
-               ELSE (v.precio_total / (SELECT SUM(dv3.cantidad * dv3.precio_venta) FROM detalle_ventas dv3 WHERE dv3.venta_id = v.id)) END) as total_neto
+              IFNULL((v.precio_total / NULLIF((SELECT SUM(dv3.cantidad_unidades_base * dv3.precio_venta) FROM detalle_ventas dv3 WHERE dv3.venta_id = v.id), 0)), 1) as total_neto
           FROM detalle_ventas dv
           JOIN ventas v ON dv.venta_id = v.id
           JOIN combo_producto cp ON dv.combo_id = cp.combo_id
           JOIN productos p ON cp.producto_id = p.id
-          LEFT JOIN unidads u ON p.unidad_id = u.id
-          WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ?
+          LEFT JOIN unidads u1 ON p.unidad_id = u1.id
+          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
 
           UNION ALL
 
-          -- 3. DEVOLUCIONES (Toda la Empresa)
+          -- 3. DEVOLUCIONES
           SELECT 
-              p.codigo, p.nombre, IFNULL(u.nombre, 'Unidad') as unidad,
-              (dd.cantidad * -1) as cantidad_neta,
-              p.precio_compra as costo_unitario,
-              (dev.precio_total * ( (dd.cantidad * p.precio_venta) / (SELECT SUM(dd2.cantidad * p2.precio_venta) FROM detalle_devoluciones dd2 JOIN productos p2 ON dd2.producto_id = p2.id WHERE dd2.devolucion_id = dev.id) ) ) * -1 as total_neto
+              dev.fecha, dev.id as ticket_id,
+              p.codigo, p.nombre, dd.es_bulto, dd.factor_utilizado,
+              IF(dd.es_bulto = 1, u2.nombre, u1.nombre) as unidad_medida,
+              (dd.cantidad * -1) as cantidad_op,
+              (dd.cantidad_unidades_base * -1) as cantidad_base,
+              p.precio_compra as costo_base,
+              (dd.cantidad_unidades_base * p.precio_venta) * -1 as total_neto
           FROM detalle_devoluciones dd
           JOIN devoluciones dev ON dd.devolucion_id = dev.id
           JOIN productos p ON dd.producto_id = p.id
-          LEFT JOIN unidads u ON p.unidad_id = u.id
-          WHERE dev.empresa_id = ? AND DATE(dev.fecha) BETWEEN ? AND ?
+          LEFT JOIN unidads u1 ON p.unidad_id = u1.id
+          LEFT JOIN unidads u2 ON p.unidad_compra_id = u2.id
+          WHERE dev.empresa_id = ? AND dev.fecha BETWEEN ? AND ?
       ) as t
-      GROUP BY codigo, nombre, unidad
-      HAVING total <> 0
-      ORDER BY total DESC
+      GROUP BY fecha, ticket_id, codigo, nombre, es_bulto, factor_utilizado, unidad_medida
+      ORDER BY fecha DESC, ticket_id DESC
     `;
 
-    // Pasamos parámetros solo para empresa_id y fechas
     const [rows] = await db.execute(query, [
       empresa_id,
       fecha_inicio,
-      fecha_fin, // Bloque 1
+      fecha_fin,
       empresa_id,
       fecha_inicio,
-      fecha_fin, // Bloque 2
+      fecha_fin,
       empresa_id,
       fecha_inicio,
-      fecha_fin, // Bloque 3
+      fecha_fin,
     ]);
-
     res.json(rows);
   } catch (error) {
-    console.error("ERROR INFORME PRODUCTOS:", error);
-    res.status(500).json({ message: "Error en informe" });
+    res.status(500).json({ message: error.message });
   }
 };
 
 const generarInformeProductosPDF = async (req, res) => {
   try {
     const { fecha_inicio, fecha_fin } = req.query;
-    const empresa_id = req.query.empresa_id || 1;
+    const empresa_id = req.user?.empresa_id || req.query.empresa_id || 1;
     const fInicio = fecha_inicio.split("-").reverse().join("/");
     const fFin = fecha_fin.split("-").reverse().join("/");
 
+    // Query optimizada (mantener la misma que ya funciona)
     const query = `
       SELECT 
-          codigo, nombre, unidad, SUM(cantidad_neta) as cantidad,
-          AVG(costo_unitario) as costo, 
-          SUM(total_neto) / SUM(cantidad_neta) as venta,
-          SUM(total_neto - (cantidad_neta * costo_unitario)) as ganancia, 
+          DATE_FORMAT(fecha, '%d/%m/%Y') as fecha_fmt,
+          ticket_id,
+          codigo, nombre, 
+          es_bulto, factor_utilizado, unidad_medida,
+          SUM(cantidad_op) as cantidad,
+          costo_base as costo,
+          SUM(total_neto) / SUM(NULLIF(cantidad_op, 0)) as venta,
+          SUM(total_neto - (cantidad_base * costo_base)) as ganancia,
           SUM(total_neto) as total
       FROM (
-          SELECT p.codigo, p.nombre, IFNULL(u.nombre, 'Unid') as unidad, dv.cantidad as cantidad_neta, dv.precio_compra as costo_unitario,
-          (dv.cantidad * dv.precio_venta) * (CASE WHEN (SELECT SUM(dv2.cantidad * dv2.precio_venta) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id) = 0 THEN 1 ELSE (v.precio_total / (SELECT SUM(dv2.cantidad * dv2.precio_venta) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id)) END) as total_neto
-          FROM detalle_ventas dv JOIN ventas v ON dv.venta_id = v.id JOIN productos p ON dv.producto_id = p.id LEFT JOIN unidads u ON p.unidad_id = u.id
-          WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ? AND dv.producto_id IS NOT NULL
-          UNION ALL
-          SELECT p.codigo, p.nombre, IFNULL(u.nombre, 'Unid') as unidad, (dv.cantidad * cp.cantidad) as cantidad_neta, p.precio_compra as costo_unitario,
-          ((dv.cantidad * cp.cantidad) * p.precio_venta) * (CASE WHEN (SELECT SUM(dv2.cantidad * dv2.precio_venta) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id) = 0 THEN 1 ELSE (v.precio_total / (SELECT SUM(dv2.cantidad * dv2.precio_venta) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id)) END) as total_neto
-          FROM detalle_ventas dv JOIN ventas v ON dv.venta_id = v.id JOIN combo_producto cp ON dv.combo_id = cp.combo_id JOIN productos p ON cp.producto_id = p.id LEFT JOIN unidads u ON p.unidad_id = u.id
-          WHERE v.empresa_id = ? AND DATE(v.fecha) BETWEEN ? AND ?
-          UNION ALL
-          SELECT p.codigo, p.nombre, IFNULL(u.nombre, 'Unid') as unidad, (dd.cantidad * -1) as cantidad_neta, p.precio_compra as costo_unitario,
-          (dev.precio_total * ((dd.cantidad * p.precio_venta) / (SELECT SUM(dd2.cantidad * p2.precio_venta) FROM detalle_devoluciones dd2 JOIN productos p2 ON dd2.producto_id = p2.id WHERE dd2.devolucion_id = dev.id))) * -1 as total_neto
-          FROM detalle_devoluciones dd JOIN devoluciones dev ON dd.devolucion_id = dev.id JOIN productos p ON dd.producto_id = p.id LEFT JOIN unidads u ON p.unidad_id = u.id
-          WHERE dev.empresa_id = ? AND DATE(dev.fecha) BETWEEN ? AND ?
-      ) as t GROUP BY codigo, nombre, unidad ORDER BY total DESC`;
+          -- 1. VENTAS
+          SELECT 
+              v.fecha, v.id as ticket_id,
+              p.codigo, p.nombre, dv.es_bulto, dv.factor_utilizado,
+              IF(dv.es_bulto = 1, u2.nombre, u1.nombre) as unidad_medida,
+              dv.cantidad as cantidad_op,
+              dv.cantidad_unidades_base as cantidad_base,
+              dv.precio_compra as costo_base,
+              (dv.cantidad_unidades_base * dv.precio_venta) * 
+              IFNULL((v.precio_total / NULLIF((SELECT SUM(dv2.cantidad_unidades_base * dv2.precio_venta) FROM detalle_ventas dv2 WHERE dv2.venta_id = v.id), 0)), 1) as total_neto
+          FROM detalle_ventas dv
+          JOIN ventas v ON dv.venta_id = v.id
+          JOIN productos p ON dv.producto_id = p.id
+          LEFT JOIN unidads u1 ON p.unidad_id = u1.id
+          LEFT JOIN unidads u2 ON p.unidad_compra_id = u2.id
+          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ? AND dv.producto_id IS NOT NULL
 
-    const [productos] = await db.execute(query, [
+          UNION ALL
+
+          -- 2. COMBOS
+          SELECT 
+              v.fecha, v.id as ticket_id,
+              p.codigo, p.nombre, 0 as es_bulto, 1.00 as factor_utilizado,
+              u1.nombre as unidad_medida,
+              (dv.cantidad * cp.cantidad) as cantidad_op,
+              (dv.cantidad * cp.cantidad) as cantidad_base,
+              p.precio_compra as costo_base,
+              ((dv.cantidad * cp.cantidad) * p.precio_venta) * 
+              IFNULL((v.precio_total / NULLIF((SELECT SUM(dv3.cantidad_unidades_base * dv3.precio_venta) FROM detalle_ventas dv3 WHERE dv3.venta_id = v.id), 0)), 1) as total_neto
+          FROM detalle_ventas dv
+          JOIN ventas v ON dv.venta_id = v.id
+          JOIN combo_producto cp ON dv.combo_id = cp.combo_id
+          JOIN productos p ON cp.producto_id = p.id
+          LEFT JOIN unidads u1 ON p.unidad_id = u1.id
+          WHERE v.empresa_id = ? AND v.fecha BETWEEN ? AND ?
+
+          UNION ALL
+
+          -- 3. DEVOLUCIONES
+          SELECT 
+              dev.fecha, dev.id as ticket_id,
+              p.codigo, p.nombre, dd.es_bulto, dd.factor_utilizado,
+              IF(dd.es_bulto = 1, u2.nombre, u1.nombre) as unidad_medida,
+              (dd.cantidad * -1) as cantidad_op,
+              (dd.cantidad_unidades_base * -1) as cantidad_base,
+              p.precio_compra as costo_base,
+              (dd.cantidad_unidades_base * p.precio_venta) * -1 as total_neto
+          FROM detalle_devoluciones dd
+          JOIN devoluciones dev ON dd.devolucion_id = dev.id
+          JOIN productos p ON dd.producto_id = p.id
+          LEFT JOIN unidads u1 ON p.unidad_id = u1.id
+          LEFT JOIN unidads u2 ON p.unidad_compra_id = u2.id
+          WHERE dev.empresa_id = ? AND dev.fecha BETWEEN ? AND ?
+      ) as t
+      GROUP BY fecha, ticket_id, codigo, nombre, es_bulto, factor_utilizado, unidad_medida
+      ORDER BY fecha DESC, ticket_id DESC`;
+
+    const [rows] = await db.execute(query, [
       empresa_id,
       fecha_inicio,
       fecha_fin,
@@ -759,51 +876,377 @@ const generarInformeProductosPDF = async (req, res) => {
       fecha_fin,
     ]);
 
+    // Funciones de formato
     const fmt = (val) =>
-      parseFloat(val).toLocaleString("es-AR", {
+      parseFloat(val || 0).toLocaleString("es-AR", {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
       });
 
-    let filas = "";
-    let tCant = 0;
-    let tGan = 0;
-    let tTot = 0;
+    const fmtNumero = (val) =>
+      parseFloat(val || 0).toLocaleString("es-AR", {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 0,
+      });
 
-    productos.forEach((p) => {
-      tCant += parseFloat(p.cantidad);
-      tGan += parseFloat(p.ganancia);
-      tTot += parseFloat(p.total);
-      filas += `<tr>
-            <td style="text-align:center">${p.codigo}</td>
-            <td>${p.nombre}</td>
-            <td style="text-align:center">${parseFloat(p.cantidad)} ${
-              p.unidad || "Unid"
-            }</td>
-            <td style="text-align:right">$ ${fmt(p.costo)}</td>
-            <td style="text-align:right">$ ${fmt(p.venta)}</td>
-            <td style="text-align:right">$ ${fmt(p.ganancia)}</td>
-            <td style="text-align:right">$ ${fmt(p.total)}</td>
-        </tr>`;
+    // Calcular totales
+    let totalGanancia = 0;
+    let totalFacturacion = 0;
+    let totalProductos = 0;
+
+    rows.forEach((item) => {
+      totalGanancia += parseFloat(item.ganancia) || 0;
+      totalFacturacion += parseFloat(item.total) || 0;
+      totalProductos++;
     });
 
-    const html = `<html><head><meta charset="UTF-8"><style>body{font-family:sans-serif;font-size:10px;color:#333;}table{width:100%;border-collapse:collapse;}th{background:#1a73e8;color:white;padding:5px;}td{padding:5px;border:1px solid #ddd;}.total{font-weight:bold;background:#eee;}</style></head>
-      <body><h1 style="text-align:center;color:#1a73e8">Informe General de Ventas por Producto</h1><p style="text-align:center">Período: ${fInicio} - ${fFin}</p>
-      <table><thead><tr><th>CÓDIGO</th><th>PRODUCTO</th><th>CANT.</th><th>COSTO</th><th>VENTA (NETA)</th><th>GANANCIA</th><th>TOTAL</th></tr></thead><tbody>${filas}
-      <tr class="total"><td colspan="2">TOTALES</td><td style="text-align:center">${tCant}</td><td></td><td></td><td style="text-align:right">$ ${fmt(
-        tGan,
-      )}</td><td style="text-align:right">$ ${fmt(tTot)}</td></tr>
-      </tbody></table></body></html>`;
+    // Margen promedio
+    const margenPromedio =
+      totalFacturacion > 0
+        ? ((totalGanancia / totalFacturacion) * 100).toFixed(1)
+        : "0.0";
 
-    pdf
-      .create(html, { format: "A4", orientation: "landscape", border: "10mm" })
-      .toBuffer((err, buffer) => {
-        if (err) return res.status(500).send("Error");
-        res.setHeader("Content-Type", "application/pdf");
-        res.send(buffer);
+    // Dividir en páginas - 15 filas por página como sugieres
+    const filasPorPagina = 14;
+    const totalPaginas = Math.ceil(rows.length / filasPorPagina);
+    const paginas = [];
+
+    for (let i = 0; i < rows.length; i += filasPorPagina) {
+      paginas.push(rows.slice(i, i + filasPorPagina));
+    }
+
+    // FUNCIÓN para generar filas con altura fija
+    const generarFila = (item, esPar) => {
+      const ganancia = parseFloat(item.ganancia) || 0;
+      const total = parseFloat(item.total) || 0;
+      const esBulto = item.es_bulto === 1;
+      const alturaFila = "24px"; // Altura fija para todas las filas
+
+      return `
+        <tr style="height: ${alturaFila}; ${esPar ? "background-color: #f8f9fa;" : "background-color: white;"} border-bottom: 1px solid #e0e0e0;">
+          <!-- FECHA -->
+          <td style="padding: 2px 3px; font-size: 8px; text-align: center; font-weight: 600; color: #333; vertical-align: middle; width: 7%;">
+            ${item.fecha_fmt}
+          </td>
+          
+          <!-- TICKET -->
+          <td style="padding: 2px 3px; font-size: 8px; text-align: center; vertical-align: middle; width: 9%;">
+            <div style="background: #2c3e50; color: white; padding: 1px 3px; border-radius: 2px; font-weight: 600; font-size: 7px; white-space: nowrap; display: inline-block; min-width: 60px;">
+              T-${String(item.ticket_id).padStart(6, "0")}
+            </div>
+          </td>
+          
+          <!-- PRODUCTO -->
+          <td style="padding: 2px 4px; font-size: 8px; vertical-align: middle; width: 35%;">
+            <div style="font-weight: 600; color: #333; line-height: 1.1; overflow: hidden; height: 16px;">
+              ${item.nombre}
+            </div>
+            <div style="font-size: 7px; color: #666; line-height: 1; margin-top: 1px;">
+              <span style="background: #f5f5f5; padding: 1px 3px; border-radius: 1px; margin-right: 3px; font-family: 'Courier New', monospace; border: 1px solid #ddd; font-size: 6.5px; display: inline-block;">
+                ${item.codigo}
+              </span>
+              ${esBulto ? `<span style="color: #0d6efd; font-weight: 600; background: #e7f1ff; padding: 1px 3px; border-radius: 1px; border: 1px solid #b6d4fe; font-size: 6.5px; display: inline-block;">Bulto x${item.factor_utilizado}</span>` : ""}
+            </div>
+          </td>
+          
+          <!-- CANTIDAD -->
+          <td style="padding: 2px 3px; font-size: 9px; text-align: center; font-weight: 700; font-family: 'Courier New', monospace; vertical-align: middle; width: 5%;">
+            ${fmtNumero(Math.abs(item.cantidad))}
+          </td>
+          
+          <!-- ESCALA -->
+          <td style="padding: 2px 3px; text-align: center; vertical-align: middle; width: 7%;">
+            <span style="background: ${esBulto ? "#e7f1ff" : "#f8f9fa"}; 
+                    color: ${esBulto ? "#0d6efd" : "#6c757d"}; 
+                    padding: 1px 4px; border-radius: 6px; 
+                    font-size: 7px; font-weight: 700; 
+                    border: 1px solid ${esBulto ? "#b6d4fe" : "#dee2e6"};
+                    display: inline-block;
+                    white-space: nowrap;">
+              ${(item.unidad_medida || "Unid").toUpperCase()}
+            </span>
+          </td>
+          
+          <!-- COSTO -->
+          <td style="padding: 2px 3px; font-size: 8px; text-align: right; color: #6c757d; font-family: 'Courier New', monospace; font-weight: 600; vertical-align: middle; width: 8%;">
+            $ ${fmt(item.costo)}
+          </td>
+          
+          <!-- VENTA -->
+          <td style="padding: 2px 3px; font-size: 8px; text-align: right; font-weight: 700; font-family: 'Courier New', monospace; color: #2c3e50; vertical-align: middle; width: 9%;">
+            $ ${fmt(item.venta)}
+          </td>
+          
+          <!-- GANANCIA -->
+          <td style="padding: 2px 3px; font-size: 8px; text-align: right; font-weight: 700; color: ${ganancia >= 0 ? "#28a745" : "#dc3545"}; font-family: 'Courier New', monospace; vertical-align: middle; width: 10%;">
+            $ ${fmt(ganancia)}
+          </td>
+          
+          <!-- TOTAL -->
+          <td style="padding: 2px 3px; font-size: 8px; text-align: right; font-weight: 800; color: #333; background: #f8f9fa; font-family: 'Courier New', monospace; vertical-align: middle; width: 10%;">
+            $ ${fmt(total)}
+          </td>
+        </tr>
+      `;
+    };
+
+    // Generar cada página
+    const paginasHTML = paginas.map((pagina, paginaIndex) => {
+      // Calcular subtotales de la página
+      let subtotalGanancia = 0;
+      let subtotalFacturacion = 0;
+
+      pagina.forEach((item) => {
+        subtotalGanancia += parseFloat(item.ganancia) || 0;
+        subtotalFacturacion += parseFloat(item.total) || 0;
       });
+
+      // Generar filas de la tabla
+      let filasHTML = "";
+      pagina.forEach((item, index) => {
+        filasHTML += generarFila(item, index % 2 === 0);
+      });
+
+      return `
+        <div style="page-break-after: ${paginaIndex < paginas.length - 1 ? "always" : "avoid"};">
+          <!-- Header IDENTICO en cada página -->
+          <div style="border-bottom: 2px solid #28a745; padding-bottom: 5px; margin-bottom: 5px;">
+            <div style="text-align: center;">
+              <h1 style="color: #2c3e50; font-size: 14px; font-weight: 800; margin: 0 0 2px 0; text-transform: uppercase; letter-spacing: 0.5px;">
+                📊 AUDITORÍA DETALLADA DE VENTAS
+              </h1>
+              <div style="font-size: 8px; color: #666; margin-bottom: 2px;">
+                <strong>Período:</strong> ${fInicio} al ${fFin} | 
+                <strong>Página:</strong> ${paginaIndex + 1} de ${paginas.length} | 
+                <strong>Registros:</strong> ${pagina.length}
+              </div>
+            </div>
+          </div>
+
+          <!-- Resumen ejecutivo solo en primera página -->
+          ${
+            paginaIndex === 0
+              ? `
+            <div style="background: #f8f9fa; border-radius: 4px; border: 1px solid #dee2e6; padding: 8px; margin-bottom: 8px;">
+              <div style="font-size: 9px; font-weight: 800; color: #28a745; text-transform: uppercase; margin-bottom: 6px; text-align: center;">
+                RESUMEN EJECUTIVO
+              </div>
+              <table style="width: 100%; border-collapse: collapse; font-size: 8px;">
+                <tr>
+                  <td style="width: 25%; text-align: center; padding: 6px; background: white; border: 1px solid #dee2e6; border-radius: 3px;">
+                    <div style="color: #6c757d; text-transform: uppercase; margin-bottom: 2px; font-weight: 600;">
+                      TRANSACCIONES
+                    </div>
+                    <div style="font-size: 14px; font-weight: 800; color: #0d6efd;">
+                      ${totalProductos}
+                    </div>
+                  </td>
+                  <td style="width: 25%; text-align: center; padding: 6px; background: white; border: 1px solid #dee2e6; border-radius: 3px;">
+                    <div style="color: #6c757d; text-transform: uppercase; margin-bottom: 2px; font-weight: 600;">
+                      FACTURACIÓN
+                    </div>
+                    <div style="font-size: 14px; font-weight: 800; color: #333;">
+                      $ ${fmt(totalFacturacion)}
+                    </div>
+                  </td>
+                  <td style="width: 25%; text-align: center; padding: 6px; background: white; border: 1px solid #dee2e6; border-radius: 3px;">
+                    <div style="color: #6c757d; text-transform: uppercase; margin-bottom: 2px; font-weight: 600;">
+                      GANANCIA
+                    </div>
+                    <div style="font-size: 14px; font-weight: 800; color: #28a745;">
+                      $ ${fmt(totalGanancia)}
+                    </div>
+                  </td>
+                  <td style="width: 25%; text-align: center; padding: 6px; background: white; border: 1px solid #dee2e6; border-radius: 3px;">
+                    <div style="color: #6c757d; text-transform: uppercase; margin-bottom: 2px; font-weight: 600;">
+                      MARGEN
+                    </div>
+                    <div style="font-size: 14px; font-weight: 800; color: ${margenPromedio > 30 ? "#28a745" : margenPromedio > 15 ? "#ffc107" : "#dc3545"};">
+                      ${margenPromedio}%
+                    </div>
+                  </td>
+                </tr>
+              </table>
+            </div>
+          `
+              : ""
+          }
+
+          <!-- Encabezado de tabla IDENTICO en cada página -->
+          <table style="width: 100%; border-collapse: collapse; margin-bottom: 2px; background: #2c3e50; table-layout: fixed; font-size: 8px;">
+            <thead>
+              <tr>
+                <th style="padding: 5px 3px; text-align: center; font-weight: 700; color: white; text-transform: uppercase; border: 1px solid #1a252f; width: 7%;">
+                  FECHA
+                </th>
+                <th style="padding: 5px 3px; text-align: center; font-weight: 700; color: white; text-transform: uppercase; border: 1px solid #1a252f; width: 9%;">
+                  TICKET
+                </th>
+                <th style="padding: 5px 3px; text-align: center; font-weight: 700; color: white; text-transform: uppercase; border: 1px solid #1a252f; width: 35%;">
+                  PRODUCTO
+                </th>
+                <th style="padding: 5px 3px; text-align: center; font-weight: 700; color: white; text-transform: uppercase; border: 1px solid #1a252f; width: 5%;">
+                  CANT.
+                </th>
+                <th style="padding: 5px 3px; text-align: center; font-weight: 700; color: white; text-transform: uppercase; border: 1px solid #1a252f; width: 7%;">
+                  ESCALA
+                </th>
+                <th style="padding: 5px 3px; text-align: center; font-weight: 700; color: white; text-transform: uppercase; border: 1px solid #1a252f; width: 8%;">
+                  COSTO
+                </th>
+                <th style="padding: 5px 3px; text-align: center; font-weight: 700; color: white; text-transform: uppercase; border: 1px solid #1a252f; width: 9%;">
+                  VENTA
+                </th>
+                <th style="padding: 5px 3px; text-align: center; font-weight: 700; color: white; text-transform: uppercase; border: 1px solid #1a252f; width: 10%;">
+                  GANANCIA
+                </th>
+                <th style="padding: 5px 3px; text-align: center; font-weight: 700; color: white; text-transform: uppercase; border: 1px solid #1a252f; width: 10%;">
+                  TOTAL
+                </th>
+              </tr>
+            </thead>
+          </table>
+
+          <!-- Tabla de datos -->
+          <table style="width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 8px;">
+            <tbody>
+              ${filasHTML}
+            </tbody>
+          </table>
+
+          <!-- Subtotales de página -->
+          <div style="margin-top: 6px; padding: 5px; background: #f8f9fa; border-radius: 3px; border: 1px solid #dee2e6;">
+            <table style="width: 100%;">
+              <tr>
+                <td style="width: 67%; text-align: right; padding: 3px 6px; font-size: 8px; font-weight: 700; color: #6c757d; text-transform: uppercase;">
+                  SUBTOTAL PÁGINA ${paginaIndex + 1}
+                </td>
+                <td style="width: 16.5%; text-align: right; padding: 3px 6px; font-size: 9px; font-weight: 800; color: ${subtotalGanancia >= 0 ? "#28a745" : "#dc3545"}; font-family: 'Courier New', monospace;">
+                  $ ${fmt(subtotalGanancia)}
+                </td>
+                <td style="width: 16.5%; text-align: right; padding: 3px 6px; font-size: 9px; font-weight: 800; color: #333; font-family: 'Courier New', monospace;">
+                  $ ${fmt(subtotalFacturacion)}
+                </td>
+              </tr>
+            </table>
+          </div>
+
+          <!-- Totales finales solo en última página -->
+          ${
+            paginaIndex === paginas.length - 1
+              ? `
+            <div style="margin-top: 8px; padding: 7px; background: #2c3e50; border-radius: 4px;">
+              <table style="width: 100%;">
+                <tr>
+                  <td style="width: 67%; text-align: right; padding: 6px 10px; font-size: 9px; font-weight: 800; color: white; text-transform: uppercase;">
+                    TOTALES FINALES DEL PERÍODO
+                  </td>
+                  <td style="width: 16.5%; text-align: right; padding: 6px 10px; font-size: 10px; font-weight: 800; color: #28a745; font-family: 'Courier New', monospace; background: rgba(255,255,255,0.1); border-radius: 2px;">
+                    $ ${fmt(totalGanancia)}
+                  </td>
+                  <td style="width: 16.5%; text-align: right; padding: 6px 10px; font-size: 10px; font-weight: 800; color: white; font-family: 'Courier New', monospace; background: rgba(255,255,255,0.1); border-radius: 2px;">
+                    $ ${fmt(totalFacturacion)}
+                  </td>
+                </tr>
+              </table>
+            </div>
+          `
+              : ""
+          }
+
+          <!-- Footer con información de generación -->
+          <div style="margin-top: 10px; padding-top: 5px; border-top: 1px solid #eee; font-size: 7px; color: #888; text-align: center;">
+            Generado: ${new Date().toLocaleDateString("es-AR", { day: "2-digit", month: "2-digit", year: "numeric" })} ${new Date().toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" })} | Sistema de Ventas © ${new Date().getFullYear()}
+          </div>
+        </div>
+      `;
+    });
+
+    // HTML completo
+    const html = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <title>Auditoría de Ventas - ${fInicio} al ${fFin}</title>
+        <style>
+          @page {
+            margin: 12mm 8mm 15mm 8mm;
+            size: A4 landscape;
+          }
+          
+          body {
+            font-family: 'Segoe UI', 'Roboto', sans-serif;
+            color: #333;
+            margin: 0;
+            padding: 0;
+            font-size: 8px;
+            line-height: 1;
+            -webkit-print-color-adjust: exact;
+            print-color-adjust: exact;
+          }
+          
+          table {
+            border-collapse: collapse;
+          }
+          
+          th, td {
+            vertical-align: middle;
+            overflow: hidden;
+          }
+          
+          /* Forzar alturas consistentes */
+          tr {
+            height: 24px !important;
+            min-height: 24px !important;
+            max-height: 24px !important;
+          }
+        </style>
+      </head>
+      <body>
+        ${paginasHTML.join("")}
+      </body>
+      </html>
+    `;
+
+    // Configuración del PDF
+    const options = {
+      format: "A4",
+      orientation: "landscape",
+      border: {
+        top: "12mm",
+        bottom: "15mm",
+        left: "8mm",
+        right: "8mm",
+      },
+      displayHeaderFooter: false,
+    };
+
+    // Generar PDF
+    pdf.create(html, options).toBuffer((err, buffer) => {
+      if (err) {
+        console.error("Error generando PDF:", err);
+        return res.status(500).json({
+          success: false,
+          message: "Error al generar el documento PDF",
+        });
+      }
+
+      const fecha = new Date().toISOString().split("T")[0];
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader(
+        "Content-Disposition",
+        `inline; filename="auditoria_ventas_${fInicio}_al_${fFin}.pdf"`,
+      );
+      res.send(buffer);
+    });
   } catch (error) {
-    res.status(500).send("Error");
+    console.error("ERROR en generarInformeProductosPDF:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error interno al generar el informe",
+      error: error.message,
+    });
   }
 };
 
@@ -1579,8 +2022,8 @@ const getVentaTicket = async (req, res) => {
     const [ventaRows] = await db.execute(
       `
         SELECT v.*, cl.id as cliente_id, cl.nombre_cliente, cl.puntos as puntos_actuales, cl.saldo_billetera as saldo_actual_billetera
-        FROM ventas v 
-        INNER JOIN clientes cl ON v.cliente_id = cl.id 
+        FROM ventas v
+        INNER JOIN clientes cl ON v.cliente_id = cl.id
         WHERE v.id = ?`,
       [id],
     );
@@ -1589,7 +2032,7 @@ const getVentaTicket = async (req, res) => {
       return res.status(404).send("Venta no encontrada");
     const venta = ventaRows[0];
 
-    // 🚀 LÓGICA CLAVE: Buscar cuánto se pagó con Billetera en la tabla de movimientos
+    // 🚀 LÓGICA BILLETERA: Buscar cuánto se pagó con Billetera
     const [pagoBilleteraRows] = await db.execute(
       "SELECT monto FROM movimientos_billetera WHERE cliente_id = ? AND tipo = 'consumo' AND descripcion LIKE ?",
       [venta.cliente_id, `%T-${venta.id}%`],
@@ -1597,59 +2040,63 @@ const getVentaTicket = async (req, res) => {
     const montoBilleteraUsado =
       pagoBilleteraRows.length > 0 ? parseFloat(pagoBilleteraRows[0].monto) : 0;
 
-    // DEBUG para que vos veas en la terminal si los datos llegan:
-    console.log(
-      `[TICKET] Venta ID: ${id} | Total: ${venta.precio_total} | Pago Billetera: ${montoBilleteraUsado}`,
-    );
-
     const [empresaRows] = await db.execute("SELECT * FROM empresas LIMIT 1");
     const empresa = empresaRows[0];
 
     // 2. Deuda en Cta Cte
     const [ctaCteRows] = await db.execute(
-      `SELECT SUM(CASE WHEN tipo = 'deuda' THEN importe ELSE 0 END) - 
+      `SELECT SUM(CASE WHEN tipo = 'deuda' THEN importe ELSE 0 END) -
               SUM(CASE WHEN tipo = 'pago' THEN importe ELSE 0 END) as saldo_total
        FROM compras_cta_cte WHERE cliente_id = ?`,
       [venta.cliente_id],
     );
     const deudaAcumulada = parseFloat(ctaCteRows[0].saldo_total) || 0;
 
+    // 🛡️ OBTENER DETALLES (Asegurando que traiga la info de bultos)
     const detalles = await Venta.getDetallesByVentaId(id);
 
-    // 3. Listado de productos
+    // 3. LISTADO DE PRODUCTOS SINCERADO CON BULTOS
     let subtotalSinDescuentos = 0;
     const itemsHtml = detalles
       .map((d) => {
-        const nombre = (d.producto_nombre || d.combo_nombre || "N/A")
-          .toUpperCase()
-          .substring(0, 27);
-        let precio = d.producto_id
+        const factor = parseFloat(d.factor_utilizado || 1);
+        const esBulto = d.es_bulto === 1;
+
+        // --- CÁLCULO DE PRECIO UNITARIO SEGÚN MAESTRO ---
+        let precioUnitarioBase = d.producto_id
           ? d.aplicar_porcentaje == 1
             ? parseFloat(d.precio_compra) *
               (1 + (parseFloat(d.valor_porcentaje) || 0) / 100)
             : parseFloat(d.precio_venta) || 0
           : parseFloat(d.combo_precio) || 0;
 
-        const subtotalItem = d.cantidad * precio;
+        // Subtotal de la línea considerando escala
+        const subtotalItem = esBulto
+          ? d.cantidad * factor * precioUnitarioBase
+          : d.cantidad * precioUnitarioBase;
+
         subtotalSinDescuentos += subtotalItem;
 
+        const nombre = (d.producto_nombre || d.combo_nombre || "N/A")
+          .toUpperCase()
+          .substring(0, 27);
+        const unidadNombre = esBulto
+          ? (d.unidad_bulto_nombre || "PACK").toUpperCase()
+          : (d.unidad_base_nombre || "UNID").toUpperCase();
+
+        // 🚀 LÍNEA DE ESCALA: Ejem: "1 X PACK (8 UNID)"
+        const lineaEscala = esBulto
+          ? `<div style="text-align:left;">${d.cantidad} X ${unidadNombre} (${factor} ${d.unidad_base_nombre || "unid"})</div>`
+          : d.cantidad > 1
+            ? `<div style="text-align:left;">${d.cantidad} X ${formatMoney(precioUnitarioBase)}</div>`
+            : "";
+
         return `
-            ${
-              d.cantidad > 1
-                ? `<div style="text-align:left;">${
-                    d.cantidad
-                  } X ${precio.toLocaleString("es-AR", {
-                    minimumFractionDigits: 2,
-                  })}</div>`
-                : ""
-            }
+            ${lineaEscala}
             <table style="width: 100%; border-collapse: collapse; table-layout: fixed; margin-bottom: 2px;">
                 <tr>
                     <td style="width: 75%; text-align: left;">${nombre}</td>
-                    <td style="width: 25%; text-align: right;">${subtotalItem.toLocaleString(
-                      "es-AR",
-                      { minimumFractionDigits: 2 },
-                    )}</td>
+                    <td style="width: 25%; text-align: right;">${subtotalItem.toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
                 </tr>
             </table>`;
       })
@@ -1665,9 +2112,7 @@ const getVentaTicket = async (req, res) => {
         <div style="text-align:left; font-size: 9px; margin-top: 5px;">
             <div>PUNTOS GANADOS: ${puntosGanados}</div>
             <div>TOTAL PUNTOS: ${venta.puntos_actuales}</div>
-            <div style="font-weight:bold">SALDO BILLETERA: ${formatMoney(
-              venta.saldo_actual_billetera,
-            )}</div>
+            <div style="font-weight:bold">SALDO BILLETERA: ${formatMoney(venta.saldo_actual_billetera)}</div>
         </div>`
       : "";
 
@@ -1678,7 +2123,7 @@ const getVentaTicket = async (req, res) => {
       hour12: false,
     });
 
-    // 5. HTML FINAL (CON FORMA DE PAGO CORREGIDA)
+    // 5. HTML FINAL (HEADER Y FOOTER ORIGINALES RESTAURADOS)
     const html = `
     <!DOCTYPE html>
     <html>
@@ -1696,10 +2141,10 @@ const getVentaTicket = async (req, res) => {
     <body>
         <div class="wrapper">
             <div class="text-center">
-                <div style="font-weight:bold; font-size:11px;">Morrone Ventas</div>
-                <div>CUIT Nro.: 12345678</div>
-                <div>Ing. Brutos: 1276868-05</div>
-                <div>Dirección: Juan Agustín García 6 A</div>
+                <div style="font-weight:bold; font-size:11px;">${empresa.nombre_empresa}</div>
+                <div>CUIT Nro.: ${empresa.cuit}</div>
+                <div>Ing. Brutos: ${empresa.ingresos_brutos || "1276868-05"}</div>
+                <div>Dirección: ${empresa.direccion || "Juan Agustín García 6 A"}</div>
                 <div>CABA - CP 1416</div>
                 <div>IVA RESPONSABLE INSCRIPTO</div>
                 <div>A CONSUMIDOR FINAL</div>
@@ -1707,87 +2152,31 @@ const getVentaTicket = async (req, res) => {
             <div class="line"></div>
             <div class="text-center">
                 <div>Cód. 083 - TIQUE</div>
-                <div>P.V. Nro. 00001 - Nro. T. ${String(venta.id).padStart(
-                  8,
-                  "0",
-                )}</div>
-                <div>Fecha ${new Date(venta.fecha).toLocaleDateString(
-                  "es-AR",
-                )} - Hora ${hora24}</div>
+                <div>P.V. Nro. 00001 - Nro. T. ${String(venta.id).padStart(8, "0")}</div>
+                <div>Fecha ${new Date(venta.fecha).toLocaleDateString("es-AR")} - Hora ${hora24}</div>
             </div>
             <div class="line"></div>
             ${itemsHtml}
             <div class="total-section">
-                <div class="text-right">SUBTOTAL: ${subtotalSinDescuentos.toLocaleString(
-                  "es-AR",
-                  { minimumFractionDigits: 2 },
-                )}</div>
-                <div class="text-right" style="font-size: 11px;">TOTAL: ${parseFloat(
-                  venta.precio_total,
-                ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</div>
+                <div class="text-right">SUBTOTAL: ${subtotalSinDescuentos.toLocaleString("es-AR", { minimumFractionDigits: 2 })}</div>
+                <div class="text-right" style="font-size: 11px;">TOTAL: ${parseFloat(venta.precio_total).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</div>
             </div>
 
             <div style="text-align:left; margin-top:8px;">
                 <div>RECIBI(MOS)</div>
                 <div style="font-weight:bold">FORMA DE PAGO:</div>
-                
-                ${
-                  parseFloat(venta.efectivo) > 0
-                    ? `<div>Efectivo: ${parseFloat(
-                        venta.efectivo,
-                      ).toLocaleString("es-AR", {
-                        minimumFractionDigits: 2,
-                      })}</div>`
-                    : ""
-                }
-                
-                <!-- 💳 PAGO DESCONTADO DE BILLETERA (Natalia usó 2.000) -->
-                ${
-                  montoBilleteraUsado > 0
-                    ? `<div>Billetera: ${parseFloat(
-                        montoBilleteraUsado,
-                      ).toLocaleString("es-AR", {
-                        minimumFractionDigits: 2,
-                      })}</div>`
-                    : ""
-                }
-                
-                ${
-                  parseFloat(venta.tarjeta) > 0
-                    ? `<div>Tarjeta: ${parseFloat(venta.tarjeta).toLocaleString(
-                        "es-AR",
-                        { minimumFractionDigits: 2 },
-                      )}</div>`
-                    : ""
-                }
-                ${
-                  parseFloat(venta.mercadopago) > 0
-                    ? `<div>Mercado Pago: ${parseFloat(
-                        venta.mercadopago,
-                      ).toLocaleString("es-AR", {
-                        minimumFractionDigits: 2,
-                      })}</div>`
-                    : ""
-                }
-                ${
-                  parseFloat(venta.transferencia) > 0
-                    ? `<div>Transferencia: ${parseFloat(
-                        venta.transferencia,
-                      ).toLocaleString("es-AR", {
-                        minimumFractionDigits: 2,
-                      })}</div>`
-                    : ""
-                }
+
+                ${parseFloat(venta.efectivo) > 0 ? `<div>Efectivo: ${parseFloat(venta.efectivo).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</div>` : ""}
+                ${montoBilleteraUsado > 0 ? `<div>Billetera: ${parseFloat(montoBilleteraUsado).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</div>` : ""}
+                ${parseFloat(venta.tarjeta) > 0 ? `<div>Tarjeta: ${parseFloat(venta.tarjeta).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</div>` : ""}
+                ${parseFloat(venta.mercadopago) > 0 ? `<div>Mercado Pago: ${parseFloat(venta.mercadopago).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</div>` : ""}
+                ${parseFloat(venta.transferencia) > 0 ? `<div>Transferencia: ${parseFloat(venta.transferencia).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</div>` : ""}
             </div>
 
             ${infoFidelizacionHtml}
 
             <div class="line"></div>
-            ${
-              deudaAcumulada > 0
-                ? `<div>DEUDA CTA. CTE.: ${formatMoney(deudaAcumulada)}</div>`
-                : ""
-            }
+            ${deudaAcumulada > 0 ? `<div>DEUDA CTA. CTE.: ${formatMoney(deudaAcumulada)}</div>` : ""}
             <div>Cliente: ${venta.nombre_cliente}</div>
 
             <div class="line"></div>
@@ -1796,7 +2185,7 @@ const getVentaTicket = async (req, res) => {
                 <div>GRATUITO C.A.B.A. ÁREA DE DEFENSA Y PROTECCIÓN AL CONSUMIDOR</div>
             </div>
             <div class="text-center" style="font-size: 8px; margin-top: 4px;">
-                <div>SESHIA00000013450 | V: 1.01</div>
+                <div>SESHIA00000013450 | V: 1.03</div>
             </div>
         </div>
     </body>
@@ -1814,6 +2203,7 @@ const getVentaTicket = async (req, res) => {
       stream.pipe(res);
     });
   } catch (error) {
+    console.error("ERROR TICKET:", error.message);
     res.status(500).send("Error al generar el ticket");
   }
 };
@@ -1823,10 +2213,10 @@ const updateTmpVentaQuantity = async (req, res) => {
     const { id } = req.params; // ID de la tabla tmp_ventas
     const { cantidad } = req.body;
 
-    // 1. Buscamos el stock real del producto que está en el carrito
+    // 1. Buscamos el stock real y la configuración del producto
     const [rows] = await db.execute(
       `
-      SELECT p.stock, p.nombre 
+      SELECT p.stock, p.nombre, t.es_bulto, t.factor_utilizado 
       FROM tmp_ventas t
       JOIN productos p ON t.producto_id = p.id
       WHERE t.id = ?
@@ -1835,19 +2225,33 @@ const updateTmpVentaQuantity = async (req, res) => {
     );
 
     if (rows.length > 0) {
-      const stockDisponible = rows[0].stock;
+      const stockDisponible = parseFloat(rows[0].stock);
       const nombreProducto = rows[0].nombre;
+      const esBulto = rows[0].es_bulto;
+      const factorUtilizado = parseFloat(rows[0].factor_utilizado || 1);
 
-      // 2. Si la cantidad pedida es mayor al stock, bloqueamos
-      if (cantidad > stockDisponible) {
+      // 2. Calcular unidades necesarias según la escala
+      let unidadesNecesarias;
+      if (esBulto === 1) {
+        unidadesNecesarias = cantidad * factorUtilizado;
+      } else {
+        unidadesNecesarias = cantidad;
+      }
+
+      // 3. Si la cantidad pedida es mayor al stock, bloqueamos
+      if (unidadesNecesarias > stockDisponible) {
         return res.json({
           success: false,
-          message: `Stock insuficiente para ${nombreProducto}. Máximo disponible: ${stockDisponible}`,
+          message: `Stock insuficiente para ${nombreProducto}. Máximo disponible: ${stockDisponible} unidades${
+            esBulto === 1
+              ? ` (${Math.floor(stockDisponible / factorUtilizado)} bultos)`
+              : ""
+          }`,
         });
       }
     }
 
-    // 3. Si pasó la validación, actualizamos
+    // 4. Si pasó la validación, actualizamos
     await db.execute(
       "UPDATE tmp_ventas SET cantidad = ?, updated_at = NOW() WHERE id = ?",
       [cantidad, id],

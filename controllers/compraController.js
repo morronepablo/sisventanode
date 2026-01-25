@@ -10,15 +10,51 @@ const { sendWS } = require("../utils/whatsapp");
 const getListadoCompras = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
-    // Asumimos que Compra.getAll() ahora acepta empresa_id para filtrar
     const compras = await Compra.getAll(empresa_id);
 
     if (!compras || compras.length === 0) return res.json([]);
 
     const result = [];
     for (const c of compras) {
-      const detalles = await Compra.getDetallesByCompraId(c.id);
-      result.push({ ...c, detalles });
+      const detallesRaw = await Compra.getDetallesByCompraId(c.id);
+
+      // 🚀 PROCESAR DETALLES PARA MOSTRAR CORRECTAMENTE BULTOS
+      const detallesProcesados = detallesRaw.map((d) => {
+        let cantidadMostrar = parseFloat(d.cantidad);
+        let unidadMostrar = d.unidad_base_nombre || "UNID.";
+        let esBulto = d.es_bulto == 1;
+        let factor = parseFloat(d.factor_utilizado) || 1;
+        let cantidadBase =
+          parseFloat(d.cantidad_unidades_base) || cantidadMostrar;
+
+        // Si es bulto, ajustamos la visualización
+        if (esBulto) {
+          // La cantidad real es cantidad * factor
+          cantidadBase = cantidadMostrar * factor;
+          unidadMostrar = d.unidad_bulto_nombre || "BULTO";
+
+          // Si hay factor de conversión, mostramos la equivalencia
+          if (factor > 1) {
+            unidadMostrar = `${unidadMostrar} (equiv. a ${factor} ${d.unidad_base_nombre || "unid."})`;
+          }
+        }
+
+        return {
+          ...d,
+          // Campos para visualización
+          cantidad_mostrar: cantidadMostrar,
+          cantidad_base: cantidadBase,
+          unidad_mostrar: unidadMostrar,
+          es_bulto: esBulto,
+          factor_utilizado: factor,
+          // Para cálculos
+          costo_unitario: parseFloat(d.precio_compra) || 0,
+          // Importe total basado en el precio unitario del detalle
+          importe_total: cantidadMostrar * (parseFloat(d.precio_compra) || 0),
+        };
+      });
+
+      result.push({ ...c, detalles: detallesProcesados });
     }
     res.json(result);
   } catch (error) {
@@ -326,32 +362,188 @@ const getInformeProductos = async (req, res) => {
     const { fecha_inicio, fecha_fin } = req.query;
     const empresa_id = req.user.empresa_id;
 
+    console.log("📊 Generando informe productos detallado:", {
+      fecha_inicio,
+      fecha_fin,
+    });
+
+    // 🚀 CONSULTA CORREGIDA CON CÁLCULO DE BULTOS
     const query = `
       SELECT 
+        -- Información de la compra
+        c.id as compra_id,
+        DATE_FORMAT(c.fecha, '%d/%m/%Y') as fecha_compra,
+        c.comprobante as numero_factura,
+        prov.empresa as proveedor_nombre,
+        c.precio_total as total_factura,  -- ← AGREGADO para validar
+        
+        -- Información del producto
         p.codigo, 
-        p.nombre, 
-        prov.empresa as proveedor_nombre, -- 👈 Traemos el nombre directo de la compra
-        SUM(dc.cantidad) as cantidad, 
-        u.nombre as unidad, 
-        dc.precio_compra as costo, 
-        SUM(dc.cantidad * dc.precio_compra) as total
+        p.nombre as producto_nombre,
+        
+        -- Datos del detalle
+        dc.cantidad,
+        dc.precio_compra,
+        
+        -- 🚀 CÁLCULO CORREGIDO DEL SUBTOTAL
+        CASE 
+          WHEN dc.es_bulto = 1 THEN 
+            -- Si es bulto: cantidad * factor * (precio_compra / factor)
+            -- O simplemente: cantidad * precio_compra (si precio_compra ya es por bulto)
+            dc.cantidad * dc.precio_compra
+          ELSE 
+            -- Si es unidad: cantidad * precio_compra
+            dc.cantidad * dc.precio_compra
+        END as subtotal_calculado,
+        
+        -- 🚀 PRECIO POR UNIDAD REAL
+        CASE 
+          WHEN dc.es_bulto = 1 AND dc.factor_utilizado > 0 THEN 
+            dc.precio_compra / dc.factor_utilizado
+          ELSE 
+            dc.precio_compra
+        END as precio_por_unidad_real,
+        
+        -- Información sobre bultos
+        dc.es_bulto,
+        dc.factor_utilizado,
+        
+        -- Unidades para mostrar
+        CASE 
+          WHEN dc.es_bulto = 1 THEN 
+            COALESCE(u_compra.nombre, 'BULTO')
+          ELSE 
+            COALESCE(u_base.nombre, 'UNIDAD')
+        END as unidad_mostrar,
+        
+        u_base.nombre as unidad_base_nombre,
+        u_compra.nombre as unidad_bulto_nombre,
+        
+        -- Total de unidades base (para referencia)
+        CASE 
+          WHEN dc.es_bulto = 1 THEN dc.cantidad * dc.factor_utilizado
+          ELSE dc.cantidad
+        END as total_unidades_base
+        
       FROM detalle_compras dc
       JOIN compras c ON dc.compra_id = c.id
       JOIN productos p ON dc.producto_id = p.id
-      JOIN proveedors prov ON c.proveedor_id = prov.id -- 👈 JOIN directo, sin subconsultas
-      LEFT JOIN unidads u ON p.unidad_id = u.id
-      WHERE c.empresa_id = ? AND c.fecha BETWEEN ? AND ?
-      GROUP BY p.id, prov.id, dc.precio_compra
-      ORDER BY p.nombre ASC
+      JOIN proveedors prov ON c.proveedor_id = prov.id
+      LEFT JOIN unidads u_base ON p.unidad_id = u_base.id
+      LEFT JOIN unidads u_compra ON p.unidad_compra_id = u_compra.id
+      
+      WHERE c.empresa_id = ? 
+        AND c.fecha BETWEEN ? AND ?
+      
+      ORDER BY 
+        c.fecha DESC,
+        c.comprobante ASC,
+        p.nombre ASC
     `;
+
     const [rows] = await db.execute(query, [
       empresa_id,
       fecha_inicio,
       fecha_fin,
     ]);
-    res.json(rows);
+
+    console.log(`📊 Obtenidos ${rows.length} registros de detalles`);
+
+    // 🚀 AGRUPAR POR FACTURA CON CÁLCULO CORREGIDO
+    const comprasAgrupadas = rows.reduce((acc, item) => {
+      const key = `${item.compra_id}-${item.numero_factura}`;
+
+      if (!acc[key]) {
+        acc[key] = {
+          compra_id: item.compra_id,
+          fecha_compra: item.fecha_compra,
+          numero_factura: item.numero_factura,
+          proveedor_nombre: item.proveedor_nombre,
+          total_factura: parseFloat(item.total_factura), // Usar el total real de la factura
+          items: [],
+        };
+      }
+
+      // Procesar el ítem
+      const esBulto = item.es_bulto == 1;
+      const factor = parseFloat(item.factor_utilizado) || 1;
+      const cantidad = parseFloat(item.cantidad);
+
+      // 🚀 PRECIO CORRECTO: precio_compra es por bulto si es_bulto=1
+      const precioPorBulto = parseFloat(item.precio_compra);
+      const precioPorUnidad = parseFloat(item.precio_por_unidad_real);
+      const subtotal = parseFloat(item.subtotal_calculado);
+
+      const itemProcesado = {
+        codigo: item.codigo || "N/A",
+        producto_nombre: item.producto_nombre,
+        cantidad: cantidad,
+        es_bulto: esBulto,
+        factor_utilizado: factor,
+        unidad_mostrar: item.unidad_mostrar,
+        // 🚀 MOSTRAR EL PRECIO CORRECTO
+        precio_unitario_mostrar: esBulto ? precioPorBulto : precioPorUnidad,
+        precio_por_unidad: precioPorUnidad, // Para mostrar en la interfaz
+        subtotal: subtotal,
+        total_unidades_base: parseFloat(item.total_unidades_base) || cantidad,
+        // Para debug
+        debug_info: {
+          es_bulto: esBulto,
+          factor: factor,
+          cantidad: cantidad,
+          precio_compra: precioPorBulto,
+          precio_por_unidad: precioPorUnidad,
+          subtotal_calculado: subtotal,
+          formula: esBulto
+            ? `${cantidad} bultos × ${precioPorBulto.toFixed(2)}/bulto = ${subtotal.toFixed(2)}`
+            : `${cantidad} unid × ${precioPorUnidad.toFixed(2)}/unid = ${subtotal.toFixed(2)}`,
+        },
+      };
+
+      acc[key].items.push(itemProcesado);
+      return acc;
+    }, {});
+
+    // Convertir a array
+    const comprasArray = Object.values(comprasAgrupadas).sort((a, b) => {
+      const dateA = a.fecha_compra.split("/").reverse().join("-");
+      const dateB = b.fecha_compra.split("/").reverse().join("-");
+      return new Date(dateB) - new Date(dateA);
+    });
+
+    // Validar que la suma de items coincida con el total de la factura
+    comprasArray.forEach((compra) => {
+      const sumaItems = compra.items.reduce(
+        (sum, item) => sum + item.subtotal,
+        0,
+      );
+      const diferencia = Math.abs(sumaItems - compra.total_factura);
+
+      if (diferencia > 0.01) {
+        console.warn(
+          `⚠️ Factura ${compra.numero_factura}: suma items (${sumaItems}) ≠ total factura (${compra.total_factura})`,
+        );
+      }
+    });
+
+    // Calcular total del período
+    const totalPeriodo = comprasArray.reduce(
+      (sum, compra) => sum + compra.total_factura,
+      0,
+    );
+
+    res.json({
+      periodo: { fecha_inicio, fecha_fin },
+      total_compras: comprasArray.length,
+      total_periodo: totalPeriodo,
+      compras: comprasArray,
+    });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error("❌ Error en getInformeProductos:", error.message);
+    res.status(500).json({
+      message: "Error al obtener informe",
+      error: error.message,
+    });
   }
 };
 
@@ -360,169 +552,311 @@ const generarInformeProductosPDF = async (req, res) => {
     const { fecha_inicio, fecha_fin } = req.query;
     const empresa_id = req.user.empresa_id;
 
-    const fInicio = fecha_inicio.split("-").reverse().join("/");
-    const fFin = fecha_fin.split("-").reverse().join("/");
-
-    // 1. Obtener datos de la empresa para el encabezado
+    // 1. Obtener datos de la empresa
     const [empresaRows] = await db.execute(
       "SELECT * FROM empresas WHERE id = ?",
       [empresa_id],
     );
     const empresa = empresaRows[0];
 
-    // 2. 🛡️ QUERY SINCERADA: Producto + Proveedor + Costo Real Pagado
+    // 2. USAR LA MISMA CONSULTA CORREGIDA DEL getInformeProductos
     const query = `
-        SELECT 
-            p.codigo, 
-            p.nombre, 
-            prov.empresa as proveedor_nombre, 
-            SUM(dc.cantidad) as cantidad, 
-            u.nombre as unidad, 
-            dc.precio_compra as costo, 
-            SUM(dc.cantidad * dc.precio_compra) as total
-        FROM detalle_compras dc
-        JOIN compras c ON dc.compra_id = c.id
-        JOIN productos p ON dc.producto_id = p.id
-        JOIN proveedors prov ON c.proveedor_id = prov.id
-        LEFT JOIN unidads u ON p.unidad_id = u.id
-        WHERE c.empresa_id = ? AND c.fecha BETWEEN ? AND ?
-        GROUP BY p.id, prov.id, dc.precio_compra
-        ORDER BY p.nombre ASC, total DESC
+      SELECT 
+        -- Información de la compra
+        c.id as compra_id,
+        DATE_FORMAT(c.fecha, '%d/%m/%Y') as fecha_compra,
+        c.comprobante as numero_factura,
+        prov.empresa as proveedor_nombre,
+        c.precio_total as total_factura,  -- ← TOTAL REAL DE LA FACTURA
+        
+        -- Información del producto
+        p.codigo, 
+        p.nombre as producto_nombre,
+        
+        -- Datos del detalle
+        dc.cantidad,
+        dc.precio_compra,
+        
+        -- 🚀 CÁLCULO CORREGIDO DEL SUBTOTAL
+        CASE 
+          WHEN dc.es_bulto = 1 THEN 
+            -- Si es bulto: cantidad * precio_compra (precio por bulto)
+            dc.cantidad * dc.precio_compra
+          ELSE 
+            -- Si es unidad: cantidad * precio_compra
+            dc.cantidad * dc.precio_compra
+        END as subtotal_calculado,
+        
+        -- 🚀 PRECIO POR UNIDAD REAL
+        CASE 
+          WHEN dc.es_bulto = 1 AND dc.factor_utilizado > 0 THEN 
+            dc.precio_compra / dc.factor_utilizado
+          ELSE 
+            dc.precio_compra
+        END as precio_por_unidad_real,
+        
+        -- Información sobre bultos
+        dc.es_bulto,
+        dc.factor_utilizado,
+        
+        -- Unidades para mostrar
+        CASE 
+          WHEN dc.es_bulto = 1 THEN 
+            COALESCE(u_compra.nombre, 'BULTO')
+          ELSE 
+            COALESCE(u_base.nombre, 'UNIDAD')
+        END as unidad_mostrar,
+        
+        u_base.nombre as unidad_base_nombre,
+        u_compra.nombre as unidad_bulto_nombre,
+        
+        -- Total de unidades base (para referencia)
+        CASE 
+          WHEN dc.es_bulto = 1 THEN dc.cantidad * dc.factor_utilizado
+          ELSE dc.cantidad
+        END as total_unidades_base
+        
+      FROM detalle_compras dc
+      JOIN compras c ON dc.compra_id = c.id
+      JOIN productos p ON dc.producto_id = p.id
+      JOIN proveedors prov ON c.proveedor_id = prov.id
+      LEFT JOIN unidads u_base ON p.unidad_id = u_base.id
+      LEFT JOIN unidads u_compra ON p.unidad_compra_id = u_compra.id
+      
+      WHERE c.empresa_id = ? 
+        AND c.fecha BETWEEN ? AND ?
+      
+      ORDER BY 
+        c.fecha DESC,
+        c.comprobante ASC,
+        p.nombre ASC
     `;
-    const [productos] = await db.execute(query, [
+
+    const [rows] = await db.execute(query, [
       empresa_id,
       fecha_inicio,
       fecha_fin,
     ]);
 
-    // 3. Preparar el Logo en Base64
-    let logoBase64 = "";
-    try {
-      const logoPath = path.join(__dirname, "../src/assets/img", empresa.logo);
-      if (fs.existsSync(logoPath)) {
-        const bitmap = fs.readFileSync(logoPath);
-        logoBase64 = `data:image/png;base64,${bitmap.toString("base64")}`;
+    // 3. AGRUPAR POR FACTURA CON CÁLCULO CORREGIDO
+    const comprasAgrupadas = rows.reduce((acc, item) => {
+      const key = `${item.compra_id}-${item.numero_factura}`;
+
+      if (!acc[key]) {
+        acc[key] = {
+          compra_id: item.compra_id,
+          fecha_compra: item.fecha_compra,
+          numero_factura: item.numero_factura,
+          proveedor_nombre: item.proveedor_nombre,
+          total_factura: parseFloat(item.total_factura), // Usar el total real
+          items: [],
+        };
       }
-    } catch (e) {
-      console.error("Error logo:", e);
-    }
 
-    // 4. Construir filas de la tabla
-    let filas = "";
-    let totalGral = 0;
+      const esBulto = item.es_bulto == 1;
+      const factor = parseFloat(item.factor_utilizado) || 1;
+      const cantidad = parseFloat(item.cantidad);
+      const precioPorBulto = parseFloat(item.precio_compra);
+      const precioPorUnidad = parseFloat(item.precio_por_unidad_real);
+      const subtotal = parseFloat(item.subtotal_calculado);
 
-    productos.forEach((p) => {
-      totalGral += parseFloat(p.total);
-      filas += `
-        <tr>
-            <td style="text-align: center; vertical-align: middle;">${p.codigo || "N/A"}</td>
-            <td style="vertical-align: middle;">
-                <div style="font-weight: bold; text-transform: uppercase; margin-bottom: 4px;">${p.nombre}</div>
-                <!-- 🛡️ BADGE DE PROVEEDOR ESTILO RETAIL -->
-                <div style="display: block; margin-top: 2px;">
-                    <span style="
-                        background-color: #e1f5fe; 
-                        color: #0288d1; 
-                        padding: 2px 8px; 
-                        border-radius: 10px; 
-                        font-size: 8px; 
-                        font-weight: bold; 
-                        border: 1px solid #b3e5fc;
-                        text-transform: uppercase;
-                        display: inline-block;
-                    ">
-                        🚛 ${p.proveedor_nombre}
-                    </span>
-                </div>
+      acc[key].items.push({
+        codigo: item.codigo || "N/A",
+        producto_nombre: item.producto_nombre,
+        cantidad: cantidad,
+        es_bulto: esBulto,
+        factor_utilizado: factor,
+        unidad_mostrar: item.unidad_mostrar,
+        // 🚀 MOSTRAR EL PRECIO CORRECTO
+        precio_unitario_mostrar: esBulto ? precioPorBulto : precioPorUnidad,
+        precio_por_unidad: precioPorUnidad,
+        subtotal: subtotal,
+        total_unidades_base: parseFloat(item.total_unidades_base) || cantidad,
+      });
+
+      return acc;
+    }, {});
+
+    // 4. GENERAR HTML PARA PDF
+    let facturasHTML = "";
+    let totalGeneral = 0;
+    let facturaIndex = 1;
+
+    Object.values(comprasAgrupadas).forEach((factura) => {
+      totalGeneral += factura.total_factura;
+
+      let itemsHTML = "";
+      factura.items.forEach((item, itemIdx) => {
+        const esBulto = item.es_bulto;
+        const factor = item.factor_utilizado || 1;
+        const precioPorUnidad = item.precio_por_unidad;
+
+        itemsHTML += `
+          <tr>
+            <td style="text-align: center; vertical-align: middle; border: 1px solid #ddd; padding: 4px;">${itemIdx + 1}</td>
+            <td style="vertical-align: middle; border: 1px solid #ddd; padding: 4px;">
+              <div style="font-weight: bold; font-size: 9px;">${item.codigo || "N/A"}</div>
+              <div style="font-size: 8px;">${item.producto_nombre}</div>
             </td>
-            <td style="text-align: center; vertical-align: middle;">${p.cantidad}</td>
-            <td style="text-align: center; vertical-align: middle;">${p.unidad || "Unid."}</td>
-            <td style="text-align: right; vertical-align: middle;">$ ${parseFloat(
-              p.costo,
-            ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
-            <td style="text-align: right; vertical-align: middle; font-weight: bold; background-color: #fcfcfc;">$ ${parseFloat(
-              p.total,
-            ).toLocaleString("es-AR", { minimumFractionDigits: 2 })}</td>
-        </tr>`;
-    });
+            <td style="text-align: center; vertical-align: middle; border: 1px solid #ddd; padding: 4px;">
+              <div style="font-weight: bold; font-size: 9px;">
+                ${item.cantidad.toFixed(2)}
+                ${esBulto && factor > 1 ? `<span style="font-size: 7px; color: #666;"><br>(×${factor})</span>` : ""}
+              </div>
+              ${esBulto ? `<div style="font-size: 7px; color: #28a745;">${(item.cantidad * factor).toFixed(0)} unid. total</div>` : ""}
+            </td>
+            <td style="text-align: center; vertical-align: middle; border: 1px solid #ddd; padding: 4px;">
+              <div style="font-size: 8px; font-weight: ${esBulto ? "bold" : "normal"}">
+                ${item.unidad_mostrar}
+              </div>
+              ${esBulto ? `<div style="font-size: 7px; color: #dc3545; font-weight: bold;">BULTO</div>` : ""}
+              ${esBulto ? `<div style="font-size: 6px; color: #6c757d;">$${precioPorUnidad.toFixed(2)}/unid</div>` : ""}
+            </td>
+            <td style="text-align: right; vertical-align: middle; border: 1px solid #ddd; padding: 4px;">
+              <div style="font-size: 9px;">
+                $ ${(esBulto ? item.precio_unitario_mostrar : precioPorUnidad).toLocaleString("es-AR", { minimumFractionDigits: 2 })}
+              </div>
+              ${esBulto ? `<div style="font-size: 7px; color: #666;">por bulto</div>` : `<div style="font-size: 7px; color: #666;">por unidad</div>`}
+            </td>
+            <td style="text-align: right; vertical-align: middle; font-weight: bold; font-size: 9px; background-color: #f8f9fa; border: 1px solid #ddd; padding: 4px;">
+              $ ${item.subtotal.toLocaleString("es-AR", { minimumFractionDigits: 2 })}
+            </td>
+          </tr>`;
+      });
 
-    const htmlContent = `
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <style>
-            body { font-family: 'Helvetica', sans-serif; color: #333; font-size: 11px; }
-            .header { border-bottom: 3px solid #007bff; padding: 10px; margin-bottom: 20px; }
-            .table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-            .table th { background-color: #343a40; color: #fff; padding: 10px 8px; border: 1px solid #dee2e6; text-transform: uppercase; font-size: 10px; }
-            .table td { padding: 8px; border: 1px solid #dee2e6; }
-            .total-box { text-align: right; margin-top: 30px; font-size: 16px; font-weight: bold; border-top: 2px solid #333; padding-top: 10px; color: #000; }
-            #pageFooter { position: fixed; bottom: -15px; left: 0; right: 0; text-align: center; font-size: 9px; color: #999; border-top: 1px solid #eee; padding-top: 10px; }
-            .badge-prov { font-size: 9px; color: #007bff; }
-        </style>
-    </head>
-    <body>
-        <div class="header">
-            <table style="width:100%">
-                <tr>
-                    <td style="width:70%">
-                        <h1 style="margin:0; color: #000;">${empresa.nombre_empresa}</h1>
-                        <p style="margin:5px 0; font-weight: bold;">CUIT: ${empresa.cuit}</p>
-                        <p style="margin:0; color: #666;">Informe Detallado de Compras por Productos</p>
-                    </td>
-                    <td style="text-align:right">
-                        ${logoBase64 ? `<img src="${logoBase64}" style="width:80px">` : ""}
-                    </td>
-                </tr>
-            </table>
-        </div>
-
-        <h3 style="text-align:center; background: #f8f9fa; padding: 10px; border-radius: 5px;">
-            PERÍODO: ${fInicio} al ${fFin}
-        </h3>
-
-        <table class="table">
+      facturasHTML += `
+        <div style="margin-bottom: 30px; page-break-inside: avoid;">
+          <div style="background-color: #007bff; color: white; padding: 10px; border-radius: 5px; margin-bottom: 15px;">
+            <h3 style="margin: 0; font-size: 16px;">
+              FACTURA ${facturaIndex} | ${factura.fecha_compra} | ${factura.numero_factura}
+            </h3>
+            <p style="margin: 5px 0 0 0; font-size: 12px;">
+              Proveedor: ${factura.proveedor_nombre}
+            </p>
+          </div>
+          
+          <table style="width: 100%; border-collapse: collapse; margin-bottom: 15px;">
             <thead>
-                <tr>
-                    <th style="width: 15%">Código</th>
-                    <th style="width: 35%">Producto / Origen</th>
-                    <th style="width: 8%">Cant.</th>
-                    <th style="width: 12%">Unidad</th>
-                    <th style="width: 15%">Costo Pagado</th>
-                    <th style="width: 15%">Subtotal</th>
-                </tr>
+              <tr style="background-color: #343a40; color: white;">
+                <th style="width: 5%; text-align: center; padding: 6px; font-size: 10px;">#</th>
+                <th style="width: 35%; text-align: left; padding: 6px; font-size: 10px;">PRODUCTO</th>
+                <th style="width: 10%; text-align: center; padding: 6px; font-size: 10px;">CANT.</th>
+                <th style="width: 12%; text-align: center; padding: 6px; font-size: 10px;">UNIDAD</th>
+                <th style="width: 15%; text-align: center; padding: 6px; font-size: 10px;">COSTO UNIT.</th>
+                <th style="width: 15%; text-align: center; padding: 6px; font-size: 10px;">SUBTOTAL</th>
+              </tr>
             </thead>
             <tbody>
-                ${filas}
+              ${itemsHTML}
             </tbody>
-        </table>
-
-        <div class="total-box">
-            TOTAL GENERAL INVERTIDO: $ ${totalGral.toLocaleString("es-AR", {
-              minimumFractionDigits: 2,
-            })}
+            <tfoot>
+              <tr style="background-color: #f8f9fa;">
+                <td colspan="5" style="text-align: right; padding: 8px; font-weight: bold; font-size: 11px; border: 1px solid #ddd;">
+                  TOTAL FACTURA:
+                </td>
+                <td style="text-align: right; padding: 8px; font-weight: bold; font-size: 12px; color: #007bff; border: 1px solid #ddd;">
+                  $ ${factura.total_factura.toLocaleString("es-AR", { minimumFractionDigits: 2 })}
+                </td>
+              </tr>
+            </tfoot>
+          </table>
         </div>
+      `;
 
-        <div id="pageFooter">
-            Documento de Auditoría Interna - Generado el ${new Date().toLocaleString("es-AR")}
+      facturaIndex++;
+    });
+
+    // 5. HTML COMPLETO DEL PDF
+    const htmlContent = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <title>Informe de Compras por Producto</title>
+        <style>
+          body { font-family: Arial, sans-serif; margin: 20px; }
+          .header { text-align: center; margin-bottom: 30px; }
+          .empresa-info { margin-bottom: 20px; }
+          .periodo { background-color: #e8f4fd; padding: 10px; border-radius: 5px; margin-bottom: 20px; }
+          .resumen { background-color: #d4edda; padding: 10px; border-radius: 5px; margin-bottom: 30px; }
+          .total-general { background-color: #cce5ff; padding: 15px; border-radius: 5px; margin-top: 30px; text-align: center; }
+          .nota { font-size: 10px; color: #666; margin-top: 20px; text-align: center; }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <h1 style="color: #007bff; margin-bottom: 5px;">INFORME DETALLADO DE COMPRAS</h1>
+          <h3 style="color: #6c757d; margin-top: 0;">Análisis por Factura y Producto</h3>
         </div>
-    </body>
-    </html>`;
+        
+        <div class="empresa-info">
+          <p style="margin: 0;"><strong>Empresa:</strong> ${empresa.nombre || "N/A"}</p>
+          <p style="margin: 0;"><strong>RUC/CUIT:</strong> ${empresa.ruc || "N/A"}</p>
+          <p style="margin: 0;"><strong>Dirección:</strong> ${empresa.direccion || "N/A"}</p>
+        </div>
+        
+        <div class="periodo">
+          <p style="margin: 0; font-weight: bold;">
+            Período: ${fecha_inicio.split("-").reverse().join("/")} — ${fecha_fin.split("-").reverse().join("/")}
+          </p>
+        </div>
+        
+        <div class="resumen">
+          <p style="margin: 0;">
+            <strong>${Object.keys(comprasAgrupadas).length} Facturas</strong> | 
+            <strong>Total General: $ ${totalGeneral.toLocaleString("es-AR", { minimumFractionDigits: 2 })}</strong>
+          </p>
+        </div>
+        
+        ${facturasHTML}
+        
+        <div class="total-general">
+          <h3 style="margin: 0;">
+            TOTAL GENERAL DEL PERÍODO: $ ${totalGeneral.toLocaleString("es-AR", { minimumFractionDigits: 2 })}
+          </h3>
+        </div>
+        
+        <div class="nota">
+          <p>* Este informe agrupa las compras por factura, mostrando cada producto comprado con su tipo (bulto o unidad)</p>
+          <p>** Generado el ${new Date().toLocaleDateString("es-AR")} ${new Date().toLocaleTimeString("es-AR")}</p>
+        </div>
+      </body>
+      </html>
+    `;
 
-    // 6. Generar el PDF
-    const options = {
+    // 6. GENERAR PDF (usando puppeteer o html-pdf)
+    // Aquí usarías tu librería de generación de PDF como puppeteer, html-pdf, etc.
+
+    // Ejemplo con html-pdf:
+    const pdf = require("html-pdf");
+    const pdfOptions = {
       format: "A4",
-      border: { top: "10mm", right: "10mm", bottom: "25mm", left: "10mm" },
+      orientation: "portrait",
+      border: "10mm",
+      footer: {
+        height: "10mm",
+        contents: {
+          default:
+            '<div style="text-align: center; color: #666; font-size: 10px;">Página {{page}} de {{pages}}</div>',
+        },
+      },
     };
 
-    pdf.create(htmlContent, options).toBuffer((err, buffer) => {
-      if (err) return res.status(500).send("Error al generar PDF");
+    pdf.create(htmlContent, pdfOptions).toStream((err, stream) => {
+      if (err) {
+        console.error("Error generando PDF:", err);
+        return res.status(500).send("Error generando PDF");
+      }
+
       res.setHeader("Content-Type", "application/pdf");
-      res.send(buffer);
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="informe-compras-${fecha_inicio}-${fecha_fin}.pdf"`,
+      );
+      stream.pipe(res);
     });
   } catch (error) {
-    console.error("Error reporte productos PDF:", error);
+    console.error("❌ Error al generar PDF:", error);
     res.status(500).send("Error interno del servidor");
   }
 };
