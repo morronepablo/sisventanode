@@ -47,7 +47,7 @@ app.use(bodyParser.urlencoded({ limit: "50mb", extended: true }));
 app.use(
   helmet({
     crossOriginResourcePolicy: false, // Permite cargar imágenes desde el mismo servidor
-  })
+  }),
 );
 app.use(cors());
 app.use(morgan("dev"));
@@ -58,7 +58,7 @@ app.use("/assets/img", express.static(path.join(__dirname, "src/assets/img")));
 // Agregamos /src para que coincida con la ruta de tu base de datos
 app.use(
   "/src/assets/productos",
-  express.static(path.join(__dirname, "src/assets/productos"))
+  express.static(path.join(__dirname, "src/assets/productos")),
 );
 
 // Rutas
@@ -88,6 +88,7 @@ const backupRoutes = require("./routes/backupRoutes");
 const promocionesRoutes = require("./routes/promocionRoutes");
 const auditoriaRoutes = require("./routes/auditoriaRoutes");
 const alquimistaRoutes = require("./routes/alquimistaRoutes");
+const oracleRoutes = require("./routes/oracleRoutes");
 
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
@@ -115,6 +116,7 @@ app.use("/api/backup", backupRoutes);
 app.use("/api/promociones", promocionesRoutes);
 app.use("/api/auditoria", auditoriaRoutes);
 app.use("/api/alquimista", alquimistaRoutes);
+app.use("/api/oracle", oracleRoutes);
 
 app.get("/api/whatsapp-status", (req, res) => {
   const qr = getQR();
