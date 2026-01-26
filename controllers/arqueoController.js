@@ -577,53 +577,6 @@ const getArqueosSummary = async (req, res) => {
   }
 };
 
-// const getMonitorTiempoReal = async (req, res) => {
-//   try {
-//     const empresa_id = req.user.empresa_id;
-
-//     // 1. Buscamos todos los arqueos que estén ABIERTOS actualmente
-//     const query = `
-//       SELECT
-//         a.id as arqueo_id, a.caja_id, a.monto_inicial, a.fecha_apertura,
-//         u.name as cajero,
-//         -- Suma de Ventas por medio de pago
-//         (SELECT IFNULL(SUM(v.efectivo), 0) FROM ventas v WHERE v.arqueo_id = a.id) as ventas_efectivo,
-//         (SELECT IFNULL(SUM(v.tarjeta), 0) FROM ventas v WHERE v.arqueo_id = a.id) as ventas_tarjeta,
-//         (SELECT IFNULL(SUM(v.mercadopago), 0) FROM ventas v WHERE v.arqueo_id = a.id) as ventas_mp,
-//         -- Gastos registrados en este arqueo
-//         (SELECT IFNULL(SUM(g.monto), 0) FROM gastos g WHERE g.arqueo_id = a.id) as total_gastos,
-//         -- Retiros parciales realizados
-//         (SELECT IFNULL(SUM(r.monto), 0) FROM retiros_caja r WHERE r.arqueo_id = a.id) as total_retiros
-//       FROM arqueos a
-//       JOIN users u ON a.usuario_id = u.id
-//       WHERE a.empresa_id = ? AND a.estado = 'abierto'
-//     `;
-
-//     const [cajas] = await db.execute(query, [empresa_id]);
-
-//     const reporte = cajas.map((c) => {
-//       // Cálculo del Efectivo Real que DEBERÍA haber en el cajón en este momento
-//       const efectivoEnCaja =
-//         parseFloat(c.monto_inicial) +
-//         parseFloat(c.ventas_efectivo) -
-//         parseFloat(c.total_gastos) -
-//         parseFloat(c.total_retiros);
-
-//       return {
-//         ...c,
-//         efectivo_actual: efectivoEnCaja.toFixed(2),
-//         total_digital: (
-//           parseFloat(c.ventas_tarjeta) + parseFloat(c.ventas_mp)
-//         ).toFixed(2),
-//       };
-//     });
-
-//     res.json(reporte);
-//   } catch (error) {
-//     res.status(500).json({ error: error.message });
-//   }
-// };
-
 const getMonitorTiempoReal = async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
