@@ -20,5 +20,6 @@ if (!verify) {
 }
 
 router.get("/pulse", verify, oracleController.getPulse);
+router.get("/markup-analysis", verify, oracleController.getMarkupAnalysis);
 
 module.exports = router;

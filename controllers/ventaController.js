@@ -364,7 +364,7 @@ const deleteTmpVenta = async (req, res) => {
 
 const storeVenta = async (req, res) => {
   console.log(
-    "--- INICIO REGISTRO DE VENTA CON BILLETERA VIRTUAL Y MÉTRICAS DE TIEMPO ---",
+    "--- INICIO REGISTRO DE VENTA CON CUENTA CORRIENTE (TABLA: compras_cta_cte) ---",
   );
   try {
     // 1. Extraemos los datos básicos
@@ -375,21 +375,15 @@ const storeVenta = async (req, res) => {
       cargar_vuelto_billetera,
       vuelto_monto,
       pagos,
+      es_cuenta_corriente, // Asegúrate que el front envíe este flag
     } = req.body;
-
-    // 👇 AGREGA ESTE LOG PARA VER LOS VALORES REALES
-    console.log("🔍 Datos recibidos:", {
-      cliente_id,
-      cargar_vuelto_billetera,
-      vuelto_monto: parseFloat(vuelto_monto),
-      pagos,
-    });
 
     const montoBilleteraUsado = parseFloat(pagos?.pago_billetera || 0);
     const empresa_id = req.user.empresa_id;
     const usuario_id = req.user.id;
+    const caja_id = req.user.caja_id; // Obtenemos la caja del usuario logueado
 
-    // 🚀 1.1 LÓGICA BI: CAPTURAR TIEMPO DE INICIO (Antes de que se borre el temporal)
+    // 🚀 1.1 LÓGICA BI: CAPTURAR TIEMPO DE INICIO
     const [inicioRes] = await db.execute(
       "SELECT MIN(created_at) as inicio FROM tmp_ventas WHERE session_id = ?",
       [usuario_id],
@@ -402,24 +396,58 @@ const storeVenta = async (req, res) => {
       duracionSegundos = Math.floor((tiempoFin - tiempoInicio) / 1000);
     }
 
-    // 🚀 INICIALIZAMOS LA VARIABLE PARA EL MONITOR
     let nombreClienteParaWS = "Consumidor Final";
 
-    // 2. Guardar la venta (Maneja Multicaja, Stock y Puntos en la DB)
+    // 2. Guardar la venta principal
     const venta_id = await Venta.store(req.body, usuario_id, empresa_id);
 
-    // 🚀 2.1 LÓGICA BI: GUARDAR DURACIÓN EN LA VENTA REAL
+    // 🚀 2.1 LÓGICA DE PERSISTENCIA BILLETERA
+    if (montoBilleteraUsado > 0) {
+      await db.execute("UPDATE ventas SET billetera = ? WHERE id = ?", [
+        montoBilleteraUsado,
+        venta_id,
+      ]);
+    }
+
+    // 🚀 2.2 LÓGICA DE CUENTA CORRIENTE (TABLA: compras_cta_cte)
+    const totalPagado =
+      parseFloat(pagos?.efectivo || 0) +
+      parseFloat(pagos?.tarjeta || 0) +
+      parseFloat(pagos?.mercadopago || 0) +
+      parseFloat(pagos?.transferencia || 0) +
+      montoBilleteraUsado;
+
+    const montoDeuda = parseFloat(precio_total) - totalPagado;
+
+    if (es_cuenta_corriente && montoDeuda > 0) {
+      console.log(
+        `[CTA_CTE] Registrando deuda de $${montoDeuda} para cliente ${cliente_id}`,
+      );
+
+      await db.execute(
+        `INSERT INTO compras_cta_cte 
+          (venta_id, cliente_id, importe, metodo_pago, tipo, fecha, empresa_id, caja_id, created_at, updated_at) 
+         VALUES (?, ?, ?, NULL, 'deuda', CURDATE(), ?, ?, NOW(), NOW())`,
+        [
+          venta_id,
+          cliente_id,
+          montoDeuda,
+          empresa_id,
+          req.user.caja_id,
+          // NOW() se encarga de created_at y updated_at directamente en SQL
+        ],
+      );
+    }
+
+    // 🚀 2.3 LÓGICA BI: GUARDAR DURACIÓN
     if (duracionSegundos > 0) {
       await db.execute("UPDATE ventas SET duracion_segundos = ? WHERE id = ?", [
         duracionSegundos,
         venta_id,
       ]);
-      console.log(
-        `[BI] Venta T-${venta_id} procesada en ${duracionSegundos} segundos.`,
-      );
     }
 
-    // --- OBTENEMOS EL CANAL DE SOCKETS ---
+    // --- SOCKETS ---
     const io = req.app.get("socketio");
     if (io) io.emit("update-dashboard");
 
@@ -429,23 +457,19 @@ const storeVenta = async (req, res) => {
         "SELECT saldo_billetera FROM clientes WHERE id = ?",
         [cliente_id],
       );
-
-      if (cliente[0].saldo_billetera < montoBilleteraUsado) {
-        console.error("Saldo insuficiente en Billetera para la transacción.");
-      } else {
+      if (cliente[0].saldo_billetera >= montoBilleteraUsado) {
         await db.execute(
           "UPDATE clientes SET saldo_billetera = saldo_billetera - ? WHERE id = ?",
           [montoBilleteraUsado, cliente_id],
         );
-
         await db.execute(
           "INSERT INTO movimientos_billetera (cliente_id, monto, tipo, descripcion, caja_id, usuario_id) VALUES (?, ?, 'consumo', ?, ?, ?)",
           [
             cliente_id,
             montoBilleteraUsado,
-            `Pago de Venta T-${venta_id}`,
-            req.user.caja_id,
-            req.user.id,
+            `Pago Venta T-${venta_id}`,
+            caja_id,
+            usuario_id,
           ],
         );
       }
@@ -457,22 +481,18 @@ const storeVenta = async (req, res) => {
       vuelto_monto > 0 &&
       Number(cliente_id) !== 1
     ) {
-      console.log(
-        `✅ Cargando $${vuelto_monto} a billetera del cliente ${cliente_id}`,
-      );
       await db.execute(
         "UPDATE clientes SET saldo_billetera = saldo_billetera + ? WHERE id = ?",
         [vuelto_monto, cliente_id],
       );
-
       await db.execute(
         "INSERT INTO movimientos_billetera (cliente_id, monto, tipo, descripcion, caja_id, usuario_id) VALUES (?, ?, 'carga', ?, ?, ?)",
         [
           cliente_id,
           vuelto_monto,
-          `Vuelto de Venta T-${venta_id}`,
-          req.user.caja_id,
-          req.user.id,
+          `Vuelto Venta T-${venta_id}`,
+          caja_id,
+          usuario_id,
         ],
       );
     }
@@ -504,7 +524,7 @@ const storeVenta = async (req, res) => {
       }
     }
 
-    // 6. Alerta de Stock al Dueño
+    // 6. Alerta de Stock al Dueño (Optimizado)
     const telefonoEmpresa = await getEmpresaPhone(empresa_id);
     if (telefonoEmpresa && items) {
       for (const item of items) {
@@ -531,7 +551,7 @@ const storeVenta = async (req, res) => {
       req,
       "CREAR",
       "VENTAS",
-      `Venta registrada. Ticket: ${venta_id}. Tiempo: ${duracionSegundos}s`,
+      `Venta registrada. Ticket: ${venta_id}. Deuda CtaCte: $${montoDeuda}`,
     );
 
     // 8. EMISIÓN PARA MODO WALL STREET
