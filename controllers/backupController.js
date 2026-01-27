@@ -25,7 +25,7 @@ const createBackup = async (req, res) => {
         return res
           .status(500)
           .send(
-            "Error al crear backup. Asegúrese de que mysqldump esté instalado."
+            "Error al crear backup. Asegúrese de que mysqldump esté instalado.",
           );
       }
 
@@ -36,7 +36,7 @@ const createBackup = async (req, res) => {
           req,
           "BACKUP",
           "SISTEMA",
-          "Se descargó una copia de seguridad de la base de datos."
+          "Se descargó una copia de seguridad de la base de datos.",
         );
       });
     });
@@ -57,6 +57,7 @@ const resetSystem = async (req, res) => {
     const tablasAVaciar = [
       "ajustes",
       "arqueos",
+      "auditoria_seguridad",
       "categorias",
       "combo_producto",
       "combos",
@@ -67,14 +68,18 @@ const resetSystem = async (req, res) => {
       "detalle_ventas",
       "devoluciones",
       "gastos",
+      "historial_patrimonio",
       "historial_precios",
       "logs",
-      "movimiento_cajas",
       "movimientos",
+      "movimientos_billetera",
+      "movimiento_cajas",
       "pagos",
       "pago_compras",
       "productos",
+      "promociones",
       "proveedors",
+      "retiros_caja",
       "tmp_ventas",
       "tmp_devoluciones",
       "tmp_compras",
@@ -88,7 +93,7 @@ const resetSystem = async (req, res) => {
     // 3. Resetear ROLES (Borrar todo y poner el Administrador ID 1)
     await connection.query("TRUNCATE TABLE roles");
     await connection.query(
-      "INSERT INTO roles (id, name) VALUES (1, 'Administrador')"
+      "INSERT INTO roles (id, name) VALUES (1, 'Administrador')",
     );
 
     // 4. Resetear CLIENTES (Borrar todo y poner Consumidor Final ID 1)
@@ -106,7 +111,7 @@ const resetSystem = async (req, res) => {
     // 6. Resetear Relación Usuario-Rol
     await connection.query("TRUNCATE TABLE user_roles");
     await connection.query(
-      "INSERT INTO user_roles (user_id, role_id) VALUES (1, 1)"
+      "INSERT INTO user_roles (user_id, role_id) VALUES (1, 1)",
     );
 
     // 7. Reactivar revisión de llaves foráneas
@@ -119,7 +124,7 @@ const resetSystem = async (req, res) => {
       req,
       "DELETE",
       "SISTEMA",
-      "RESETEO TOTAL DEL SISTEMA A VALORES DE FÁBRICA."
+      "RESETEO TOTAL DEL SISTEMA A VALORES DE FÁBRICA.",
     );
 
     res.json({ success: true, message: "Sistema reseteado correctamente" });
